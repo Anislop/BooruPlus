@@ -1,0 +1,26 @@
+name: booruplus
+description: An Android-first Flutter imageboard browser powered by imageboard-api.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.5.5
+  flutter_secure_storage: ^11.1.1
+  video_player: ^2.14.0
+  chewie: ^1.16.3
+  url_launcher: ^6.3.2
+
+dev_dependencies:
+  integration_test:
+    sdk: flutter
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

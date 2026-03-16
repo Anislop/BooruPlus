@@ -1,1 +1,17 @@
-# GitIgnore
+# AI-Assistance Related
+AGENTS.md
+.codex/
+.agents/
+
+# Flutter / Dart generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+*.iml
+.idea/
+*.log
