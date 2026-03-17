@@ -26,7 +26,7 @@ extension BoardInfo on Board {
   String get host => switch (this) {
     Board.safebooru => 'safebooru.org',
     Board.danbooru => 'danbooru.donmai.us',
-    Board.konachan => 'konachan.net',
+        Board.konachan => 'konachan.com',
     Board.yandere => 'yande.re',
     Board.e926 => 'e926.net',
     Board.e621 => 'e621.net',
