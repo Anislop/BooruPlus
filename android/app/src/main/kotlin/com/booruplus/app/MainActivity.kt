@@ -120,7 +120,11 @@ class MainActivity : FlutterActivity() {
             if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
             // pid-based boards are zero based; page-based boards are one based.
             val number = providerPage + if (board in setOf("rule34", "gelbooru", "safebooru")) 0 else 1
-            val batch = api.search(number, size, tags.joinToString(" ")).blocking()
+            val batch = if (tags.isEmpty()) {
+                api.get(number, size).blocking()
+            } else {
+                api.search(number, size, tags.joinToString(" ")).blocking()
+            }
             result.addAll(batch.drop(skip).take(limit - result.size))
             if (batch.size < size) break
             skip = 0
