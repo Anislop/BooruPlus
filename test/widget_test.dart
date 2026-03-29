@@ -37,37 +37,34 @@ void main() {
     state.dispose();
   });
 
-  testWidgets('first launch chooses board, browse, then change website', (
-    tester,
-  ) async {
-    final state = AppState(
-      repository: FakeRepo(const [[]]),
-      store: MemoryStore(),
-    );
-    await tester.pumpWidget(BooruPlusApp(state: state));
-    await tester.pumpAndSettle();
-    expect(
-      find.text('A world of images.\nYour way to explore.'),
-      findsOneWidget,
-    );
-    final button = find.text('Explore Safebooru');
-    await tester.scrollUntilVisible(button, 350);
-    await tester.tap(button);
-    await tester.pumpAndSettle();
-    expect(find.text('DISCOVER'), findsOneWidget);
-    await tester.tap(find.byTooltip('Open navigation menu'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Change website'));
-    await tester.pumpAndSettle();
-    expect(
-      find.text(
-        'Choose your imageboard to get started.\nYou can switch websites anytime.',
-      ),
-      findsOneWidget,
-    );
-    await tester.pumpWidget(const SizedBox());
-    state.dispose();
-  });
+  testWidgets(
+    'first launch chooses board, browse, then switches from the site list',
+    (tester) async {
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore(),
+      );
+      await tester.pumpWidget(BooruPlusApp(state: state));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('A world of images.\nYour way to explore.'),
+        findsOneWidget,
+      );
+      final button = find.text('Explore Safebooru');
+      await tester.scrollUntilVisible(button, 350);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(find.text('DISCOVER'), findsOneWidget);
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+      expect(find.text('Websites'), findsOneWidget);
+      await tester.tap(find.text('Danbooru'));
+      await tester.pumpAndSettle();
+      expect(find.text('Danbooru'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
 
   testWidgets('space tokenizes tags, preserves partial input, X removes tag', (
     tester,

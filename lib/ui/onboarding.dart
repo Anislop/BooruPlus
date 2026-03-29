@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import 'theme.dart';
+import 'site_catalog.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key, required this.state});
@@ -90,7 +91,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Material(
-                    color: _selected == board ? const Color(0xFF26372E) : panel,
+                    color: _selected == board
+                        ? appearanceFor(board).surface
+                        : panel,
                     borderRadius: BorderRadius.circular(18),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(18),
@@ -104,23 +107,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                         child: Row(
                           children: [
-                            Container(
-                              width: 42,
-                              height: 42,
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: .06),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                board.label.substring(0, 1).toUpperCase(),
-                                style: const TextStyle(
-                                  fontSize: 23,
-                                  fontWeight: FontWeight.w700,
-                                  color: accent,
-                                ),
-                              ),
-                            ),
+                            BoardIcon(board),
                             const SizedBox(width: 14),
                             Expanded(
                               child: Column(
@@ -160,7 +147,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                   ? Icons.radio_button_checked
                                   : Icons.radio_button_off,
                               color: _selected == board
-                                  ? accent
+                                  ? appearanceFor(board).accent
                                   : Colors.white30,
                             ),
                           ],
@@ -182,7 +169,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 Padding(
                   padding: const EdgeInsets.only(top: 16),
                   child: Text(
-                    _error!,
+                    _error ?? widget.state.error!,
                     style: const TextStyle(color: Colors.orangeAccent),
                   ),
                 ),

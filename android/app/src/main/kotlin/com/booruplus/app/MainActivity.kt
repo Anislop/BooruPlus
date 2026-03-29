@@ -15,6 +15,7 @@ import io.flutter.plugin.common.MethodChannel
 import net.kodehawa.lib.imageboards.ImageBoard
 import net.kodehawa.lib.imageboards.ImageBoards
 import net.kodehawa.lib.imageboards.entities.BoardImage
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.io.FilterInputStream
 import java.io.IOException
@@ -35,7 +36,10 @@ class MainActivity : FlutterActivity() {
     private var directoryResult: MethodChannel.Result? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
     private val discoveryWindows = ConcurrentHashMap<Int, Int>()
+    private val providerCursors = ConcurrentHashMap<String, ProviderCursor>()
     @Volatile private var closing = false
+
+    private data class ProviderCursor(val page: Int, val offset: Int)
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -81,7 +85,9 @@ class MainActivity : FlutterActivity() {
         val limit = (call.argument<Number>("limit") ?: 50).toInt().coerceIn(1, 200)
         val page = (call.argument<Number>("page") ?: 0).toInt().coerceIn(0, 10000)
         val random = call.argument<Boolean>("random") ?: false
-        val seed = (call.argument<Number>("randomSeed") ?: 0).toInt()
+        // Older callers do not send a seed. Keep those requests random while allowing
+        // newer callers to make a discovery session reproducible.
+        val seed = call.argument<Number>("randomSeed")?.toInt() ?: Random.nextInt()
         val key = call.argument<String>("apiKey")
         val user = call.argument<String>("userId")
         if (board in setOf("rule34", "gelbooru") && (key.isNullOrBlank() || user.isNullOrBlank())) {
@@ -99,24 +105,44 @@ class MainActivity : FlutterActivity() {
                 else -> boards.SAFEBOORU
             }
             val window = if (random) discoveryWindows.getOrPut(seed) { Random(seed).nextInt(21) } else 0
-            var images = fetchWindow(api, board!!, tags, page, limit, window)
+            val cursorKey = makeCursorKey(board!!, tags, limit, random, seed)
+            if (page == 0) providerCursors.remove(cursorKey)
+            var images = fetchWindow(api, board, tags, page, limit, window, cursorKey)
             if (random && page == 0 && images.isEmpty() && window > 0) {
                 discoveryWindows[seed] = 0
-                images = fetchWindow(api, board, tags, page, limit, 0)
+                providerCursors.remove(cursorKey)
+                images = fetchWindow(api, board, tags, page, limit, 0, cursorKey)
             }
             if (discoveryWindows.size > 128) discoveryWindows.keys.filter { it != seed }.take(64).forEach { discoveryWindows.remove(it) }
+            if (providerCursors.size > 256) providerCursors.keys.take(128).forEach { providerCursors.remove(it) }
             val ordered = if (random) images.shuffled(Random(seed xor page)) else images
-            ordered.map { mapImage(it, board) }
+            ordered.map { mapImage(it, board, key, user) }
         }
     }
 
-    private fun fetchWindow(api: ImageBoard<*>, board: String, tags: List<String>, page: Int, limit: Int, window: Int): List<BoardImage> {
+    private fun makeCursorKey(board: String, tags: List<String>, limit: Int, random: Boolean, seed: Int): String =
+        listOf(board, tags.joinToString("\u0001"), limit.toString(), random.toString(), seed.toString()).joinToString("\u0002")
+
+    private fun fetchWindow(
+        api: ImageBoard<*>,
+        board: String,
+        tags: List<String>,
+        page: Int,
+        limit: Int,
+        window: Int,
+        cursorKey: String,
+    ): List<BoardImage> {
+        // Danbooru is page-based (and one-based), unlike pid-based boorus. Use a
+        // stable provider page size so a Flutter page can span multiple responses.
         val size = minOf(limit, 100)
         val offset = page.toLong() * limit
-        var providerPage = (offset / size).toInt() + window
-        var skip = (offset % size).toInt()
+        val fallback = ProviderCursor((offset / size).toInt() + window, (offset % size).toInt())
+        val start = if (page == 0) ProviderCursor(window, 0) else providerCursors[cursorKey] ?: fallback
+        var providerPage = start.page
+        var skip = start.offset
         val result = ArrayList<BoardImage>()
-        while (result.size < limit) {
+        var requests = 0
+        while (result.size < limit && requests++ < MAX_WINDOW_REQUESTS) {
             if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
             // pid-based boards are zero based; page-based boards are one based.
             val number = providerPage + if (board in setOf("rule34", "gelbooru", "safebooru")) 0 else 1
@@ -125,17 +151,37 @@ class MainActivity : FlutterActivity() {
             } else {
                 api.search(number, size, tags.joinToString(" ")).blocking()
             }
-            result.addAll(batch.drop(skip).take(limit - result.size))
-            if (batch.size < size) break
+            val take = minOf(limit - result.size, (batch.size - skip).coerceAtLeast(0))
+            if (take > 0) result.addAll(batch.drop(skip).take(take))
+            // A non-empty short page is not an end marker. Some providers (notably
+            // Danbooru searches) can return fewer rows than requested and still have
+            // later pages. Only an empty response ends the window.
+            if (batch.isEmpty()) {
+                providerCursors[cursorKey] = ProviderCursor(providerPage, batch.size)
+                break
+            }
+            if (result.size >= limit) {
+                val consumed = skip + take
+                providerCursors[cursorKey] = if (consumed < batch.size) {
+                    ProviderCursor(providerPage, consumed)
+                } else {
+                    ProviderCursor(providerPage + 1, 0)
+                }
+                break
+            }
             skip = 0
             providerPage++
+            providerCursors[cursorKey] = ProviderCursor(providerPage, 0)
         }
         return result
     }
 
-    private fun mapImage(image: BoardImage, board: String): Map<String, Any?> {
-        val original = normalizeUrl(image.getURL(), board)
-        val preview = normalizeUrl(value(image, "getParsedPreviewFileUrl", "getPreview_url", "getPreviewUrl")?.toString(), board)
+    private fun mapImage(image: BoardImage, board: String, apiKey: String?, userId: String?): Map<String, Any?> {
+        val original = authorizeMediaUrl(normalizeUrl(image.getURL(), board), board, apiKey, userId)
+        val preview = authorizeMediaUrl(
+            normalizeUrl(value(image, "getParsedPreviewFileUrl", "getPreview_url", "getPreviewUrl")?.toString(), board),
+            board, apiKey, userId
+        )
         return mapOf(
             "id" to (value(image, "getId")?.toString() ?: "0"),
             "url" to original, "previewUrl" to preview,
@@ -154,6 +200,20 @@ class MainActivity : FlutterActivity() {
             if (uri.userInfo != null || uri.host.isNullOrBlank() || uri.scheme !in setOf("http", "https")) ""
             else URI("https", null, uri.host, if (uri.port == 80) -1 else uri.port, uri.path, uri.query, null).toASCIIString()
         } catch (_: Exception) { "" }
+    }
+
+    private fun authorizeMediaUrl(url: String, board: String, apiKey: String?, userId: String?): String {
+        if (board != "gelbooru" || url.isBlank() || apiKey.isNullOrBlank() || userId.isNullOrBlank()) return url
+        return try {
+            val parsed = url.toHttpUrlOrNull() ?: return url
+            val host = parsed.host
+            if (host != "gelbooru.com" && !host.endsWith(".gelbooru.com")) return url
+            parsed.newBuilder()
+                .setQueryParameter("api_key", apiKey)
+                .setQueryParameter("user_id", userId)
+                .build()
+                .toString()
+        } catch (_: IllegalArgumentException) { url }
     }
 
     private fun sourceValue(image: BoardImage): String {
@@ -303,6 +363,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val PICKER = 4101
+        private const val MAX_WINDOW_REQUESTS = 32
         private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net")
     }
 }

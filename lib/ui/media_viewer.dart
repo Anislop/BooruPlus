@@ -41,7 +41,14 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   Future<void> _initializeVideo() async {
-    final video = VideoPlayerController.networkUrl(Uri.parse(widget.post.url));
+    final url = _mediaUrl(widget.post);
+    if (url.isEmpty) {
+      if (mounted) {
+        setState(() => _videoError = 'This video has no playable URL.');
+      }
+      return;
+    }
+    final video = VideoPlayerController.networkUrl(Uri.parse(url));
     _video = video;
     try {
       await video.initialize();
@@ -88,13 +95,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     setState(() => _downloading = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final path = Uri.parse(widget.post.url).path;
+      final url = _mediaUrl(widget.post);
+      if (url.isEmpty) throw StateError('Missing media URL');
+      final path = Uri.parse(url).path;
       final extension = path.contains('.')
           ? path.split('.').last.replaceAll(RegExp('[^a-zA-Z0-9]'), '')
           : 'jpg';
       await const MethodChannel('booruplus/platform')
           .invokeMethod<String>('download', {
-            'url': widget.post.url,
+            'url': url,
             'name': '${widget.board.name}_${widget.post.id}.$extension',
             'directory': widget.state.settings.downloadDirectory,
           });
@@ -200,28 +209,39 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                         minScale: .5,
                         maxScale: 8,
                         child: Center(
-                          child: Image.network(
-                            post.url,
-                            fit: BoxFit.contain,
-                            loadingBuilder: (_, child, progress) =>
-                                progress == null
-                                ? child
-                                : Center(
-                                    child: CircularProgressIndicator(
-                                      value: progress.expectedTotalBytes == null
-                                          ? null
-                                          : progress.cumulativeBytesLoaded /
-                                                progress.expectedTotalBytes!,
+                          child: _mediaUrl(post).isEmpty
+                              ? const Padding(
+                                  padding: EdgeInsets.all(24),
+                                  child: Text(
+                                    'The original image is unavailable. It may have been removed or require website access.',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              : Image.network(
+                                  _mediaUrl(post),
+                                  fit: BoxFit.contain,
+                                  loadingBuilder: (_, child, progress) =>
+                                      progress == null
+                                      ? child
+                                      : Center(
+                                          child: CircularProgressIndicator(
+                                            value:
+                                                progress.expectedTotalBytes ==
+                                                    null
+                                                ? null
+                                                : progress.cumulativeBytesLoaded /
+                                                      progress
+                                                          .expectedTotalBytes!,
+                                          ),
+                                        ),
+                                  errorBuilder: (_, _, _) => const Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Text(
+                                      'The original image is unavailable. It may have been removed or require website access.',
+                                      textAlign: TextAlign.center,
                                     ),
                                   ),
-                            errorBuilder: (_, _, _) => const Padding(
-                              padding: EdgeInsets.all(24),
-                              child: Text(
-                                'The original image is unavailable. It may have been removed or require website access.',
-                                textAlign: TextAlign.center,
-                              ),
-                            ),
-                          ),
+                                ),
                         ),
                       ),
                     ),
@@ -408,4 +428,24 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+String _mediaUrl(MediaPost post) {
+  final dynamic value = post;
+  try {
+    final authenticated = value.authenticatedUrl;
+    if (authenticated is String && authenticated.isNotEmpty) {
+      return authenticated;
+    }
+  } catch (_) {}
+  try {
+    final urls = value.urlMap;
+    if (urls is Map) {
+      for (final key in const ['original', 'file', 'url']) {
+        final candidate = urls[key];
+        if (candidate is String && candidate.isNotEmpty) return candidate;
+      }
+    }
+  } catch (_) {}
+  return post.url;
 }

@@ -40,6 +40,7 @@ class FakeRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) async {
     calls++;
@@ -57,6 +58,98 @@ Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
 };
 
 void main() {
+  test('settings default no-AI and legacy JSON migration are compatible', () {
+    expect(const AppSettings().excludeAi, isTrue);
+    final migrated = AppSettings.fromMap({'columns': 3});
+    expect(migrated.excludeAi, isTrue);
+    expect(
+      AppSettings.fromMap({
+        'noAi': false,
+        'savedQueries': [
+          [' Cat ', 'cat', ' dog '],
+        ],
+      }).excludeAi,
+      isFalse,
+    );
+    expect(migrated.toMap(), containsPair('excludeAi', isTrue));
+  });
+
+  test('saved queries persist without reloading the active feed', () async {
+    final repo = FakeRepo(const [[]]);
+    final store = MemoryStore()..selected = Board.safebooru;
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    await state.addSavedQuery([' Cat ', 'cat']);
+    expect(state.savedQueries, [
+      ['cat'],
+    ]);
+    expect(repo.calls, 1);
+    await state.removeSavedQuery(['CAT']);
+    expect(state.savedQueries, isEmpty);
+  });
+
+  test('filtered pages continue until an allowed post is found', () async {
+    final repo = FakeRepo([
+      [
+        post(1, tags: [' AI_GENERATED ']),
+      ],
+      [
+        post(2, tags: ['allowed']),
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    expect(state.posts.map((value) => value.id), [2]);
+    expect(repo.calls, greaterThanOrEqualTo(2));
+  });
+
+  test('no-AI query and local filtering can be disabled', () async {
+    final repo = FakeRepo([
+      [
+        post(1, tags: ['ai_generated']),
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    expect(state.posts, isEmpty);
+    expect(repo.queries.first, contains('-ai_generated'));
+    await state.updateSettings(const AppSettings(excludeAi: false));
+    expect(state.posts.map((value) => value.id), [1]);
+    expect(repo.queries.last, isNot(contains('-ai_generated')));
+  });
+
+  test('search query composes blacklist and no-AI exclusions', () async {
+    final repo = FakeRepo(const [[]]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    await state.updateSettings(const AppSettings(blacklist: [' Blocked ']));
+    await state.search([' Cat ']);
+    expect(repo.queries.last, ['Cat', '-blocked', '-ai_generated']);
+  });
+
+  test(
+    'Danbooru keeps a two-tag search within the anonymous tag budget',
+    () async {
+      final repo = FakeRepo(const [[]]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.danbooru,
+      );
+      await state.initialize();
+      await state.search(['artist_tag', 'character_tag']);
+      expect(repo.queries.last, ['artist_tag', 'character_tag']);
+    },
+  );
+
   test('settings clamp and directory can be cleared', () {
     final settings = const AppSettings(
       columns: 99,
@@ -222,7 +315,7 @@ void main() {
     await state.initialize();
     expect(state.posts, isEmpty);
     await state.loadMore();
-    expect(repo.pages, [0, 0]);
+    expect(repo.pages, [0, 0, 1, 2]);
     expect(state.posts.map((p) => p.id), [4]);
   });
 
@@ -234,7 +327,7 @@ void main() {
     await state.loadMore();
     expect(repo.pages, [0, 1]);
     await state.loadMore();
-    expect(repo.pages, [0, 1, 1]);
+    expect(repo.pages, [0, 1, 1, 2, 3]);
     expect(state.posts.map((p) => p.id), contains(100));
   });
 
@@ -273,6 +366,7 @@ class _DelayedRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) {
     calls++;
@@ -292,6 +386,7 @@ class _FailingRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) => Future.error(StateError('probe failed'));
 }
@@ -307,6 +402,7 @@ class _BoardSwitchRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) {
     if (board == Board.safebooru && safeCalls++ > 0) return oldRequest.future;
@@ -330,6 +426,7 @@ class _FailOnceRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) {
     pages.add(page);
@@ -348,6 +445,7 @@ class _FailLaterRepo implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) {
     pages.add(page);

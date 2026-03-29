@@ -193,6 +193,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   () => _settings = _settings.copyWith(batchSize: v),
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Material(
+                  color: panel,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: SwitchListTile.adaptive(
+                    value: _settings.excludeAi,
+                    onChanged: _busy
+                        ? null
+                        : (value) => setState(
+                            () => _settings = _settings.copyWith(
+                              excludeAi: value,
+                            ),
+                          ),
+                    secondary: const Icon(Icons.auto_awesome_outlined),
+                    title: const Text('No AI-generated posts'),
+                    subtitle: const Text(
+                      'Automatically exclude posts tagged ai_generated from search and discovery feeds.',
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
+                ),
+              ),
               const SectionLabel('Blacklisted tags'),
               const Text(
                 'Blocked tags are added to every query and filtered from returned posts. Enter a tag, then press space.',

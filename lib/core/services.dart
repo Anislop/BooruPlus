@@ -13,6 +13,7 @@ abstract interface class BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   });
 }
@@ -38,6 +39,7 @@ class PlatformBoardRepository implements BoardRepository {
     required int limit,
     required int page,
     required bool random,
+    int? randomSeed,
     Credentials? credentials,
   }) async {
     final response = await channel.invokeMethod<List<dynamic>>('fetch', {
@@ -46,6 +48,7 @@ class PlatformBoardRepository implements BoardRepository {
       'limit': limit,
       'page': page,
       'random': random,
+      'randomSeed': randomSeed,
       'apiKey': credentials?.apiKey,
       'userId': credentials?.userId,
     });

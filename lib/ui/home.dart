@@ -4,6 +4,7 @@ import '../core/app_state.dart';
 import '../core/models.dart';
 import 'media_viewer.dart';
 import 'settings.dart';
+import 'site_catalog.dart';
 import 'tag_input.dart';
 import 'theme.dart';
 
@@ -37,30 +38,167 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.state.search(tags);
   }
 
+  Future<void> _saveAndShowQueries() async {
+    if (widget.state.tags.isNotEmpty) {
+      await widget.state.addSavedQuery(widget.state.tags);
+    }
+    if (mounted) await _showSavedQueries();
+  }
+
+  Future<void> _showSavedQueries() async {
+    final savedQueries = widget.state.savedQueries;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: savedQueries.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.all(28),
+                child: Text(
+                  'No saved searches yet. Search tags, then tap the bookmark to save them.',
+                ),
+              )
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  const ListTile(
+                    title: Text('Saved searches'),
+                    leading: Icon(Icons.bookmarks_outlined),
+                  ),
+                  for (final query in savedQueries)
+                    ListTile(
+                      title: Text(query.join(' ')),
+                      leading: const Icon(Icons.search_rounded),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _search(query);
+                      },
+                      trailing: IconButton(
+                        tooltip: 'Delete saved search',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () async {
+                          await widget.state.removeSavedQuery(query);
+                          if (context.mounted) Navigator.pop(context);
+                        },
+                      ),
+                    ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Future<void> _pickDate() async {
+    final board = widget.state.board;
+    if (board == null) return;
+    if (board == Board.gelbooru || board == Board.rule34) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This website does not expose date searches; use newest/oldest sorting instead.',
+          ),
+        ),
+      );
+      return;
+    }
+    final date = await showDatePicker(
+      context: context,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now(),
+      initialDate: DateTime.now(),
+    );
+    if (date == null || !mounted) return;
+    final value =
+        '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    final dateTag = board == Board.danbooru
+        ? 'date:>=$value'
+        : 'created_at:>=$value';
+    _search([
+      ...widget.state.tags.where(
+        (tag) => !tag.startsWith('created_at:') && !tag.startsWith('date:'),
+      ),
+      dateTag,
+    ]);
+  }
+
+  void _chooseFilter(String filter) {
+    final board = widget.state.board;
+    if (board == null) return;
+    final tags = widget.state.tags
+        .where((tag) => !tag.startsWith('order:') && !tag.startsWith('sort:'))
+        .toList();
+    final sort = _sortTag(board, filter);
+    _search(sort == null ? tags : [...tags, sort]);
+  }
+
+  String? _sortTag(Board board, String filter) {
+    if (filter == 'none') return null;
+    final gelbooruSyntax = board == Board.gelbooru || board == Board.rule34;
+    if (gelbooruSyntax) {
+      return switch (filter) {
+        'score' => 'sort:score',
+        'quality' => 'sort:width:desc',
+        'newest' => 'sort:id:desc',
+        'oldest' => 'sort:id:asc',
+        // Gelbooru does not expose a favorites ordering in its search syntax.
+        'favorites' => 'sort:score',
+        _ => null,
+      };
+    }
+    return switch (filter) {
+      'score' => 'order:score',
+      'favorites' => 'order:favcount',
+      'quality' => 'order:mpixels',
+      'newest' => 'order:id_desc',
+      'oldest' => 'order:id_asc',
+      _ => null,
+    };
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: widget.state,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final state = widget.state;
-    final board = state.board!;
+    final board = state.board;
+    if (board == null) return const SizedBox.shrink();
+    final site = appearanceFor(board);
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: site.surface,
         title: Row(
           children: [
+            Icon(site.icon, size: 21, color: site.accent),
+            const SizedBox(width: 8),
             Flexible(
               child: Text(
-                board.label,
+                site.name,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ),
-            const SizedBox(width: 8),
-            const Icon(
-              Icons.keyboard_arrow_down,
-              color: Colors.white38,
-              size: 19,
-            ),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: state.tags.isEmpty
+                ? 'Saved searches'
+                : 'Save and open saved searches',
+            onPressed: _saveAndShowQueries,
+            icon: Icon(
+              state.tags.isEmpty
+                  ? Icons.bookmarks_outlined
+                  : Icons.bookmark_add_outlined,
+            ),
+          ),
+          if (state.savedQueries.isNotEmpty)
+            IconButton(
+              tooltip: 'Open saved searches',
+              onPressed: _showSavedQueries,
+              icon: const Icon(Icons.history_rounded),
+            ),
           IconButton(
             tooltip: 'Refresh feed',
             onPressed: state.refresh,
@@ -114,27 +252,39 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                 },
               ),
-              ListTile(
-                leading: const Icon(Icons.swap_horiz_rounded),
-                title: const Text('Change website'),
-                onTap: () async {
-                  Navigator.pop(context);
-                  try {
-                    await state.changeWebsite();
-                  } catch (_) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Could not save the website change. Please try again.',
-                          ),
-                        ),
-                      );
-                    }
-                  }
-                },
+              const Padding(
+                padding: EdgeInsets.fromLTRB(24, 16, 24, 4),
+                child: Text(
+                  'Websites',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
-              const Spacer(),
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    for (final option in Board.values)
+                      ListTile(
+                        dense: true,
+                        selected: option == board,
+                        leading: Icon(
+                          appearanceFor(option).icon,
+                          color: appearanceFor(option).accent,
+                        ),
+                        title: Text(appearanceFor(option).name),
+                        onTap: option == board
+                            ? null
+                            : () async {
+                                Navigator.pop(context);
+                                await state.chooseBoard(option);
+                              },
+                      ),
+                  ],
+                ),
+              ),
               const Padding(
                 padding: EdgeInsets.all(24),
                 child: Text(
@@ -158,6 +308,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: TagInput(tags: state.tags, onChanged: _search),
                 ),
               ),
+            ),
+            FilterBar(
+              board: board,
+              tags: state.tags,
+              onFilter: _chooseFilter,
+              onDate: _pickDate,
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
@@ -347,19 +503,35 @@ class MediaTile extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Image.network(
-              post.previewUrl.isNotEmpty ? post.previewUrl : post.url,
-              fit: BoxFit.cover,
-              cacheWidth: 480,
-              loadingBuilder: (context, child, progress) => progress == null
-                  ? child
-                  : const Center(
-                      child: Icon(Icons.image_outlined, color: Colors.white12),
-                    ),
-              errorBuilder: (_, _, _) => const Center(
-                child: Icon(Icons.broken_image_outlined, color: Colors.white24),
+            if (_displayUrl(post).isNotEmpty)
+              Image.network(
+                post.previewUrl.isNotEmpty
+                    ? post.previewUrl
+                    : _displayUrl(post),
+                fit: BoxFit.cover,
+                cacheWidth: 480,
+                loadingBuilder: (context, child, progress) => progress == null
+                    ? child
+                    : const Center(
+                        child: Icon(
+                          Icons.image_outlined,
+                          color: Colors.white12,
+                        ),
+                      ),
+                errorBuilder: (_, _, _) => const Center(
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white24,
+                  ),
+                ),
+              )
+            else
+              const Center(
+                child: Icon(
+                  Icons.image_not_supported_outlined,
+                  color: Colors.white24,
+                ),
               ),
-            ),
             if (post.isVideo)
               const Center(
                 child: CircleAvatar(
@@ -391,4 +563,82 @@ class MediaTile extends StatelessWidget {
       ),
     ),
   );
+}
+
+String _displayUrl(MediaPost post) {
+  final dynamic value = post;
+  try {
+    final authenticated = value.authenticatedUrl;
+    if (authenticated is String && authenticated.isNotEmpty) {
+      return authenticated;
+    }
+  } catch (_) {}
+  try {
+    final urls = value.urlMap;
+    if (urls is Map) {
+      for (final key in const ['preview', 'thumbnail', 'original', 'url']) {
+        final candidate = urls[key];
+        if (candidate is String && candidate.isNotEmpty) return candidate;
+      }
+    }
+  } catch (_) {}
+  return post.url;
+}
+
+class FilterBar extends StatelessWidget {
+  const FilterBar({
+    super.key,
+    required this.board,
+    required this.tags,
+    required this.onFilter,
+    required this.onDate,
+  });
+  final Board board;
+  final List<String> tags;
+  final ValueChanged<String> onFilter;
+  final VoidCallback onDate;
+
+  @override
+  Widget build(BuildContext context) {
+    final order = tags
+        .where((tag) => tag.startsWith('order:') || tag.startsWith('sort:'))
+        .firstOrNull;
+    final date = tags
+        .where(
+          (tag) => tag.startsWith('created_at:') || tag.startsWith('date:'),
+        )
+        .firstOrNull;
+    final gelbooruSyntax = board == Board.gelbooru || board == Board.rule34;
+    final sortItems = <PopupMenuEntry<String>>[
+      const PopupMenuItem(value: 'none', child: Text('Relevance / default')),
+      const PopupMenuItem(value: 'score', child: Text('Popularity / score')),
+      if (!gelbooruSyntax)
+        const PopupMenuItem(value: 'favorites', child: Text('Favorites')),
+      const PopupMenuItem(value: 'quality', child: Text('Quality')),
+      const PopupMenuItem(value: 'newest', child: Text('Newest')),
+      const PopupMenuItem(value: 'oldest', child: Text('Oldest')),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Row(
+        children: [
+          PopupMenuButton<String>(
+            tooltip: 'Sort results',
+            onSelected: onFilter,
+            itemBuilder: (_) => sortItems,
+            child: Chip(
+              avatar: const Icon(Icons.sort_rounded, size: 17),
+              label: Text(order == null ? 'Sort' : order.split(':').last),
+            ),
+          ),
+          const SizedBox(width: 6),
+          ActionChip(
+            avatar: const Icon(Icons.calendar_today_outlined, size: 16),
+            label: Text(date == null ? 'Date' : date.split('>=').last),
+            onPressed: onDate,
+          ),
+        ],
+      ),
+    );
+  }
 }

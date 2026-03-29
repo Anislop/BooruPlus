@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 
 import 'models.dart';
@@ -16,6 +18,7 @@ class AppState extends ChangeNotifier {
   bool _loading = false, _hasMore = true, _initialized = false;
   String? _error;
   int _generation = 0, _page = -1;
+  int? _randomSeed;
   Credentials? _credentials;
 
   AppSettings get settings => _settings;
@@ -26,6 +29,8 @@ class AppState extends ChangeNotifier {
   String? get error => _error;
   bool get hasMore => _hasMore;
   bool get initialized => _initialized;
+  List<List<String>> get savedQueries =>
+      List.unmodifiable(_settings.savedQueries);
 
   Future<void> initialize() async {
     try {
@@ -97,6 +102,35 @@ class AppState extends ChangeNotifier {
     _clearResults();
     notifyListeners();
     if (_board != null) await _load(reset: true, generation: _generation);
+  }
+
+  Future<void> addSavedQuery(List<String> value) async {
+    final query = value
+        .map(_normalize)
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
+    if (query.isEmpty) return;
+    final next = [query, ..._settings.savedQueries];
+    final normalized = _settings.copyWith(savedQueries: next);
+    await _store.saveSettings(normalized);
+    _settings = normalized;
+    notifyListeners();
+  }
+
+  Future<void> removeSavedQuery(List<String> value) async {
+    final key = value
+        .map(_normalize)
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .join('\u0000');
+    final next = _settings.savedQueries
+        .where((query) => query.map(_normalize).toSet().join('\u0000') != key)
+        .toList();
+    final normalized = _settings.copyWith(savedQueries: next);
+    await _store.saveSettings(normalized);
+    _settings = normalized;
+    notifyListeners();
   }
 
   Future<void> refresh() async {
@@ -177,17 +211,23 @@ class AppState extends ChangeNotifier {
     _error = null;
     notifyListeners();
     final page = reset ? 0 : _page + 1;
+    if (reset && _tags.isEmpty) _randomSeed = Random().nextInt(1 << 31);
     try {
       var accepted = <MediaPost>[];
       var currentPage = page;
       var lastFetchedPage = page;
-      for (var attempt = 0; attempt < 3 && accepted.isEmpty; attempt++) {
+      for (
+        var attempt = 0;
+        attempt < 3 && accepted.length < _settings.batchSize;
+        attempt++
+      ) {
         final raw = await _repository.fetch(
           board: _board!,
           tags: _queryTags(),
           limit: _settings.batchSize,
           page: currentPage,
           random: _tags.isEmpty,
+          randomSeed: _randomSeed,
           credentials: _credentials,
         );
         if (generation != _generation) return;
@@ -197,18 +237,16 @@ class AppState extends ChangeNotifier {
           break;
         }
         final incoming = raw.map(MediaPost.fromMap).where(_allowed).toList();
-        final seen = _posts.map((post) => post.id).toSet();
-        accepted = incoming.where((post) => seen.add(post.id)).toList();
-        if (raw.length < _settings.batchSize) {
-          _hasMore = false;
-          if (accepted.isEmpty) break;
-        }
-        if (accepted.isEmpty && raw.length >= _settings.batchSize) {
-          currentPage++;
-        }
+        final seen = {
+          ...(reset ? const <String>[] : _posts.map(_postKey)),
+          ...accepted.map(_postKey),
+        };
+        accepted.addAll(incoming.where((post) => seen.add(_postKey(post))));
+        currentPage++;
       }
       if (generation != _generation) return;
       _page = lastFetchedPage;
+      if (accepted.length >= _settings.batchSize) _hasMore = true;
       _posts = [...(reset ? const <MediaPost>[] : _posts), ...accepted];
     } catch (error) {
       if (generation == _generation) _error = _friendly(error);
@@ -220,14 +258,41 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  List<String> _queryTags() => [
-    ..._tags,
-    ..._settings.blacklist.map((tag) => '-$tag'),
-  ];
-  bool _allowed(MediaPost post) => !_settings.blacklist.any(
-    (blocked) =>
-        post.tags.any((tag) => tag.toLowerCase() == blocked.toLowerCase()),
-  );
+  List<String> _queryTags() {
+    final exclusions = [
+      ..._settings.blacklist.map((tag) => '-$tag'),
+      if (_settings.excludeAi) '-ai_generated',
+    ];
+    // Anonymous Danbooru searches accept only two ordinary tags. Keep the
+    // user's search intact and let the local filter enforce any remaining
+    // blacklist/no-AI exclusions instead of turning a valid query into a
+    // provider-side "too many tags" error.
+    if (_board == Board.danbooru) {
+      final ordinary = _tags.where(_isOrdinaryTag).length;
+      final budget = (2 - ordinary).clamp(0, 2);
+      return [..._tags, ...exclusions.take(budget)];
+    }
+    return [..._tags, ...exclusions];
+  }
+
+  bool _isOrdinaryTag(String value) {
+    final tag = value.startsWith('-') ? value.substring(1) : value;
+    return tag.isNotEmpty && !tag.contains(':');
+  }
+
+  bool _allowed(MediaPost post) =>
+      !(_settings.excludeAi &&
+          post.tags.any((tag) => _normalize(tag) == 'ai_generated')) &&
+      !_settings.blacklist.any(
+        (blocked) =>
+            post.tags.any((tag) => _normalize(tag) == _normalize(blocked)),
+      );
+  String _postKey(MediaPost post) => post.id > 0
+      ? 'id:${post.id}'
+      : 'url:${post.url}|preview:${post.previewUrl}|tags:${post.tags.join(' ')}'
+            '|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
+  String _normalize(String value) =>
+      value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
   void _clearResults() {
     _posts = const [];
     _page = -1;
