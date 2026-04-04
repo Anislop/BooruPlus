@@ -9,6 +9,18 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    val launcherResDir = layout.buildDirectory.dir("generated/res/launcher/main").get().asFile
+    val copyLauncherIcon by tasks.registering(Copy::class) {
+        from(rootProject.file("../assets")) {
+            include("AppIcon.png")
+            include("LogoFullColor.png")
+        }
+        into(launcherResDir.resolve("drawable"))
+        rename { name -> if (name == "AppIcon.png") "app_icon.png" else "logo_full_color.png" }
+    }
+    sourceSets["main"].res.srcDir(launcherResDir)
+    tasks.named("preBuild").configure { dependsOn(copyLauncherIcon) }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

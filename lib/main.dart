@@ -4,6 +4,7 @@ import 'core/app_state.dart';
 import 'ui/home.dart';
 import 'ui/onboarding.dart';
 import 'ui/theme.dart';
+import 'ui/site_catalog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,10 +19,22 @@ class BooruPlusApp extends StatefulWidget {
 }
 
 class _BooruPlusAppState extends State<BooruPlusApp> {
+  bool _splashComplete = false;
+
   @override
   void initState() {
     super.initState();
-    widget.state.initialize();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await Future.wait([widget.state.initialize(), loadSiteCatalog()]);
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _finishSplash() {
+    if (mounted) setState(() => _splashComplete = true);
   }
 
   @override
@@ -31,8 +44,8 @@ class _BooruPlusAppState extends State<BooruPlusApp> {
       title: 'BooruPlus',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(board: widget.state.board),
-      home: !widget.state.initialized
-          ? const SplashScreen()
+      home: !_splashComplete || !widget.state.initialized
+          ? SplashScreen(onFinished: _finishSplash)
           : widget.state.board == null
           ? OnboardingScreen(state: widget.state)
           : HomeScreen(state: widget.state),
@@ -40,36 +53,53 @@ class _BooruPlusAppState extends State<BooruPlusApp> {
   );
 }
 
-class SplashScreen extends StatelessWidget {
-  const SplashScreen({super.key});
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key, required this.onFinished});
+  final VoidCallback onFinished;
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller =
+        AnimationController(vsync: this, duration: const Duration(seconds: 1))
+          ..addStatusListener((status) {
+            if (status == AnimationStatus.completed) widget.onFinished();
+          })
+          ..forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: DecoratedBox(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF2A2227), Color(0xFF171216)],
-        ),
-      ),
+    body: AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final fadeProgress = ((_controller.value - .65) / .35).clamp(0.0, 1.0);
+        return Opacity(opacity: 1 - fadeProgress, child: child);
+      },
       child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const BrandMark(size: 128),
-            const SizedBox(height: 24),
-            Text(
-              'BooruPlus',
-              style: Theme.of(context).textTheme.headlineSmall
-                  ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: .4),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: 420),
+            child: Image(
+              image: AssetImage('assets/LogoFullColor.png'),
+              fit: BoxFit.contain,
             ),
-            const SizedBox(height: 28),
-            const SizedBox.square(
-              dimension: 22,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-          ],
+          ),
         ),
       ),
     ),

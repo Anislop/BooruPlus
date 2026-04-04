@@ -57,7 +57,7 @@ public enum DefaultBoards implements Board {
             "post", "index.php", "term", GelbooruAutoComplete.class
     ),
 
-    KONACHAN("http", "konachan.com", "post.json", null, "page"),
+    KONACHAN("https", "konachan.com", "post.json", null, "page"),
     YANDERE("https", "yande.re", "post.json", null, "page");
 
     private final String scheme;

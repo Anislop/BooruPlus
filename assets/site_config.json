@@ -1,0 +1,12 @@
+{
+  "sites": {
+    "safebooru": { "name": "Safebooru", "accent": "#63B5E8", "surface": "#172A35", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=safebooru.org" },
+    "danbooru": { "name": "Danbooru", "accent": "#E8A16B", "surface": "#35251D", "logoUrl": "https://danbooru.donmai.us/packs/static/danbooru-logo-128x128-ea111b6658173e847734.png" },
+    "konachan": { "name": "Konachan", "accent": "#75C1E5", "surface": "#182C35", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=konachan.com" },
+    "yandere": { "name": "Yande.re", "accent": "#E27B9B", "surface": "#351F29", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=yande.re" },
+    "e926": { "name": "e926", "accent": "#8DB9DE", "surface": "#1E2B38", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e926.net" },
+    "e621": { "name": "e621", "accent": "#E49A62", "surface": "#38271E", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e621.net" },
+    "gelbooru": { "name": "Gelbooru", "accent": "#B59AE5", "surface": "#2B223A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=gelbooru.com" },
+    "rule34": { "name": "Rule34", "accent": "#9EAEE3", "surface": "#22283B", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=rule34.xxx" }
+  }
+}

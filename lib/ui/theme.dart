@@ -11,8 +11,11 @@ const panel = Color(0xFF352A30);
 
 ThemeData buildAppTheme({Board? board}) {
   final appearance = board == null ? null : appearanceFor(board);
-  final primary = appearance?.accent ?? accent;
-  final background = appearance?.surface ?? canvas;
+  // Site colors belong to the app bar. Keep the rest of the application on
+  // the BooruPlus palette so switching boards does not recolor every tab.
+  const primary = accent;
+  const background = canvas;
+  final appBarColor = appearance?.surface ?? canvas;
   final surface = Color.lerp(background, Colors.white, .055)!;
   final scheme = ColorScheme.fromSeed(
     seedColor: primary,
@@ -26,10 +29,11 @@ ThemeData buildAppTheme({Board? board}) {
     scaffoldBackgroundColor: background,
     colorScheme: scheme,
     appBarTheme: AppBarTheme(
-      backgroundColor: background,
+      backgroundColor: appBarColor,
       surfaceTintColor: Colors.transparent,
       foregroundColor: scheme.onSurface,
     ),
+    drawerTheme: const DrawerThemeData(backgroundColor: canvas),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: surface,

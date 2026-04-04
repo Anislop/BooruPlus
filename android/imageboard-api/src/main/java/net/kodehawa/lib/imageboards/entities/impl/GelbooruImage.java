@@ -19,6 +19,7 @@ public class GelbooruImage implements BoardImage {
     private Rating rating;
     private String tags;
     private String file_url; //Thanks gelbooru for giving a full url I love you
+    private String preview_url;
     private int score;
     @JsonProperty("has_children")
     private boolean has_children;
@@ -49,6 +50,10 @@ public class GelbooruImage implements BoardImage {
         return file_url;
     }
 
+    public String getPreview_url() {
+        return preview_url;
+    }
+
     public boolean isHas_children() {
         return has_children;
     }
@@ -60,7 +65,8 @@ public class GelbooruImage implements BoardImage {
 
     @Override
     public List<String> getTags() {
-        return Collections.unmodifiableList(Arrays.asList(tags.split(" ")));
+        if (tags == null || tags.trim().isEmpty()) return Collections.emptyList();
+        return Collections.unmodifiableList(Arrays.asList(tags.trim().split("\\s+")));
     }
 
     @Override
@@ -80,7 +86,14 @@ public class GelbooruImage implements BoardImage {
 
     @Override
     public String getURL() {
-        return getFile_url();
+        if (isHttpUrl(file_url)) return file_url;
+        return isHttpUrl(image) ? image : null;
+    }
+
+    private static boolean isHttpUrl(String value) {
+        if (value == null) return false;
+        String normalized = value.trim().toLowerCase();
+        return normalized.startsWith("https://") || normalized.startsWith("http://");
     }
 
     @Override

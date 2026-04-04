@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import 'media_viewer.dart';
+import 'media_image.dart';
 import 'settings.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
@@ -170,7 +171,7 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: site.surface,
         title: Row(
           children: [
-            Icon(site.icon, size: 21, color: site.accent),
+            SiteLogo(board, size: 28, colored: true),
             const SizedBox(width: 8),
             Flexible(
               child: Text(
@@ -212,22 +213,14 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Padding(
+              Padding(
                 padding: EdgeInsets.all(24),
                 child: Row(
                   children: [
-                    BrandMark(),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'BooruPlus',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 23,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                    Image(
+                      image: AssetImage('assets/LogoFullColor.png'),
+                      height: 38,
+                      fit: BoxFit.contain,
                     ),
                   ],
                 ),
@@ -270,10 +263,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ListTile(
                         dense: true,
                         selected: option == board,
-                        leading: Icon(
-                          appearanceFor(option).icon,
-                          color: appearanceFor(option).accent,
-                        ),
+                        leading: SiteLogo(option, size: 32),
                         title: Text(appearanceFor(option).name),
                         onTap: option == board
                             ? null
@@ -378,6 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               final post = state.posts[index];
                               return MediaTile(
                                 post: post,
+                                board: board,
                                 onTap: () async {
                                   final tag = await Navigator.push<String>(
                                     context,
@@ -486,83 +477,99 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class MediaTile extends StatelessWidget {
-  const MediaTile({super.key, required this.post, required this.onTap});
+  const MediaTile({
+    super.key,
+    required this.post,
+    required this.board,
+    required this.onTap,
+  });
   final MediaPost post;
+  final Board board;
   final VoidCallback onTap;
   @override
-  Widget build(BuildContext context) => Semantics(
-    label:
-        '${post.isVideo ? 'Video' : 'Image'} ${post.id}, rating ${post.rating}',
-    button: true,
-    child: Material(
-      color: panel,
-      borderRadius: BorderRadius.circular(12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            if (_displayUrl(post).isNotEmpty)
-              Image.network(
-                post.previewUrl.isNotEmpty
-                    ? post.previewUrl
-                    : _displayUrl(post),
-                fit: BoxFit.cover,
-                cacheWidth: 480,
-                loadingBuilder: (context, child, progress) => progress == null
-                    ? child
-                    : const Center(
-                        child: Icon(
-                          Icons.image_outlined,
-                          color: Colors.white12,
-                        ),
-                      ),
-                errorBuilder: (_, _, _) => const Center(
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    color: Colors.white24,
-                  ),
-                ),
-              )
-            else
-              const Center(
-                child: Icon(
-                  Icons.image_not_supported_outlined,
-                  color: Colors.white24,
-                ),
-              ),
-            if (post.isVideo)
-              const Center(
-                child: CircleAvatar(
-                  backgroundColor: Colors.black54,
-                  radius: 20,
-                  child: Icon(Icons.play_arrow_rounded, color: Colors.white),
-                ),
-              ),
-            Positioned(
-              left: 6,
-              bottom: 6,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: .7),
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: Text(
-                  post.rating.toUpperCase(),
-                  style: const TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
+  Widget build(BuildContext context) {
+    final url = post.previewUrl.isNotEmpty
+        ? post.previewUrl
+        : _displayUrl(post);
+    final media = url.isEmpty
+        ? const Center(
+            child: Icon(
+              Icons.image_not_supported_outlined,
+              color: Colors.white24,
             ),
-          ],
+          )
+        : board == Board.gelbooru
+        ? MediaImage(
+            url: url,
+            board: board,
+            fit: BoxFit.cover,
+            cacheWidth: 480,
+            errorWidget: const Center(
+              child: Icon(Icons.broken_image_outlined, color: Colors.white24),
+            ),
+          )
+        : Image.network(
+            url,
+            fit: BoxFit.cover,
+            cacheWidth: 480,
+            loadingBuilder: (context, child, progress) => progress == null
+                ? child
+                : const Center(
+                    child: Icon(Icons.image_outlined, color: Colors.white12),
+                  ),
+            errorBuilder: (_, _, _) => const Center(
+              child: Icon(Icons.broken_image_outlined, color: Colors.white24),
+            ),
+          );
+    return Semantics(
+      label:
+          '${post.isVideo ? 'Video' : 'Image'} ${post.id}, rating ${post.rating}',
+      button: true,
+      child: Material(
+        color: panel,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              media,
+              if (post.isVideo)
+                const Center(
+                  child: CircleAvatar(
+                    backgroundColor: Colors.black54,
+                    radius: 20,
+                    child: Icon(Icons.play_arrow_rounded, color: Colors.white),
+                  ),
+                ),
+              Positioned(
+                left: 6,
+                bottom: 6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: .7),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Text(
+                    post.rating.toUpperCase(),
+                    style: const TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 String _displayUrl(MediaPost post) {

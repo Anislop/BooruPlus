@@ -91,9 +91,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Material(
-                    color: _selected == board
-                        ? appearanceFor(board).surface
-                        : panel,
+                    color: panel,
                     borderRadius: BorderRadius.circular(18),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(18),
@@ -147,7 +145,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                   ? Icons.radio_button_checked
                                   : Icons.radio_button_off,
                               color: _selected == board
-                                  ? appearanceFor(board).accent
+                                  ? accent
                                   : Colors.white30,
                             ),
                           ],

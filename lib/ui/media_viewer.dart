@@ -6,6 +6,9 @@ import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
 import '../core/models.dart';
+import '../core/services.dart';
+import 'media_image.dart';
+import 'site_catalog.dart';
 import 'theme.dart';
 
 class MediaViewer extends StatefulWidget {
@@ -30,6 +33,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   bool _downloading = false;
   bool _details = false;
   bool _muted = false;
+  final _downloads = DownloadService();
   AppLifecycleState _lifecycle =
       WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
@@ -101,12 +105,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       final extension = path.contains('.')
           ? path.split('.').last.replaceAll(RegExp('[^a-zA-Z0-9]'), '')
           : 'jpg';
-      await const MethodChannel('booruplus/platform')
-          .invokeMethod<String>('download', {
-            'url': url,
-            'name': '${widget.board.name}_${widget.post.id}.$extension',
-            'directory': widget.state.settings.downloadDirectory,
-          });
+      await _downloads.download(
+        url: url,
+        name: '${widget.board.name}_${widget.post.id}.$extension',
+        directory: widget.state.settings.downloadDirectory,
+      );
       messenger.showSnackBar(
         const SnackBar(content: Text('Media saved to your download folder.')),
       );
@@ -150,20 +153,30 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final post = widget.post;
+    final site = appearanceFor(widget.board);
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: canvas,
       appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        backgroundColor: site.surface,
+        title: Row(
           children: [
-            Text(
-              widget.board.label,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            Text(
-              '#${post.id}',
-              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            SiteLogo(widget.board, size: 26, colored: true),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.board.label,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  '#${post.id}',
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
             ),
           ],
         ),
@@ -217,30 +230,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                     textAlign: TextAlign.center,
                                   ),
                                 )
-                              : Image.network(
-                                  _mediaUrl(post),
+                              : MediaImage(
+                                  url: _mediaUrl(post),
+                                  board: widget.board,
                                   fit: BoxFit.contain,
-                                  loadingBuilder: (_, child, progress) =>
-                                      progress == null
-                                      ? child
-                                      : Center(
-                                          child: CircularProgressIndicator(
-                                            value:
-                                                progress.expectedTotalBytes ==
-                                                    null
-                                                ? null
-                                                : progress.cumulativeBytesLoaded /
-                                                      progress
-                                                          .expectedTotalBytes!,
-                                          ),
-                                        ),
-                                  errorBuilder: (_, _, _) => const Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Text(
-                                      'The original image is unavailable. It may have been removed or require website access.',
-                                      textAlign: TextAlign.center,
-                                    ),
-                                  ),
+                                  errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
                                 ),
                         ),
                       ),

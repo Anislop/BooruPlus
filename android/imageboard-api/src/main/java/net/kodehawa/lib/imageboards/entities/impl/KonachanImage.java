@@ -125,7 +125,7 @@ public class KonachanImage implements BoardImage {
 
     @JsonIgnore
     public String getParsedUrl() {
-        return jpeg_url;
+        return firstUrl(jpeg_url, file_url, sample_url);
     }
 
     public String getJpeg_url() {
@@ -168,6 +168,15 @@ public class KonachanImage implements BoardImage {
     @Override
     public String getURL() {
         return getParsedUrl();
+    }
+
+    private static String firstUrl(String... values) {
+        for (String value : values) {
+            if (value == null || value.trim().isEmpty()) continue;
+            String normalized = value.trim().toLowerCase();
+            if (normalized.startsWith("https://") || normalized.startsWith("http://")) return value;
+        }
+        return null;
     }
 
     @Override

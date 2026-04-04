@@ -138,3 +138,26 @@ class DownloadService {
       })
       .then((v) => v ?? '');
 }
+
+class MediaService {
+  MediaService({MethodChannel? channel})
+    : channel = channel ?? const MethodChannel('booruplus/platform');
+  final MethodChannel channel;
+
+  Future<Uint8List> fetchMedia({
+    required Board board,
+    required String url,
+    Credentials? credentials,
+  }) async {
+    final bytes = await channel.invokeMethod<Uint8List>('fetchMedia', {
+      'board': board.name,
+      'url': url,
+      'apiKey': credentials?.apiKey,
+      'userId': credentials?.userId,
+    });
+    if (bytes == null || bytes.isEmpty) {
+      throw StateError('Media response was empty');
+    }
+    return bytes;
+  }
+}

@@ -22,6 +22,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -32,6 +33,10 @@ class MainActivity : FlutterActivity() {
     private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
         .followSslRedirects(false).build()
+    private val mediaClient = client.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
     private val boards by lazy { ImageBoards(client) }
     private var directoryResult: MethodChannel.Result? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
@@ -51,6 +56,7 @@ class MainActivity : FlutterActivity() {
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "fetch" -> fetch(call, result)
+            "fetchMedia" -> fetchMedia(call, result)
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
             else -> result.notImplemented()
@@ -216,6 +222,59 @@ class MainActivity : FlutterActivity() {
         } catch (_: IllegalArgumentException) { url }
     }
 
+    private fun fetchMedia(call: MethodCall, result: MethodChannel.Result) {
+        val value = call.argument<String>("url")
+        val parsed = value?.toHttpUrlOrNull()
+        if (parsed == null || !isGelbooruHost(parsed.host) || parsed.scheme != "https" ||
+            parsed.queryParameter("api_key").isNullOrBlank() || parsed.queryParameter("user_id").isNullOrBlank()) {
+            result.error("INVALID_URL", "Unsupported media URL", null)
+            return
+        }
+        background(result) { readGelbooruMedia(value) }
+    }
+
+    private fun readGelbooruMedia(value: String): ByteArray {
+        var current = value.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid URL")
+        repeat(MAX_MEDIA_REDIRECTS + 1) {
+            if (current.scheme != "https" || !isGelbooruHost(current.host) ||
+                current.username.isNotEmpty() || current.password.isNotEmpty()) {
+                throw IOException("Invalid media redirect")
+            }
+            val request = okhttp3.Request.Builder().url(current)
+                .header("Referer", GELBOORU_REFERER)
+                .header("User-Agent", USER_AGENT).build()
+            mediaClient.newCall(request).execute().use { response ->
+                if (response.isRedirect) {
+                    val location = response.header("Location") ?: throw IOException("Invalid redirect")
+                    val next = current.resolve(location) ?: throw IOException("Invalid redirect")
+                    if (next.scheme != "https" || !isGelbooruHost(next.host) ||
+                        next.username.isNotEmpty() || next.password.isNotEmpty()) {
+                        throw IOException("Invalid media redirect")
+                    }
+                    current = next
+                } else {
+                    if (!response.isSuccessful) throw IOException("HTTP failure")
+                    val body = response.body ?: throw IOException("Empty response")
+                    if (body.contentLength() > MAX_MEDIA_BYTES) throw IOException("Response too large")
+                    val output = ByteArrayOutputStream(minOf(MAX_MEDIA_BYTES.toInt(), 65536))
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(65536)
+                        var total = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > MAX_MEDIA_BYTES) throw IOException("Response too large")
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                    return output.toByteArray()
+                }
+            }
+        }
+        throw IOException("Too many redirects")
+    }
+
     private fun sourceValue(image: BoardImage): String {
         val source = value(image, "getSource")?.toString()
         if (!source.isNullOrBlank()) return source
@@ -303,7 +362,8 @@ class MainActivity : FlutterActivity() {
                 connection.instanceFollowRedirects = false
                 connection.connectTimeout = 15000
                 connection.readTimeout = 30000
-                connection.setRequestProperty("User-Agent", "BooruPlus/1.0 Android")
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                if (isGelbooruHost(current.host)) connection.setRequestProperty("Referer", GELBOORU_REFERER)
                 val code = connection.responseCode
                 if (code in 300..399) {
                     val location = connection.getHeaderField("Location") ?: throw IOException("Invalid redirect")
@@ -364,6 +424,11 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val PICKER = 4101
         private const val MAX_WINDOW_REQUESTS = 32
+        private const val MAX_MEDIA_REDIRECTS = 5
+        private const val MAX_MEDIA_BYTES = 50L * 1024L * 1024L
+        private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
+        private const val GELBOORU_REFERER = "https://gelbooru.com/"
         private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net")
+        private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }

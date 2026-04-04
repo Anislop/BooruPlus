@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/models.dart';
 
@@ -13,15 +16,19 @@ class BoardAppearance {
     required this.icon,
     required this.accent,
     required this.surface,
+    this.logoUrl,
+    this.logoAsset,
   });
 
   final String name;
   final IconData icon;
   final Color accent;
   final Color surface;
+  final String? logoUrl;
+  final String? logoAsset;
 }
 
-const boardAppearances = <Board, BoardAppearance>{
+const _defaults = <Board, BoardAppearance>{
   Board.safebooru: BoardAppearance(
     name: 'Safebooru',
     icon: Icons.shield_outlined,
@@ -72,6 +79,31 @@ const boardAppearances = <Board, BoardAppearance>{
   ),
 };
 
+final boardAppearances = <Board, BoardAppearance>{..._defaults};
+
+Future<void> loadSiteCatalog() async {
+  try {
+    final decoded = jsonDecode(
+      await rootBundle.loadString('assets/site_config.json'),
+    );
+    if (decoded is! Map || decoded['sites'] is! Map) return;
+    final sites = decoded['sites'] as Map;
+    for (final board in Board.values) {
+      final raw = sites[board.name];
+      if (raw is! Map) continue;
+      final fallback = _defaults[board]!;
+      boardAppearances[board] = BoardAppearance(
+        name: _string(raw['name'], fallback.name),
+        icon: fallback.icon,
+        accent: _color(raw['accent'], fallback.accent),
+        surface: _color(raw['surface'], fallback.surface),
+        logoUrl: _optionalString(raw['logoUrl']),
+        logoAsset: _optionalString(raw['logoAsset']),
+      );
+    }
+  } catch (_) {}
+}
+
 BoardAppearance appearanceFor(Board board) => boardAppearances[board]!;
 
 class BoardIcon extends StatelessWidget {
@@ -81,18 +113,66 @@ class BoardIcon extends StatelessWidget {
   final double size;
 
   @override
+  Widget build(BuildContext context) => SiteLogo(board, size: size);
+}
+
+class SiteLogo extends StatelessWidget {
+  const SiteLogo(this.board, {super.key, this.size = 30, this.colored = false});
+  final Board board;
+  final double size;
+  final bool colored;
+  @override
   Widget build(BuildContext context) {
     final appearance = appearanceFor(board);
+    final fallback = Icon(
+      appearance.icon,
+      size: size * .55,
+      color: colored ? appearance.accent : Colors.white60,
+    );
+    final image = appearance.logoAsset?.isNotEmpty == true
+        ? Image.asset(
+            appearance.logoAsset!,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) => fallback,
+          )
+        : appearance.logoUrl?.isNotEmpty == true
+        ? Image.network(
+            appearance.logoUrl!,
+            fit: BoxFit.contain,
+            loadingBuilder: (_, child, progress) =>
+                progress == null ? child : fallback,
+            errorBuilder: (_, _, _) => fallback,
+          )
+        : fallback;
     return Container(
       width: size,
       height: size,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: appearance.surface,
-        borderRadius: BorderRadius.circular(size * .28),
-        border: Border.all(color: appearance.accent.withValues(alpha: .28)),
+        color: colored
+            ? appearance.surface
+            : Colors.white.withValues(alpha: .04),
+        borderRadius: BorderRadius.circular(size * .24),
+        border: Border.all(
+          color: colored
+              ? appearance.accent.withValues(alpha: .32)
+              : Colors.white12,
+        ),
       ),
-      child: Icon(appearance.icon, size: size * .52, color: appearance.accent),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(padding: EdgeInsets.all(size * .14), child: image),
     );
   }
+}
+
+String _string(dynamic value, String fallback) =>
+    value is String && value.trim().isNotEmpty ? value.trim() : fallback;
+String? _optionalString(dynamic value) =>
+    value is String && value.trim().isNotEmpty ? value.trim() : null;
+Color _color(dynamic value, Color fallback) {
+  if (value is! String) return fallback;
+  final hex = value.replaceFirst('#', '');
+  final parsed = int.tryParse(hex, radix: 16);
+  if (parsed == null || (hex.length != 6 && hex.length != 8)) return fallback;
+  return Color(hex.length == 6 ? 0xFF000000 | parsed : parsed);
 }
