@@ -117,50 +117,71 @@ class BoardIcon extends StatelessWidget {
 }
 
 class SiteLogo extends StatelessWidget {
-  const SiteLogo(this.board, {super.key, this.size = 30, this.colored = false});
+  const SiteLogo(
+    this.board, {
+    super.key,
+    this.size = 30,
+    this.colored = false,
+    this.showBorder = false,
+  });
   final Board board;
   final double size;
   final bool colored;
+  final bool showBorder;
+
   @override
   Widget build(BuildContext context) {
     final appearance = appearanceFor(board);
     final fallback = Icon(
       appearance.icon,
-      size: size * .55,
-      color: colored ? appearance.accent : Colors.white60,
+      size: showBorder ? size * .55 : size * .75,
+      color: colored ? appearance.accent : Colors.white70,
     );
     final image = appearance.logoAsset?.isNotEmpty == true
         ? Image.asset(
             appearance.logoAsset!,
+            width: size,
+            height: size,
             fit: BoxFit.contain,
             errorBuilder: (_, _, _) => fallback,
           )
         : appearance.logoUrl?.isNotEmpty == true
         ? Image.network(
             appearance.logoUrl!,
+            width: size,
+            height: size,
             fit: BoxFit.contain,
             loadingBuilder: (_, child, progress) =>
                 progress == null ? child : fallback,
             errorBuilder: (_, _, _) => fallback,
           )
         : fallback;
-    return Container(
+
+    if (showBorder) {
+      return Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: colored
+              ? appearance.surface
+              : Colors.white.withValues(alpha: .04),
+          borderRadius: BorderRadius.circular(size * .24),
+          border: Border.all(
+            color: colored
+                ? appearance.accent.withValues(alpha: .32)
+                : Colors.white12,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(padding: EdgeInsets.all(size * .14), child: image),
+      );
+    }
+
+    return SizedBox(
       width: size,
       height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: colored
-            ? appearance.surface
-            : Colors.white.withValues(alpha: .04),
-        borderRadius: BorderRadius.circular(size * .24),
-        border: Border.all(
-          color: colored
-              ? appearance.accent.withValues(alpha: .32)
-              : Colors.white12,
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(padding: EdgeInsets.all(size * .14), child: image),
+      child: Center(child: image),
     );
   }
 }

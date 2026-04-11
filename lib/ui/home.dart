@@ -4,6 +4,7 @@ import '../core/app_state.dart';
 import '../core/models.dart';
 import 'media_viewer.dart';
 import 'media_image.dart';
+import 'search_guide.dart';
 import 'settings.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
@@ -218,7 +219,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Row(
                   children: [
                     Image(
-                      image: AssetImage('assets/LogoFullColor.png'),
+                      image: AssetImage('assets/LogoFullColorWhite.png'),
                       height: 38,
                       fit: BoxFit.contain,
                     ),
@@ -275,11 +276,42 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Your boards. Your perspective.\nBooruPlus · Android',
-                  style: TextStyle(color: Colors.white38, height: 1.7),
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    InkWell(
+                      borderRadius: BorderRadius.circular(4),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute<void>(
+                            builder: (_) => SearchGuideScreen(board: board),
+                          ),
+                        );
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 4),
+                        child: Text(
+                          'Learn to search',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            decoration: TextDecoration.underline,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    const Text(
+                      'BooruPlus · Android',
+                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                    ),
+                  ],
                 ),
               ),
             ],

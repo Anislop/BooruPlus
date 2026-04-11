@@ -11,10 +11,12 @@ class TagInput extends StatefulWidget {
     this.hint = 'Search tags, then press space',
     this.enabled = true,
     this.onSubmit,
+    this.onDraftChanged,
   });
   final List<String> tags;
   final ValueChanged<List<String>> onChanged;
   final VoidCallback? onSubmit;
+  final ValueChanged<String>? onDraftChanged;
   final String hint;
   final bool enabled;
   @override
@@ -23,6 +25,19 @@ class TagInput extends StatefulWidget {
 
 class TagInputState extends State<TagInput> {
   final _controller = TextEditingController();
+
+  bool get hasDraft => _controller.text.trim().isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    widget.onDraftChanged?.call(_controller.text);
+  }
+
   void commit() => _commit(all: true);
   void _commit({bool all = false}) {
     if (!widget.enabled) return;
@@ -43,6 +58,7 @@ class TagInputState extends State<TagInput> {
 
   @override
   void dispose() {
+    _controller.removeListener(_onTextChanged);
     _controller.dispose();
     super.dispose();
   }

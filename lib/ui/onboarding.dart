@@ -69,7 +69,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               ),
               const SizedBox(height: 38),
               const Text(
-                'A world of images.\nYour way to explore.',
+                'Welcome to BooruPlus!\nDownload images on a plethora of imageboards!',
                 style: TextStyle(
                   fontSize: 36,
                   height: 1.13,
@@ -156,7 +156,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 ),
               const SizedBox(height: 16),
               const Text(
-                'Content and availability depend on the selected website. Follow its terms and age requirements.',
+                'Content and availability depend on the selected website.',
                 style: TextStyle(
                   color: Colors.white38,
                   fontSize: 12,
