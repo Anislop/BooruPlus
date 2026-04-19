@@ -16,6 +16,13 @@ abstract interface class BoardRepository {
     int? randomSeed,
     Credentials? credentials,
   });
+
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  });
 }
 
 abstract interface class SettingsStore {
@@ -49,6 +56,26 @@ class PlatformBoardRepository implements BoardRepository {
       'page': page,
       'random': random,
       'randomSeed': randomSeed,
+      'apiKey': credentials?.apiKey,
+      'userId': credentials?.userId,
+    });
+    return (response ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) async {
+    final response = await channel.invokeMethod<List<dynamic>>('autocomplete', {
+      'board': board.name,
+      'query': query,
+      'limit': limit,
       'apiKey': credentials?.apiKey,
       'userId': credentials?.userId,
     });

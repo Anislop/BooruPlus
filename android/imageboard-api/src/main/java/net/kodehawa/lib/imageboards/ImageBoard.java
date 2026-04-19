@@ -395,7 +395,7 @@ public class ImageBoard<T extends BoardImage> {
         HttpUrl.Builder urlBuilder = new HttpUrl.Builder()
                 .scheme(board.getScheme())
                 .host(board.getHost())
-                .addPathSegment(board.getAutoCompletePath());
+                .addPathSegments(board.getAutoCompletePath());
 
         // Why
         if (getImageType() == GelbooruImage.class) {

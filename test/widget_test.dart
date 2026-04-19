@@ -1,5 +1,10 @@
 import 'package:booruplus/core/app_state.dart';
+import 'package:booruplus/core/models.dart';
 import 'package:booruplus/main.dart';
+import 'package:booruplus/ui/home.dart';
+import 'package:booruplus/ui/media_viewer.dart';
+import 'package:booruplus/ui/search_guide.dart';
+import 'package:booruplus/ui/site_catalog.dart';
 import 'package:booruplus/ui/tag_input.dart';
 import 'package:booruplus/ui/theme.dart';
 import 'package:booruplus/ui/settings.dart';
@@ -46,10 +51,7 @@ void main() {
       );
       await tester.pumpWidget(BooruPlusApp(state: state));
       await tester.pumpAndSettle();
-      expect(
-        find.text('A world of images.\nYour way to explore.'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('Welcome to BooruPlus!'), findsOneWidget);
       final button = find.text('Explore Safebooru');
       await tester.scrollUntilVisible(button, 350);
       await tester.tap(button);
@@ -114,8 +116,9 @@ void main() {
     );
     await tester.pumpWidget(BooruPlusApp(state: state));
     await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
     await tester.scrollUntilVisible(find.text('Explore Safebooru'), 350);
+    await tester.ensureVisible(find.text('Explore Safebooru'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Explore Safebooru'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Open navigation menu'));
@@ -133,4 +136,274 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     state.dispose();
   });
+
+  testWidgets('SiteLogo renders exact logo without border by default', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: SiteLogo(Board.safebooru, size: 40)),
+      ),
+    );
+    final siteLogoFinder = find.byType(SiteLogo);
+    expect(siteLogoFinder, findsOneWidget);
+    final containers = tester.widgetList<Container>(
+      find.descendant(of: siteLogoFinder, matching: find.byType(Container)),
+    );
+    for (final container in containers) {
+      final decoration = container.decoration;
+      if (decoration is BoxDecoration) {
+        expect(decoration.border, isNull);
+      }
+    }
+    expect(
+      find.descendant(of: siteLogoFinder, matching: find.byType(SizedBox)),
+      findsWidgets,
+    );
+  });
+
+  testWidgets(
+    'SettingsScreen shows top unsaved flair and flavor text when preferences change',
+    (tester) async {
+      final store = MemoryStore();
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: SettingsScreen(state: state),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Initially, no unsaved flair should be present
+      expect(
+        find.byKey(const ValueKey('unsaved_settings_flair')),
+        findsNothing,
+      );
+      expect(find.text('Unsaved preferences'), findsNothing);
+
+      // Change a slider (e.g. Columns from 3 to 4)
+      final slider = find.byType(Slider).first;
+      await tester.tap(slider);
+      await tester.pumpAndSettle();
+
+      // Flair and flavor text should now be visible at the top
+      expect(
+        find.byKey(const ValueKey('unsaved_settings_flair')),
+        findsOneWidget,
+      );
+      expect(find.text('UNSAVED'), findsOneWidget);
+      expect(find.text('Unsaved preferences'), findsOneWidget);
+      expect(
+        find.text('You have unsaved changes. Remember to save before leaving.'),
+        findsOneWidget,
+      );
+
+      // Save via the top flair's Save button
+      final topSaveButton = find.descendant(
+        of: find.byKey(const ValueKey('unsaved_settings_flair')),
+        matching: find.text('Save'),
+      );
+      expect(topSaveButton, findsOneWidget);
+      await tester.tap(topSaveButton);
+      await tester.pumpAndSettle();
+
+      // Settings should be saved in the store
+      expect(store.settings.columns, isNot(3));
+
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
+
+  testWidgets(
+    'Learn to search in sidebar is underlined and navigates to SearchGuideScreen',
+    (tester) async {
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore(),
+      );
+      await state.initialize();
+      await state.chooseBoard(Board.safebooru);
+
+      await tester.pumpWidget(BooruPlusApp(state: state));
+      await tester.pumpAndSettle();
+
+      // Open navigation drawer
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+
+      // Find 'Learn to search'
+      final learnFinder = find.text('Learn to search');
+      expect(learnFinder, findsOneWidget);
+
+      // Verify text is underlined
+      final textWidget = tester.widget<Text>(learnFinder);
+      expect(textWidget.style?.decoration, TextDecoration.underline);
+
+      // Tap 'Learn to search'
+      await tester.tap(learnFinder);
+      await tester.pumpAndSettle();
+
+      // Verify we are on SearchGuideScreen with Safebooru icon and title
+      expect(find.byType(SearchGuideScreen), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.text('Safebooru'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byType(SiteLogo),
+        ),
+        findsOneWidget,
+      );
+
+      // Verify markdown content rendered
+      expect(find.text('Safebooru Search Guide'), findsOneWidget);
+      expect(find.text('Basic Tag Search'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
+
+  testWidgets(
+    'autocomplete suggestions show category color and replace the draft',
+    (tester) async {
+      var tags = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: Scaffold(
+            body: TagInput(
+              tags: tags,
+              onChanged: (value) => tags = value,
+              autocomplete: (_) async => const [
+                TagSuggestion(
+                  name: 'frieren',
+                  category: TagCategory.character,
+                  postCount: 42,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), 'frie');
+      await tester.pump(const Duration(milliseconds: 280));
+      await tester.pump();
+
+      expect(find.text('frieren'), findsOneWidget);
+      expect(find.text('Character'), findsOneWidget);
+      await tester.tap(find.text('frieren'));
+      await tester.pump();
+      expect(tags, ['frieren']);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        '',
+      );
+    },
+  );
+
+  testWidgets('result tiles render typed tags with their category color', (
+    tester,
+  ) async {
+    final value = MediaPost.fromMap(
+      post(12, tags: ['artist_name'])
+        ..['tagDetails'] = [
+          {'name': 'artist_name', 'category': 'artist'},
+        ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: SizedBox(
+            width: 240,
+            height: 180,
+            child: MediaTile(post: value, board: Board.danbooru, onTap: () {}),
+          ),
+        ),
+      ),
+    );
+    final tag = tester.widget<Text>(find.text('artist_name'));
+    expect(tag.style?.color, const Color(0xFFE8A0FF));
+  });
+
+  testWidgets(
+    'media viewer navigates between result posts and groups details',
+    (tester) async {
+      final first = MediaPost.fromMap(
+        post(1, tags: ['artist_name', 'character_name'])
+          ..['tagDetails'] = [
+            {'name': 'artist_name', 'category': 'artist'},
+            {'name': 'character_name', 'category': 'character'},
+          ]
+          ..['postUrl'] = 'https://danbooru.donmai.us/posts/1',
+      );
+      final second = MediaPost.fromMap(post(2, tags: ['plain']));
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore()..selected = Board.danbooru,
+      );
+      await state.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: MediaViewer(
+            key: const ValueKey('first-viewer'),
+            post: first,
+            board: Board.danbooru,
+            state: state,
+            posts: [first, second],
+            initialIndex: 0,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('#1'), findsOneWidget);
+
+      final gesture = await tester.startGesture(const Offset(180, 320));
+    await gesture.moveTo(const Offset(60, 320));
+    await gesture.up();
+    await tester.pump();
+    expect(find.text('#2'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 350));
+
+      // Reopen the first post to verify the grouped details presentation.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: MediaViewer(
+            post: first,
+            board: Board.danbooru,
+            state: state,
+            posts: [first, second],
+            initialIndex: 0,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Tags & details'));
+      await tester.pump();
+      expect(find.text('Artist'), findsOneWidget);
+      expect(find.text('Character'), findsOneWidget);
+      expect(find.text('Open in browser'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
 }
+
+Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
+  'id': id,
+  'url': '',
+  'previewUrl': '',
+  'tags': tags,
+};

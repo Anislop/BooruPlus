@@ -31,7 +31,9 @@ class FakeRepo implements BoardRepository {
   final List<List<Map<String, dynamic>>> pages;
   FakeRepo(this.pages);
   int calls = 0;
+  int autocompleteCalls = 0;
   final List<List<String>> queries = [];
+  final List<String> autocompleteQueries = [];
   Credentials? lastCredentials;
   @override
   Future<List<Map<String, dynamic>>> fetch({
@@ -48,6 +50,18 @@ class FakeRepo implements BoardRepository {
     lastCredentials = credentials;
     return page < pages.length ? pages[page] : const [];
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) async {
+    autocompleteCalls++;
+    autocompleteQueries.add(query);
+    return const [];
+  }
 }
 
 Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
@@ -60,6 +74,7 @@ Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
 void main() {
   test('settings default no-AI and legacy JSON migration are compatible', () {
     expect(const AppSettings().excludeAi, isTrue);
+    expect(const AppSettings().gesturesEnabled, isTrue);
     final migrated = AppSettings.fromMap({'columns': 3});
     expect(migrated.excludeAi, isTrue);
     expect(
@@ -72,7 +87,47 @@ void main() {
       isFalse,
     );
     expect(migrated.toMap(), containsPair('excludeAi', isTrue));
+    expect(migrated.toMap(), containsPair('gesturesEnabled', isTrue));
+    expect(
+      AppSettings.fromMap({'gesturesEnabled': false}).gesturesEnabled,
+      isFalse,
+    );
   });
+
+  test(
+    'typed tags preserve categories while raw tags fall back to general',
+    () {
+      final typed = MediaPost.fromMap(
+        post(7, tags: ['artist_name', 'character_name', 'plain'])
+          ..['tagDetails'] = [
+            {'name': 'artist_name', 'category': 'artist'},
+            {'name': 'character_name', 'category': 'character'},
+          ]
+          ..['postUrl'] = 'https://danbooru.donmai.us/posts/7',
+      );
+      expect(
+        typed.tagDetails.map((tag) => '${tag.name}:${tag.category.name}'),
+        ['artist_name:artist', 'character_name:character', 'plain:unknown'],
+      );
+      expect(typed.postUrl, 'https://danbooru.donmai.us/posts/7');
+      final roundTrip = MediaPost.fromMap(typed.toMap());
+      expect(roundTrip.tagDetails, hasLength(3));
+
+      final fallback = MediaPost.fromMap(post(8, tags: ['cat', 'dog']));
+      expect(fallback.tagDetails.map((tag) => tag.category), [
+        TagCategory.general,
+        TagCategory.general,
+      ]);
+    },
+  );
+
+  test(
+    'provider numeric category values stay unknown at the shared boundary',
+    () {
+      expect(TagCategoryInfo.parse(5), TagCategory.unknown);
+      expect(TagCategoryInfo.parse('species'), TagCategory.species);
+    },
+  );
 
   test('saved queries persist without reloading the active feed', () async {
     final repo = FakeRepo(const [[]]);
@@ -175,6 +230,23 @@ void main() {
     expect(value.extension, 'webm');
     expect(MediaPost.fromMap(value.toMap()).id, 3);
   });
+
+  test(
+    'autocomplete converts repository maps and records the active board',
+    () async {
+      final repo = _SuggestionRepo();
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.danbooru,
+      );
+      await state.initialize();
+      final suggestions = await state.autocomplete('fri');
+      expect(suggestions.single.name, 'frieren');
+      expect(suggestions.single.category, TagCategory.character);
+      expect(repo.lastBoard, Board.danbooru);
+      expect(repo.lastQuery, 'fri');
+    },
+  );
 
   test('board metadata allows anonymous Danbooru/e621 and requires Rule34/Gelbooru auth', () {
     expect(Board.danbooru.requiresAuth, isFalse);
@@ -376,6 +448,14 @@ class _DelayedRepo implements BoardRepository {
         ? first.future
         : Future.value([post(2)]);
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
 }
 
 class _FailingRepo implements BoardRepository {
@@ -389,6 +469,44 @@ class _FailingRepo implements BoardRepository {
     int? randomSeed,
     Credentials? credentials,
   }) => Future.error(StateError('probe failed'));
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
+}
+
+class _SuggestionRepo implements BoardRepository {
+  Board? lastBoard;
+  String? lastQuery;
+
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+  }) => Future.value(const []);
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) async {
+    lastBoard = board;
+    lastQuery = query;
+    return const [
+      {'name': 'frieren', 'category': 'character', 'postCount': 42},
+    ];
+  }
 }
 
 class _BoardSwitchRepo implements BoardRepository {
@@ -409,6 +527,14 @@ class _BoardSwitchRepo implements BoardRepository {
     if (board == Board.danbooru) return Future.value([post(2)]);
     return Future.value(const []);
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
 }
 
 class _FailingStore extends MemoryStore {
@@ -434,6 +560,14 @@ class _FailOnceRepo implements BoardRepository {
         ? Future.error(StateError('temporary'))
         : Future.value([post(4)]);
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
 }
 
 class _FailLaterRepo implements BoardRepository {
@@ -457,6 +591,14 @@ class _FailLaterRepo implements BoardRepository {
     }
     return Future.value([post(100)]);
   }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
 }
 
 class _FailingBoardStore extends MemoryStore {

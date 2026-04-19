@@ -11,12 +11,21 @@ android {
 
     val launcherResDir = layout.buildDirectory.dir("generated/res/launcher/main").get().asFile
     val copyLauncherIcon by tasks.registering(Copy::class) {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
         from(rootProject.file("../assets")) {
             include("AppIcon.png")
             include("LogoFullColor.png")
+            include("LogoFullColorWhite.png")
         }
         into(launcherResDir.resolve("drawable"))
-        rename { name -> if (name == "AppIcon.png") "app_icon.png" else "logo_full_color.png" }
+        rename { name ->
+            when (name) {
+                "AppIcon.png" -> "app_icon.png"
+                "LogoFullColorWhite.png" -> "logo_full_color_white.png"
+                "LogoFullColor.png" -> "logo_full_color.png"
+                else -> name.lowercase()
+            }
+        }
     }
     sourceSets["main"].res.srcDir(launcherResDir)
     tasks.named("preBuild").configure { dependsOn(copyLauncherIcon) }

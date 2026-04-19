@@ -15,6 +15,7 @@ import io.flutter.plugin.common.MethodChannel
 import net.kodehawa.lib.imageboards.ImageBoard
 import net.kodehawa.lib.imageboards.ImageBoards
 import net.kodehawa.lib.imageboards.entities.BoardImage
+import net.kodehawa.lib.imageboards.entities.impl.autocomplete.IAutoComplete
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import java.io.FilterInputStream
@@ -26,6 +27,7 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.LinkedHashMap
 import kotlin.random.Random
 
 class MainActivity : FlutterActivity() {
@@ -56,10 +58,61 @@ class MainActivity : FlutterActivity() {
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "fetch" -> fetch(call, result)
+            "autocomplete" -> autocomplete(call, result)
             "fetchMedia" -> fetchMedia(call, result)
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
             else -> result.notImplemented()
+        }
+    }
+
+    private fun autocomplete(call: MethodCall, result: MethodChannel.Result) {
+        val board = call.argument<String>("board")
+        if (board !in HOSTS) { result.error("INVALID_BOARD", "Unsupported imageboard", null); return }
+        val query = call.argument<String>("query") ?: ""
+        val limit = (call.argument<Number>("limit") ?: 10).toInt().coerceIn(1, 100)
+        val key = call.argument<String>("apiKey")
+        val user = call.argument<String>("userId")
+        if (board in setOf("rule34", "gelbooru") && (key.isNullOrBlank() || user.isNullOrBlank())) {
+            result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
+        }
+        if (board in setOf("konachan", "yandere")) { result.success(emptyList<Map<String, Any?>>()); return }
+        background(result) {
+            val api = when (board) {
+                "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
+                "gelbooru" -> ImageBoards.createGelbooru(key!!, user!!, client)
+                "e621" -> boards.E621
+                "e926" -> boards.E926
+                "danbooru" -> boards.DANBOORU
+                "safebooru" -> boards.SAFEBOORU
+                else -> boards.SAFEBOORU
+            }
+            try {
+                api.autocomplete<IAutoComplete>(query, limit).blocking().mapNotNull { suggestion ->
+                    val name = value(suggestion, "getTagName", "getName", "getValue", "getLabel")?.toString()?.trim()
+                    if (name.isNullOrEmpty()) return@mapNotNull null
+                    mapOf(
+                        "name" to name,
+                        "category" to autocompleteCategory(board!!, suggestion),
+                        "postCount" to (value(suggestion, "getPostCount") as? Number)?.toInt()
+                    )
+                }
+            } catch (_: IllegalArgumentException) { emptyList<Map<String, Any?>>() }
+        }
+    }
+
+    private fun autocompleteCategory(board: String, suggestion: Any): String {
+        if (board == "safebooru") return "general"
+        val raw = value(suggestion, "getCategory", "getType")
+        val number = (raw as? Number)?.toInt() ?: raw?.toString()?.trim()?.toIntOrNull()
+        return if (number != null) {
+            when (board) {
+                "e621", "e926" -> when (number) { 0 -> "general"; 1 -> "artist"; 3 -> "copyright"; 4 -> "character"; 5 -> "species"; 7 -> "meta"; 8 -> "lore"; else -> "unknown" }
+                else -> when (number) { 0 -> "general"; 1 -> "artist"; 3 -> "copyright"; 4 -> "character"; 5 -> "meta"; else -> "unknown" }
+            }
+        } else when (raw?.toString()?.trim()?.lowercase()) {
+            "general", "artist", "copyright", "character", "species", "meta", "lore" -> raw.toString().trim().lowercase()
+            else -> "unknown"
         }
     }
 
@@ -188,15 +241,57 @@ class MainActivity : FlutterActivity() {
             normalizeUrl(value(image, "getParsedPreviewFileUrl", "getPreview_url", "getPreviewUrl")?.toString(), board),
             board, apiKey, userId
         )
+        val rawTags = image.getTags() ?: emptyList<String>()
+        val details = tagDetails(image, board, rawTags)
         return mapOf(
             "id" to (value(image, "getId")?.toString() ?: "0"),
             "url" to original, "previewUrl" to preview,
-            "tags" to (image.getTags() ?: emptyList<String>()),
+            "tags" to rawTags,
+            "tagDetails" to details,
+            "postUrl" to postUrl(board, value(image, "getId")?.toString()),
             "rating" to (image.getRating()?.toString() ?: "Unknown"),
             "uploader" to (value(image, "getUploader_name", "getOwner", "getAuthor", "getUploader_id")?.toString() ?: ""),
             "source" to sourceValue(image), "width" to image.getWidth(), "height" to image.getHeight(),
             "score" to image.getScore(), "description" to (value(image, "getDescription")?.toString() ?: "")
         )
+    }
+
+    private fun tagDetails(image: BoardImage, board: String, rawTags: List<String>): List<Map<String, String>> {
+        val result = LinkedHashMap<String, String>()
+        fun add(values: Any?, category: String) {
+            (values as? List<*>)?.forEach { tag ->
+                val name = tag?.toString()?.trim() ?: ""
+                if (name.isNotEmpty()) result.putIfAbsent(name, category)
+            }
+        }
+        if (board == "e621" || board == "e926") {
+            val groups = value(image, "getAllTags")
+            add(value(groups ?: image, "getGeneral"), "general")
+            add(value(groups ?: image, "getArtist"), "artist")
+            add(value(groups ?: image, "getCopyright"), "copyright")
+            add(value(groups ?: image, "getCharacter"), "character")
+            add(value(groups ?: image, "getSpecies"), "species")
+            add(value(groups ?: image, "getMeta"), "meta")
+            add(value(groups ?: image, "getLore"), "lore")
+            add(rawTags, "general")
+        } else if (board == "danbooru") {
+            add(value(image, "getTag_string_artist")?.toString()?.split(Regex("\\s+")), "artist")
+            add(value(image, "getTag_string_character")?.toString()?.split(Regex("\\s+")), "character")
+            add(value(image, "getTag_string_copyright")?.toString()?.split(Regex("\\s+")), "copyright")
+            add(value(image, "getTag_string_meta")?.toString()?.split(Regex("\\s+")), "meta")
+            add(rawTags, "general")
+        } else add(rawTags, "general")
+        return result.map { mapOf("name" to it.key, "category" to it.value) }
+    }
+
+    private fun postUrl(board: String, id: String?): String? {
+        val numericId = id?.toLongOrNull() ?: return null
+        val host = HOSTS[board] ?: return null
+        return when (board) {
+            "danbooru", "e621", "e926" -> "https://$host/posts/$numericId"
+            "konachan", "yandere" -> "https://$host/post/show/$numericId"
+            else -> "https://$host/index.php?page=post&s=view&id=$numericId"
+        }
     }
 
     private fun normalizeUrl(value: String?, board: String): String {
@@ -284,7 +379,11 @@ class MainActivity : FlutterActivity() {
     private fun value(target: Any, vararg names: String): Any? {
         for (name in names) {
             try {
-                val found = target.javaClass.getMethod(name).invoke(target)
+                val method = try { target.javaClass.getMethod(name) } catch (_: NoSuchMethodException) {
+                    target.javaClass.getDeclaredMethod(name)
+                }
+                method.isAccessible = true
+                val found = method.invoke(target)
                 if (found != null && found.toString().isNotBlank()) return found
             } catch (_: ReflectiveOperationException) { }
         }

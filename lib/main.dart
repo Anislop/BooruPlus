@@ -96,7 +96,7 @@ class _SplashScreenState extends State<SplashScreen>
           child: ConstrainedBox(
             constraints: BoxConstraints(maxWidth: 420),
             child: Image(
-              image: AssetImage('assets/LogoFullColor.png'),
+              image: AssetImage('assets/LogoFullColorWhite.png'),
               fit: BoxFit.contain,
             ),
           ),

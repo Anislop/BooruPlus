@@ -48,6 +48,8 @@ public class DanbooruImage implements BoardImage {
     private String uploader_name;
     private String tag_string_artist;
     private String tag_string_character;
+    private String tag_string_copyright;
+    private String tag_string_meta;
     @JsonProperty("file_url")
     private String file_url;
     @JsonProperty("large_file_url")
@@ -159,6 +161,14 @@ public class DanbooruImage implements BoardImage {
 
     public String getTag_string_character() {
         return tag_string_character;
+    }
+
+    public String getTag_string_copyright() {
+        return tag_string_copyright;
+    }
+
+    public String getTag_string_meta() {
+        return tag_string_meta;
     }
 
     public String getFile_url() {

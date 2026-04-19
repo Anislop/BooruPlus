@@ -168,6 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (board == null) return const SizedBox.shrink();
     final site = appearanceFor(board);
     return Scaffold(
+      drawerEnableOpenDragGesture: state.settings.gesturesEnabled,
       appBar: AppBar(
         backgroundColor: site.surface,
         title: Row(
@@ -327,7 +328,11 @@ class _HomeScreenState extends State<HomeScreen> {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 180),
                 child: SingleChildScrollView(
-                  child: TagInput(tags: state.tags, onChanged: _search),
+                  child: TagInput(
+                    tags: state.tags,
+                    onChanged: _search,
+                    autocomplete: state.autocomplete,
+                  ),
                 ),
               ),
             ),
@@ -408,6 +413,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                       builder: (_) => MediaViewer(
                                         post: post,
                                         board: board,
+                                        posts: state.posts,
+                                        initialIndex: index,
                                         state: state,
                                       ),
                                     ),
@@ -575,6 +582,19 @@ class MediaTile extends StatelessWidget {
                     child: Icon(Icons.play_arrow_rounded, color: Colors.white),
                   ),
                 ),
+              if (post.tagDetails.isNotEmpty)
+                Positioned(
+                  top: 6,
+                  left: 6,
+                  right: 6,
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 3,
+                    children: [
+                      for (final tag in post.tagDetails.take(3)) _tagBadge(tag),
+                    ],
+                  ),
+                ),
               Positioned(
                 left: 6,
                 bottom: 6,
@@ -602,7 +622,35 @@ class MediaTile extends StatelessWidget {
       ),
     );
   }
+
+  Widget _tagBadge(TagInfo tag) {
+    final color = _tagColor(tag.category);
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 120),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: .72),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: .7)),
+      ),
+      child: Text(
+        tag.name,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: color, fontSize: 9),
+      ),
+    );
+  }
 }
+
+Color _tagColor(TagCategory category) => switch (category) {
+  TagCategory.artist => const Color(0xFFE8A0FF),
+  TagCategory.character => const Color(0xFF8BC8FF),
+  TagCategory.copyright => const Color(0xFFFFA56B),
+  TagCategory.species => const Color(0xFF91D99B),
+  TagCategory.meta => const Color(0xFFFFD166),
+  TagCategory.lore => const Color(0xFFC1A7FF),
+  _ => Colors.white70,
+};
 
 String _displayUrl(MediaPost post) {
   final dynamic value = post;

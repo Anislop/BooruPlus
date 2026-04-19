@@ -17,10 +17,14 @@ class MediaViewer extends StatefulWidget {
     required this.post,
     required this.board,
     required this.state,
+    this.posts = const [],
+    this.initialIndex = 0,
   });
   final MediaPost post;
   final Board board;
   final AppState state;
+  final List<MediaPost> posts;
+  final int initialIndex;
   @override
   State<MediaViewer> createState() => _MediaViewerState();
 }
@@ -33,6 +37,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   bool _downloading = false;
   bool _details = false;
   bool _muted = false;
+  late int _index;
+  Offset? _pointerDown;
+  int _videoGeneration = 0;
+  static const _videoControlsHeight = 160.0;
   final _downloads = DownloadService();
   AppLifecycleState _lifecycle =
       WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
@@ -40,24 +48,99 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _index = widget.posts.isEmpty
+        ? 0
+        : widget.initialIndex.clamp(0, widget.posts.length - 1).toInt();
     WidgetsBinding.instance.addObserver(this);
-    if (widget.post.isVideo) _initializeVideo();
+    if (_post.isVideo) _initializeVideo();
+  }
+
+  MediaPost get _post =>
+      widget.posts.isEmpty ? widget.post : widget.posts[_index];
+
+  void _handlePointerDown(PointerDownEvent event) {
+    if (!widget.state.settings.gesturesEnabled) {
+      _pointerDown = null;
+      return;
+    }
+    final inVideoControls =
+        _post.isVideo &&
+        event.position.dy >=
+            MediaQuery.sizeOf(context).height - _videoControlsHeight;
+    _pointerDown = inVideoControls ? null : event.position;
+  }
+
+  void _handlePointerUp(PointerUpEvent event) {
+    final start = _pointerDown;
+    _pointerDown = null;
+    if (start == null || !widget.state.settings.gesturesEnabled) return;
+    final delta = event.position - start;
+    if (delta.distance < 90) return;
+    if (!(_post.isVideo || _transform.value.getMaxScaleOnAxis() <= 1)) return;
+    if (delta.dx.abs() > delta.dy.abs()) {
+      if (delta.dx < -90) _move(1);
+      if (delta.dx > 90) _move(-1);
+    } else if (delta.dy > 90) {
+      Navigator.maybePop(context);
+    } else if (delta.dy < -90) {
+      setState(() => _details = true);
+    }
+  }
+
+  void _handlePointerCancel(PointerCancelEvent _) => _pointerDown = null;
+
+  void _disposeVideo() {
+    _videoGeneration++;
+    final player = _player;
+    _player = null;
+    player?.dispose();
+    final video = _video;
+    _video = null;
+    video?.dispose();
+  }
+
+  void _move(int amount) {
+    if (widget.posts.isEmpty) return;
+    final next = _index + amount;
+    if (next < 0 || next >= widget.posts.length) return;
+    _disposeVideo();
+    setState(() {
+      _index = next;
+      _videoError = null;
+      _details = false;
+      _transform.value = Matrix4.identity();
+    });
+    if (_post.isVideo) _initializeVideo();
   }
 
   Future<void> _initializeVideo() async {
-    final url = _mediaUrl(widget.post);
+    final generation = ++_videoGeneration;
+    final url = _mediaUrl(_post);
     if (url.isEmpty) {
       if (mounted) {
         setState(() => _videoError = 'This video has no playable URL.');
       }
       return;
     }
-    final video = VideoPlayerController.networkUrl(Uri.parse(url));
+    final video = VideoPlayerController.networkUrl(
+      Uri.parse(url),
+      httpHeaders: widget.board == Board.gelbooru
+          ? const {
+              'Referer': 'https://gelbooru.com/',
+              'User-Agent': 'BooruPlus/1.0',
+            }
+          : const {},
+    );
     _video = video;
     try {
       await video.initialize();
-      if (!mounted) return;
-      _player = ChewieController(
+      if (!mounted ||
+          generation != _videoGeneration ||
+          !identical(_video, video)) {
+        await video.dispose();
+        return;
+      }
+      final player = ChewieController(
         videoPlayerController: video,
         autoPlay: false,
         looping: true,
@@ -69,14 +152,34 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           child: Text('This video could not be played. Try reopening it.'),
         ),
       );
+      if (!mounted ||
+          generation != _videoGeneration ||
+          !identical(_video, video)) {
+        player.dispose();
+        await video.dispose();
+        return;
+      }
+      _player = player;
+      await video.setVolume(_muted ? 0 : 1);
+      if (!mounted ||
+          generation != _videoGeneration ||
+          !identical(_video, video)) {
+        player.dispose();
+        await video.dispose();
+        return;
+      }
       if (_lifecycle == AppLifecycleState.resumed) await video.play();
-      if (mounted) setState(() {});
+      if (mounted && generation == _videoGeneration) setState(() {});
     } catch (_) {
-      if (mounted) {
+      if (generation == _videoGeneration && mounted) {
         setState(
           () => _videoError = 'Unable to stream this video. The server or this device may not support its format.',
         );
       }
+      if (generation == _videoGeneration && identical(_video, video)) {
+        _video = null;
+      }
+      await video.dispose();
     }
   }
 
@@ -89,6 +192,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _videoGeneration++;
     _player?.dispose();
     _video?.dispose();
     _transform.dispose();
@@ -99,7 +203,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     setState(() => _downloading = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final url = _mediaUrl(widget.post);
+      final url = _mediaUrl(_post);
       if (url.isEmpty) throw StateError('Missing media URL');
       final path = Uri.parse(url).path;
       final extension = path.contains('.')
@@ -107,7 +211,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           : 'jpg';
       await _downloads.download(
         url: url,
-        name: '${widget.board.name}_${widget.post.id}.$extension',
+        name: '${widget.board.name}_${_post.id}.$extension',
         directory: widget.state.settings.downloadDirectory,
       );
       messenger.showSnackBar(
@@ -135,7 +239,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   Future<void> _openSource() async {
-    final uri = Uri.tryParse(widget.post.source);
+    final uri = Uri.tryParse(_post.source);
     if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
     try {
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
@@ -150,10 +254,27 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _openPost() async {
+    final uri = Uri.tryParse(_postBrowserUrl(widget.board, _post));
+    if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
+    try {
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw StateError('Unavailable');
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to open this post.')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final post = widget.post;
+    final post = _post;
     final site = appearanceFor(widget.board);
+    final browserUrl = _postBrowserUrl(widget.board, post);
     return Scaffold(
       backgroundColor: canvas,
       appBar: AppBar(
@@ -180,65 +301,58 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: 'Download original media',
-            onPressed: _downloading ? null : _download,
-            icon: _downloading
-                ? const SizedBox.square(
-                    dimension: 21,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download_outlined),
-          ),
-        ],
       ),
       body: SafeArea(
         top: false,
         child: Column(
           children: [
             Expanded(
-              child: post.isVideo
-                  ? _videoError != null
-                        ? Center(
-                            child: Padding(
-                              padding: const EdgeInsets.all(24),
-                              child: Text(
-                                _videoError!,
-                                textAlign: TextAlign.center,
-                              ),
-                            ),
-                          )
-                        : _player == null
-                        ? const Center(child: CircularProgressIndicator())
-                        : Chewie(controller: _player!)
-                  : GestureDetector(
-                      onDoubleTap: () => _transform.value =
-                          _transform.value.getMaxScaleOnAxis() > 1
-                          ? Matrix4.identity()
-                          : Matrix4.diagonal3Values(2.5, 2.5, 1),
-                      child: InteractiveViewer(
-                        transformationController: _transform,
-                        minScale: .5,
-                        maxScale: 8,
-                        child: Center(
-                          child: _mediaUrl(post).isEmpty
-                              ? const Padding(
-                                  padding: EdgeInsets.all(24),
-                                  child: Text(
-                                    'The original image is unavailable. It may have been removed or require website access.',
-                                    textAlign: TextAlign.center,
-                                  ),
-                                )
-                              : MediaImage(
-                                  url: _mediaUrl(post),
-                                  board: widget.board,
-                                  fit: BoxFit.contain,
-                                  errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
+              child: Listener(
+                onPointerDown: _handlePointerDown,
+                onPointerUp: _handlePointerUp,
+                onPointerCancel: _handlePointerCancel,
+                child: post.isVideo
+                    ? _videoError != null
+                          ? Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(24),
+                                child: Text(
+                                  _videoError!,
+                                  textAlign: TextAlign.center,
                                 ),
+                              ),
+                            )
+                          : _player == null
+                          ? const Center(child: CircularProgressIndicator())
+                          : Chewie(controller: _player!)
+                    : GestureDetector(
+                        onDoubleTap: () => _transform.value =
+                            _transform.value.getMaxScaleOnAxis() > 1
+                            ? Matrix4.identity()
+                            : Matrix4.diagonal3Values(2.5, 2.5, 1),
+                        child: InteractiveViewer(
+                          transformationController: _transform,
+                          minScale: .5,
+                          maxScale: 8,
+                          child: Center(
+                            child: _mediaUrl(post).isEmpty
+                                ? const Padding(
+                                    padding: EdgeInsets.all(24),
+                                    child: Text(
+                                      'The original image is unavailable. It may have been removed or require website access.',
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  )
+                                : MediaImage(
+                                    url: _mediaUrl(post),
+                                    board: widget.board,
+                                    fit: BoxFit.contain,
+                                    errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
+                                  ),
+                          ),
                         ),
                       ),
-                    ),
+              ),
             ),
             if (post.isVideo && _player != null)
               Row(
@@ -282,6 +396,30 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                   ),
                 ],
               ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                IconButton(
+                  tooltip: 'Download original media',
+                  onPressed: _downloading ? null : _download,
+                  icon: _downloading
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download_outlined),
+                ),
+                IconButton(
+                  tooltip: _details ? 'Hide details' : 'Show details',
+                  onPressed: () => setState(() => _details = !_details),
+                  icon: Icon(
+                    _details
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_up,
+                  ),
+                ),
+              ],
+            ),
             Material(
               color: panel,
               child: InkWell(
@@ -332,11 +470,6 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      Icon(
-                        _details
-                            ? Icons.keyboard_arrow_down
-                            : Icons.keyboard_arrow_up,
-                      ),
                     ],
                   ),
                 ),
@@ -373,6 +506,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                           const SectionLabel('Description'),
                           SelectableText(post.description),
                         ],
+                        if (browserUrl.isNotEmpty)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: _openPost,
+                              icon: const Icon(Icons.open_in_browser, size: 16),
+                              label: const Text('Open in browser'),
+                            ),
+                          ),
                         const SectionLabel('Original source'),
                         if (post.source.isEmpty)
                           const Text(
@@ -398,20 +540,37 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                             ],
                           ),
                         const SectionLabel('Tags · tap to search'),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: [
-                            for (final tag in post.tags)
-                              ActionChip(
-                                label: Text(
-                                  tag,
-                                  style: const TextStyle(fontSize: 12),
+                        for (final entry in _groupedTags(post).entries) ...[
+                          Text(
+                            _categoryLabel(entry.key),
+                            style: TextStyle(
+                              color: _tagColor(entry.key),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              for (final tag in entry.value)
+                                ActionChip(
+                                  label: Text(
+                                    tag.name,
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  side: BorderSide(
+                                    color: _tagColor(tag.category)
+                                        .withValues(alpha: .6),
+                                  ),
+                                  onPressed: () =>
+                                      Navigator.pop(context, tag.name),
                                 ),
-                                onPressed: () => Navigator.pop(context, tag),
-                              ),
-                          ],
-                        ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                        ],
                       ],
                     ),
                   ),
@@ -442,4 +601,49 @@ String _mediaUrl(MediaPost post) {
     }
   } catch (_) {}
   return post.url;
+}
+
+String _postBrowserUrl(Board board, MediaPost post) {
+  final provided = post.postUrl?.trim();
+  if (provided != null && provided.isNotEmpty) {
+    final uri = Uri.tryParse(provided);
+    if (uri != null &&
+        ['http', 'https'].contains(uri.scheme.toLowerCase()) &&
+        uri.host.toLowerCase() == board.host.toLowerCase()) {
+      return provided;
+    }
+  }
+  if (post.id <= 0) return '';
+  return switch (board) {
+    Board.danbooru => 'https://${board.host}/posts/${post.id}',
+    Board.e621 || Board.e926 => 'https://${board.host}/posts/${post.id}',
+    Board.konachan ||
+    Board.yandere => 'https://${board.host}/post/show/${post.id}',
+    _ => 'https://${board.host}/index.php?page=post&s=view&id=${post.id}',
+  };
+}
+
+String _categoryLabel(TagCategory category) => category.label;
+
+Color _tagColor(TagCategory category) => switch (category) {
+  TagCategory.artist => const Color(0xFFE8A0FF),
+  TagCategory.character => const Color(0xFF8BC8FF),
+  TagCategory.copyright => const Color(0xFFFFA56B),
+  TagCategory.species => const Color(0xFF91D99B),
+  TagCategory.meta => const Color(0xFFFFD166),
+  TagCategory.lore => const Color(0xFFC1A7FF),
+  _ => Colors.white70,
+};
+
+Map<TagCategory, List<TagInfo>> _groupedTags(MediaPost post) {
+  final tags = post.tagDetails.isEmpty
+      ? post.tags
+            .map((name) => TagInfo(name: name, category: TagCategory.general))
+            .toList()
+      : post.tagDetails;
+  final grouped = <TagCategory, List<TagInfo>>{};
+  for (final tag in tags) {
+    grouped.putIfAbsent(tag.category, () => []).add(tag);
+  }
+  return grouped;
 }

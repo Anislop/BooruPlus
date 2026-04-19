@@ -18,6 +18,7 @@ class AppState extends ChangeNotifier {
   bool _loading = false, _hasMore = true, _initialized = false;
   String? _error;
   int _generation = 0, _page = -1;
+  int _autocompleteGeneration = 0;
   int? _randomSeed;
   Credentials? _credentials;
 
@@ -31,6 +32,32 @@ class AppState extends ChangeNotifier {
   bool get initialized => _initialized;
   List<List<String>> get savedQueries =>
       List.unmodifiable(_settings.savedQueries);
+
+  Future<List<TagSuggestion>> autocomplete(String query) async {
+    final generation = ++_autocompleteGeneration;
+    final value = query.trim();
+    final board = _board;
+    if (value.length < 2 ||
+        board == null ||
+        (board.requiresAuth && _credentials == null)) {
+      return const [];
+    }
+    try {
+      final response = await _repository.autocomplete(
+        board: board,
+        query: value,
+        limit: 20,
+        credentials: _credentials,
+      );
+      if (generation != _autocompleteGeneration) return const [];
+      return response
+          .map(TagSuggestion.fromMap)
+          .where((item) => item.name.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
 
   Future<void> initialize() async {
     try {
@@ -301,6 +328,7 @@ class AppState extends ChangeNotifier {
 
   void _invalidate() {
     _generation++;
+    _autocompleteGeneration++;
     _loading = false;
   }
 

@@ -369,6 +369,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: SwitchListTile.adaptive(
+                            value: _settings.gesturesEnabled,
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(
+                                    () => _settings = _settings.copyWith(
+                                      gesturesEnabled: value,
+                                    ),
+                                  ),
+                            secondary: const Icon(Icons.swipe_rounded),
+                            title: const Text('Gestures'),
+                            subtitle: const Text(
+                              'Enable edge drawer opening and swipe navigation in the media viewer.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
+                        ),
+                      ),
                       const SectionLabel('Blacklisted tags'),
                       const Text(
                         'Blocked tags are added to every query and filtered from returned posts. Enter a tag, then press space.',
