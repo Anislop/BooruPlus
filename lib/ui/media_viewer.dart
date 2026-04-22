@@ -81,7 +81,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       if (delta.dx < -90) _move(1);
       if (delta.dx > 90) _move(-1);
     } else if (delta.dy > 90) {
-      Navigator.maybePop(context);
+      if (_details) {
+        setState(() => _details = false);
+      } else {
+        Navigator.maybePop(context);
+      }
     } else if (delta.dy < -90) {
       setState(() => _details = true);
     }
@@ -147,6 +151,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         allowFullScreen: true,
         allowMuting: true,
         showControls: true,
+        showControlsOnInitialize: false,
+        showPlayButton: false,
+        pauseOnBackgroundTap: true,
         playbackSpeeds: const [.25, .5, .75, 1, 1.25, 1.5, 2],
         errorBuilder: (_, _) => const Center(
           child: Text('This video could not be played. Try reopening it.'),
@@ -276,7 +283,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     final site = appearanceFor(widget.board);
     final browserUrl = _postBrowserUrl(widget.board, post);
     return Scaffold(
-      backgroundColor: canvas,
+      backgroundColor: post.isVideo ? Colors.black : canvas,
       appBar: AppBar(
         backgroundColor: site.surface,
         title: Row(
@@ -324,7 +331,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                             )
                           : _player == null
                           ? const Center(child: CircularProgressIndicator())
-                          : Chewie(controller: _player!)
+                          : Container(
+                              color: Colors.black,
+                              child: Chewie(controller: _player!),
+                            )
                     : GestureDetector(
                         onDoubleTap: () => _transform.value =
                             _transform.value.getMaxScaleOnAxis() > 1
@@ -372,13 +382,26 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                     ),
                     icon: const Icon(Icons.replay_10),
                   ),
-                  IconButton(
-                    tooltip: 'Mute or unmute',
-                    onPressed: () {
-                      setState(() => _muted = !_muted);
-                      _video!.setVolume(_muted ? 0 : 1);
+                  ValueListenableBuilder<VideoPlayerValue>(
+                    valueListenable: _video!,
+                    builder: (context, value, _) {
+                      final isPlaying = value.isPlaying;
+                      return IconButton(
+                        tooltip: isPlaying ? 'Pause' : 'Play',
+                        onPressed: () {
+                          if (isPlaying) {
+                            _video!.pause();
+                          } else {
+                            _video!.play();
+                          }
+                        },
+                        icon: Icon(
+                          isPlaying
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                        ),
+                      );
                     },
-                    icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
                   ),
                   IconButton(
                     tooltip: 'Forward 10 seconds',
@@ -393,6 +416,14 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                       ),
                     ),
                     icon: const Icon(Icons.forward_10),
+                  ),
+                  IconButton(
+                    tooltip: 'Mute or unmute',
+                    onPressed: () {
+                      setState(() => _muted = !_muted);
+                      _video!.setVolume(_muted ? 0 : 1);
+                    },
+                    icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
                   ),
                 ],
               ),
@@ -420,10 +451,17 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 ),
               ],
             ),
-            Material(
-              color: panel,
-              child: InkWell(
-                onTap: () => setState(() => _details = !_details),
+            GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onVerticalDragUpdate: (drag) {
+                if (_details && (drag.primaryDelta ?? 0) > 8) {
+                  setState(() => _details = false);
+                }
+              },
+              child: Material(
+                color: panel,
+                child: InkWell(
+                  onTap: () => setState(() => _details = !_details),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 20,
@@ -475,7 +513,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            if (_details)
+          ),
+          if (_details)
               ConstrainedBox(
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.sizeOf(context).height * .42,
@@ -483,8 +522,24 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 child: Container(
                   color: panel,
                   width: double.infinity,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification is OverscrollNotification &&
+                          notification.overscroll < -6) {
+                        setState(() => _details = false);
+                        return true;
+                      }
+                      if (notification is ScrollUpdateNotification &&
+                          notification.metrics.pixels <= 0 &&
+                          (notification.scrollDelta ?? 0) < -6) {
+                        setState(() => _details = false);
+                        return true;
+                      }
+                      return false;
+                    },
+                    child: SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -576,6 +631,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                   ),
                 ),
               ),
+            ),
           ],
         ),
       ),

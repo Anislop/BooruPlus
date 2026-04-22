@@ -169,6 +169,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final site = appearanceFor(board);
     return Scaffold(
       drawerEnableOpenDragGesture: state.settings.gesturesEnabled,
+      drawerEdgeDragWidth: state.settings.gesturesEnabled
+          ? MediaQuery.sizeOf(context).width
+          : null,
       appBar: AppBar(
         backgroundColor: site.surface,
         title: Row(

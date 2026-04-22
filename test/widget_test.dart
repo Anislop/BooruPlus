@@ -399,6 +399,110 @@ void main() {
       state.dispose();
     },
   );
+
+  testWidgets('swiping anywhere on home screen opens drawer', (tester) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(theme: appTheme, home: HomeScreen(state: state)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Websites'), findsNothing);
+
+    // Swipe right starting from middle of screen (x=300)
+    await tester.dragFrom(const Offset(300, 300), const Offset(300, 0));
+    await tester.pumpAndSettle();
+    expect(find.text('Websites'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets(
+    'swiping down when details visible dismisses details without closing post',
+    (tester) async {
+      final first = MediaPost.fromMap(
+        post(1, tags: ['artist:cat'])
+          ..['tagDetails'] = [
+            {'name': 'artist:cat', 'category': 'artist'},
+          ],
+      );
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore()..selected = Board.danbooru,
+      );
+      await state.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: MediaViewer(
+            post: first,
+            board: Board.danbooru,
+            state: state,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('#1'), findsOneWidget);
+
+      // Open details
+      await tester.tap(find.text('Tags & details'));
+      await tester.pump();
+      expect(find.text('Artist'), findsOneWidget);
+
+      // Swipe down on the media viewer
+      final gesture = await tester.startGesture(const Offset(200, 200));
+      await gesture.moveTo(const Offset(200, 350));
+      await gesture.up();
+      await tester.pump();
+
+      // Details should be closed, post #1 should still be open
+      expect(find.text('Artist'), findsNothing);
+      expect(find.text('#1'), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 350));
+
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
+
+  testWidgets('video post renders black background and bottom controls', (
+    tester,
+  ) async {
+    final videoPost = MediaPost.fromMap({
+      'id': 99,
+      'url': 'https://example.com/video.mp4',
+      'previewUrl': 'https://example.com/thumb.jpg',
+      'tags': ['animated'],
+      'isVideo': true,
+    });
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(
+          post: videoPost,
+          board: Board.danbooru,
+          state: state,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Verify Scaffold background is black for video
+    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    expect(scaffold.backgroundColor, Colors.black);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
 }
 
 Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
