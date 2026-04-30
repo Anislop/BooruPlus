@@ -331,6 +331,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ],
                         ),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: SwitchListTile.adaptive(
+                            value: _settings.hierarchicalGrid,
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(
+                                    () => _settings = _settings.copyWith(
+                                      hierarchicalGrid: value,
+                                    ),
+                                  ),
+                            secondary: const Icon(Icons.view_quilt_outlined),
+                            title: const Text('Hierarchical grid'),
+                            subtitle: const Text(
+                              'Use a proportional gallery layout on home and search results.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: SwitchListTile.adaptive(
+                            value: _settings.hidePostTags,
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(
+                                    () => _settings = _settings.copyWith(
+                                      hidePostTags: value,
+                                    ),
+                                  ),
+                            secondary: const Icon(Icons.label_off_outlined),
+                            title: const Text('Hide post tags'),
+                            subtitle: const Text(
+                              'Hide post tags on home and search results for a cleaner gallery.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
+                        ),
+                      ),
                       const SectionLabel('Discovery'),
                       _slider(
                         'Posts per batch',

@@ -19,6 +19,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final _scroll = ScrollController();
+  final _searchHistory = <List<String>>[];
+  bool _drawerOpen = false;
   @override
   void initState() {
     super.initState();
@@ -36,8 +38,29 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _search(List<String> tags) {
+    final next = List<String>.unmodifiable(tags);
+    if (!_sameQuery(widget.state.tags, next) &&
+        (_searchHistory.isEmpty ||
+            !_sameQuery(_searchHistory.last, widget.state.tags))) {
+      _searchHistory.add(List<String>.unmodifiable(widget.state.tags));
+    }
     if (_scroll.hasClients) _scroll.jumpTo(0);
-    widget.state.search(tags);
+    widget.state.search(next);
+  }
+
+  bool _sameQuery(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  void _handleBack() {
+    if (_searchHistory.isEmpty) return;
+    final previous = _searchHistory.removeLast();
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    widget.state.search(previous);
   }
 
   Future<void> _saveAndShowQueries() async {
@@ -162,374 +185,476 @@ class _HomeScreenState extends State<HomeScreen> {
     builder: (context, _) => _build(context),
   );
 
+  Widget _tile(
+    BuildContext context,
+    AppState state,
+    Board board,
+    int index,
+    bool hidePostTags,
+  ) {
+    final post = state.posts[index];
+    return MediaTile(
+      post: post,
+      board: board,
+      hidePostTags: hidePostTags,
+      onTap: () async {
+        final tag = await Navigator.push<String>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MediaViewer(
+              post: post,
+              board: board,
+              posts: state.posts,
+              initialIndex: index,
+              state: state,
+            ),
+          ),
+        );
+        if (tag != null && mounted) _search([tag]);
+      },
+    );
+  }
+
+  Widget _gallery(
+    BuildContext context,
+    AppState state,
+    Board board,
+    double tileHeight,
+    bool hierarchical,
+    bool hidePostTags,
+  ) {
+    if (!hierarchical) {
+      return SliverGrid(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: state.settings.columns,
+          mainAxisExtent: tileHeight,
+          crossAxisSpacing: 8,
+          mainAxisSpacing: 8,
+        ),
+        delegate: SliverChildBuilderDelegate(
+          (context, index) => _tile(context, state, board, index, hidePostTags),
+          childCount: state.posts.length,
+        ),
+      );
+    }
+    return SliverList(
+      delegate: SliverChildBuilderDelegate((context, rowIndex) {
+        final start = rowIndex * state.settings.columns;
+        final end = (start + state.settings.columns)
+            .clamp(0, state.posts.length)
+            .toInt();
+        final posts = state.posts.sublist(start, end);
+        final aspects = posts.map((post) {
+          final width = post.width > 0 ? post.width : 1;
+          final height = post.height > 0 ? post.height : 1;
+          return (width / height).clamp(.5, 3.0).toDouble();
+        }).toList();
+        final total = aspects.fold<double>(0, (sum, value) => sum + value);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SizedBox(
+            height: tileHeight,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var i = 0; i < posts.length; i++)
+                  Expanded(
+                    flex: (aspects[i] / total * 1000)
+                        .round()
+                        .clamp(1, 1000)
+                        .toInt(),
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        right: i + 1 == posts.length ? 0 : 8,
+                      ),
+                      child: _tile(
+                        context,
+                        state,
+                        board,
+                        start + i,
+                        hidePostTags,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      }, childCount: (state.posts.length / state.settings.columns).ceil()),
+    );
+  }
+
   Widget _build(BuildContext context) {
     final state = widget.state;
     final board = state.board;
     if (board == null) return const SizedBox.shrink();
     final site = appearanceFor(board);
-    return Scaffold(
-      drawerEnableOpenDragGesture: state.settings.gesturesEnabled,
-      drawerEdgeDragWidth: state.settings.gesturesEnabled
-          ? MediaQuery.sizeOf(context).width
-          : null,
-      appBar: AppBar(
-        backgroundColor: site.surface,
-        title: Row(
-          children: [
-            SiteLogo(board, size: 28, colored: true),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                site.name,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w700),
+    final hierarchicalGrid = state.settings.hierarchicalGrid;
+    final hidePostTags = state.settings.hidePostTags;
+    return PopScope<void>(
+      canPop: _searchHistory.isEmpty || _drawerOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && !_drawerOpen) _handleBack();
+      },
+      child: Scaffold(
+        onDrawerChanged: (open) {
+          if (_drawerOpen != open && mounted) {
+            setState(() => _drawerOpen = open);
+          }
+        },
+        drawerEnableOpenDragGesture: state.settings.gesturesEnabled,
+        drawerEdgeDragWidth: state.settings.gesturesEnabled
+            ? MediaQuery.sizeOf(context).width
+            : null,
+        appBar: AppBar(
+          backgroundColor: site.surface,
+          title: Row(
+            children: [
+              SiteLogo(board, size: 28, colored: true),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  site.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: state.tags.isEmpty
+                  ? 'Saved searches'
+                  : 'Save and open saved searches',
+              onPressed: _saveAndShowQueries,
+              icon: Icon(
+                state.tags.isEmpty
+                    ? Icons.bookmarks_outlined
+                    : Icons.bookmark_add_outlined,
               ),
             ),
+            if (state.savedQueries.isNotEmpty)
+              IconButton(
+                tooltip: 'Open saved searches',
+                onPressed: _showSavedQueries,
+                icon: const Icon(Icons.history_rounded),
+              ),
+            IconButton(
+              tooltip: 'Refresh feed',
+              onPressed: state.refresh,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+            const SizedBox(width: 8),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: state.tags.isEmpty
-                ? 'Saved searches'
-                : 'Save and open saved searches',
-            onPressed: _saveAndShowQueries,
-            icon: Icon(
-              state.tags.isEmpty
-                  ? Icons.bookmarks_outlined
-                  : Icons.bookmark_add_outlined,
-            ),
-          ),
-          if (state.savedQueries.isNotEmpty)
-            IconButton(
-              tooltip: 'Open saved searches',
-              onPressed: _showSavedQueries,
-              icon: const Icon(Icons.history_rounded),
-            ),
-          IconButton(
-            tooltip: 'Refresh feed',
-            onPressed: state.refresh,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      drawer: Drawer(
-        child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: EdgeInsets.all(24),
-                child: Row(
-                  children: [
-                    Image(
-                      image: AssetImage('assets/LogoFullColorWhite.png'),
-                      height: 38,
-                      fit: BoxFit.contain,
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                child: Text(
-                  'Browsing ${board.label}',
-                  style: const TextStyle(color: Colors.white54),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.tune_rounded),
-                title: const Text('Settings'),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute<void>(
-                      builder: (_) => SettingsScreen(state: state),
-                    ),
-                  );
-                },
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(24, 16, 24, 4),
-                child: Text(
-                  'Websites',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontWeight: FontWeight.w600,
+        drawer: Drawer(
+          child: SafeArea(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Row(
+                    children: [
+                      Image(
+                        image: AssetImage('assets/LogoFullColorWhite.png'),
+                        height: 38,
+                        fit: BoxFit.contain,
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              Expanded(
-                child: ListView(
-                  padding: EdgeInsets.zero,
-                  children: [
-                    for (final option in Board.values)
-                      ListTile(
-                        dense: true,
-                        selected: option == board,
-                        leading: SiteLogo(option, size: 32),
-                        title: Text(appearanceFor(option).name),
-                        onTap: option == board
-                            ? null
-                            : () async {
-                                Navigator.pop(context);
-                                await state.chooseBoard(option);
-                              },
-                      ),
-                  ],
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                  child: Text(
+                    'Browsing ${board.label}',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    InkWell(
-                      borderRadius: BorderRadius.circular(4),
-                      onTap: () {
-                        Navigator.pop(context);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute<void>(
-                            builder: (_) => SearchGuideScreen(board: board),
-                          ),
-                        );
-                      },
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 4),
-                        child: Text(
-                          'Learn to search',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            decoration: TextDecoration.underline,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
+                ListTile(
+                  leading: const Icon(Icons.tune_rounded),
+                  title: const Text('Settings'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => SettingsScreen(state: state),
+                      ),
+                    );
+                  },
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(24, 16, 24, 4),
+                  child: Text(
+                    'Websites',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    padding: EdgeInsets.zero,
+                    children: [
+                      for (final option in Board.values)
+                        ListTile(
+                          dense: true,
+                          selected: option == board,
+                          leading: SiteLogo(option, size: 32),
+                          title: Text(appearanceFor(option).name),
+                          onTap: option == board
+                              ? null
+                              : () async {
+                                  Navigator.pop(context);
+                                  _searchHistory.clear();
+                                  await state.chooseBoard(option);
+                                },
+                        ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        borderRadius: BorderRadius.circular(4),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (_) => SearchGuideScreen(board: board),
+                            ),
+                          );
+                        },
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 4),
+                          child: Text(
+                            'Learn to search',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              decoration: TextDecoration.underline,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
                           ),
                         ),
                       ),
+                      const SizedBox(height: 2),
+                      const Text(
+                        'BooruPlus · Android',
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        body: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: SingleChildScrollView(
+                    child: TagInput(
+                      tags: state.tags,
+                      onChanged: _search,
+                      autocomplete: state.autocomplete,
                     ),
-                    const SizedBox(height: 2),
-                    const Text(
-                      'BooruPlus · Android',
-                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ),
+              ),
+              FilterBar(
+                board: board,
+                tags: state.tags,
+                onFilter: _chooseFilter,
+                onDate: _pickDate,
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+                child: Row(
+                  children: [
+                    Icon(
+                      state.tags.isEmpty
+                          ? Icons.shuffle_rounded
+                          : Icons.tag_rounded,
+                      size: 16,
+                      color: accent,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        state.tags.isEmpty ? 'DISCOVER' : 'SEARCH RESULTS',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          letterSpacing: 1.8,
+                          color: accent,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${state.posts.length} posts',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white38,
+                      ),
                     ),
                   ],
+                ),
+              ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, bounds) {
+                    final tileHeight =
+                        ((bounds.maxHeight - 8 * (state.settings.rows - 1)) /
+                                state.settings.rows)
+                            .clamp(88.0, 600.0);
+                    return RefreshIndicator(
+                      onRefresh: state.refresh,
+                      child: CustomScrollView(
+                        controller: _scroll,
+                        clipBehavior: Clip.hardEdge,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        slivers: [
+                          SliverPadding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            sliver: _gallery(
+                              context,
+                              state,
+                              board,
+                              tileHeight,
+                              hierarchicalGrid,
+                              hidePostTags,
+                            ),
+                          ),
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 32,
+                                horizontal: 24,
+                              ),
+                              child: Center(
+                                child: state.loading
+                                    ? const CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      )
+                                    : state.error != null
+                                    ? Column(
+                                        children: [
+                                          const Icon(
+                                            Icons.cloud_off_outlined,
+                                            size: 32,
+                                            color: Colors.white54,
+                                          ),
+                                          const SizedBox(height: 12),
+                                          Text(
+                                            state.error!,
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Colors.white60,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          OutlinedButton(
+                                            onPressed: state.loadMore,
+                                            child: const Text('Try again'),
+                                          ),
+                                        ],
+                                      )
+                                    : state.posts.isEmpty
+                                    ? Column(
+                                        children: [
+                                          const Icon(
+                                            Icons.image_search_rounded,
+                                            size: 42,
+                                            color: Colors.white38,
+                                          ),
+                                          const SizedBox(height: 16),
+                                          const Text(
+                                            'No matching media',
+                                            style: TextStyle(
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          const Text(
+                                            'Try different tags or review your blacklist.',
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: Colors.white54,
+                                            ),
+                                          ),
+                                          TextButton(
+                                            onPressed: state.refresh,
+                                            child: const Text('Refresh'),
+                                          ),
+                                        ],
+                                      )
+                                    : state.hasMore
+                                    ? TextButton.icon(
+                                        onPressed: state.loadMore,
+                                        icon: const Icon(Icons.expand_more),
+                                        label: const Text('Load more'),
+                                      )
+                                    : const Text(
+                                        'You’re all caught up',
+                                        style: TextStyle(color: Colors.white38),
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
             ],
           ),
         ),
       ),
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 180),
-                child: SingleChildScrollView(
-                  child: TagInput(
-                    tags: state.tags,
-                    onChanged: _search,
-                    autocomplete: state.autocomplete,
-                  ),
-                ),
-              ),
-            ),
-            FilterBar(
-              board: board,
-              tags: state.tags,
-              onFilter: _chooseFilter,
-              onDate: _pickDate,
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
-              child: Row(
-                children: [
-                  Icon(
-                    state.tags.isEmpty
-                        ? Icons.shuffle_rounded
-                        : Icons.tag_rounded,
-                    size: 16,
-                    color: accent,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      state.tags.isEmpty ? 'DISCOVER' : 'SEARCH RESULTS',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        letterSpacing: 1.8,
-                        color: accent,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '${state.posts.length} posts',
-                    style: const TextStyle(fontSize: 12, color: Colors.white38),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, bounds) {
-                  final tileHeight =
-                      ((bounds.maxHeight - 8 * (state.settings.rows - 1)) /
-                              state.settings.rows)
-                          .clamp(88.0, 600.0);
-                  return RefreshIndicator(
-                    onRefresh: state.refresh,
-                    child: CustomScrollView(
-                      controller: _scroll,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      slivers: [
-                        SliverPadding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          sliver: SliverGrid(
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: state.settings.columns,
-                                  mainAxisExtent: tileHeight,
-                                  crossAxisSpacing: 8,
-                                  mainAxisSpacing: 8,
-                                ),
-                            delegate: SliverChildBuilderDelegate((
-                              context,
-                              index,
-                            ) {
-                              final post = state.posts[index];
-                              return MediaTile(
-                                post: post,
-                                board: board,
-                                onTap: () async {
-                                  final tag = await Navigator.push<String>(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => MediaViewer(
-                                        post: post,
-                                        board: board,
-                                        posts: state.posts,
-                                        initialIndex: index,
-                                        state: state,
-                                      ),
-                                    ),
-                                  );
-                                  if (tag != null && mounted) _search([tag]);
-                                },
-                              );
-                            }, childCount: state.posts.length),
-                          ),
-                        ),
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 32,
-                              horizontal: 24,
-                            ),
-                            child: Center(
-                              child: state.loading
-                                  ? const CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    )
-                                  : state.error != null
-                                  ? Column(
-                                      children: [
-                                        const Icon(
-                                          Icons.cloud_off_outlined,
-                                          size: 32,
-                                          color: Colors.white54,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        Text(
-                                          state.error!,
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            color: Colors.white60,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 12),
-                                        OutlinedButton(
-                                          onPressed: state.loadMore,
-                                          child: const Text('Try again'),
-                                        ),
-                                      ],
-                                    )
-                                  : state.posts.isEmpty
-                                  ? Column(
-                                      children: [
-                                        const Icon(
-                                          Icons.image_search_rounded,
-                                          size: 42,
-                                          color: Colors.white38,
-                                        ),
-                                        const SizedBox(height: 16),
-                                        const Text(
-                                          'No matching media',
-                                          style: TextStyle(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        const Text(
-                                          'Try different tags or review your blacklist.',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: Colors.white54,
-                                          ),
-                                        ),
-                                        TextButton(
-                                          onPressed: state.refresh,
-                                          child: const Text('Refresh'),
-                                        ),
-                                      ],
-                                    )
-                                  : state.hasMore
-                                  ? TextButton.icon(
-                                      onPressed: state.loadMore,
-                                      icon: const Icon(Icons.expand_more),
-                                      label: const Text('Load more'),
-                                    )
-                                  : const Text(
-                                      'You’re all caught up',
-                                      style: TextStyle(color: Colors.white38),
-                                    ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
 
-class MediaTile extends StatelessWidget {
+class MediaTile extends StatefulWidget {
   const MediaTile({
     super.key,
     required this.post,
     required this.board,
     required this.onTap,
+    this.hidePostTags = false,
   });
   final MediaPost post;
   final Board board;
   final VoidCallback onTap;
+  final bool hidePostTags;
+  @override
+  State<MediaTile> createState() => _MediaTileState();
+}
+
+class _MediaTileState extends State<MediaTile> {
+  bool _pressed = false;
+
   @override
   Widget build(BuildContext context) {
+    final post = widget.post;
+    final board = widget.board;
     final url = post.previewUrl.isNotEmpty
         ? post.previewUrl
         : _displayUrl(post);
@@ -567,59 +692,74 @@ class MediaTile extends StatelessWidget {
       label:
           '${post.isVideo ? 'Video' : 'Image'} ${post.id}, rating ${post.rating}',
       button: true,
-      child: Material(
-        color: panel,
-        borderRadius: BorderRadius.circular(12),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              media,
-              if (post.isVideo)
-                const Center(
-                  child: CircleAvatar(
-                    backgroundColor: Colors.black54,
-                    radius: 20,
-                    child: Icon(Icons.play_arrow_rounded, color: Colors.white),
-                  ),
-                ),
-              if (post.tagDetails.isNotEmpty)
-                Positioned(
-                  top: 6,
-                  left: 6,
-                  right: 6,
-                  child: Wrap(
-                    spacing: 4,
-                    runSpacing: 3,
-                    children: [
-                      for (final tag in post.tagDetails.take(3)) _tagBadge(tag),
-                    ],
-                  ),
-                ),
-              Positioned(
-                left: 6,
-                bottom: 6,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: .7),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    post.rating.toUpperCase(),
-                    style: const TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w600,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onLongPressStart: (_) => setState(() => _pressed = true),
+        onLongPressEnd: (_) => setState(() => _pressed = false),
+        onLongPressCancel: () => setState(() => _pressed = false),
+        child: AnimatedScale(
+          scale: _pressed ? 1.08 : 1,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          child: Material(
+            color: panel,
+            borderRadius: BorderRadius.circular(12),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: widget.onTap,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  media,
+                  if (post.isVideo)
+                    const Center(
+                      child: CircleAvatar(
+                        backgroundColor: Colors.black54,
+                        radius: 20,
+                        child: Icon(
+                          Icons.play_arrow_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  if (!widget.hidePostTags && post.tagDetails.isNotEmpty)
+                    Positioned(
+                      top: 6,
+                      left: 6,
+                      right: 6,
+                      child: Wrap(
+                        spacing: 4,
+                        runSpacing: 3,
+                        children: [
+                          for (final tag in post.tagDetails.take(3))
+                            _tagBadge(tag),
+                        ],
+                      ),
+                    ),
+                  Positioned(
+                    left: 6,
+                    bottom: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: .7),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        post.rating.toUpperCase(),
+                        style: const TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
                   ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),

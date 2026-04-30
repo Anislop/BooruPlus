@@ -335,6 +335,136 @@ void main() {
     expect(tag.style?.color, const Color(0xFFE8A0FF));
   });
 
+  testWidgets('home hides post tags and switches between grid layouts', (
+    tester,
+  ) async {
+    final store = MemoryStore()
+      ..selected = Board.danbooru
+      ..settings = const AppSettings(hidePostTags: true);
+    final state = AppState(
+      repository: FakeRepo([
+        [
+          post(1, tags: ['visible_tag'])
+            ..['tagDetails'] = [
+              {'name': 'visible_tag', 'category': 'general'},
+            ],
+        ],
+      ]),
+      store: store,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('visible_tag'), findsNothing);
+    expect(find.byType(SliverGrid), findsOneWidget);
+
+    await state.updateSettings(
+      const AppSettings(hierarchicalGrid: true, hidePostTags: false),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('visible_tag'), findsOneWidget);
+    expect(find.byType(SliverList), findsOneWidget);
+    expect(find.byType(SliverGrid), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets(
+    'media tile enlarges only during a long press and taps normally',
+    (tester) async {
+      var taps = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: Scaffold(
+            body: SizedBox(
+              width: 240,
+              height: 180,
+              child: MediaTile(
+                post: MediaPost.fromMap(post(13)),
+                board: Board.danbooru,
+                onTap: () => taps++,
+              ),
+            ),
+          ),
+        ),
+      );
+      final tile = find.byType(MediaTile);
+      double scale() => tester
+          .widget<AnimatedScale>(
+            find.descendant(of: tile, matching: find.byType(AnimatedScale)),
+          )
+          .scale;
+
+      expect(scale(), 1);
+      final held = await tester.startGesture(tester.getCenter(tile));
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(scale(), 1.08);
+      await held.up();
+      await tester.pump();
+      expect(scale(), 1);
+
+      final cancelled = await tester.startGesture(tester.getCenter(tile));
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(scale(), 1.08);
+      await cancelled.cancel();
+      await tester.pump();
+      expect(scale(), 1);
+
+      await tester.tap(tile);
+      expect(taps, 1);
+    },
+  );
+
+  testWidgets('home back restores the query before a tag-originated search', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo([
+        [
+          post(21, tags: ['origin_tag'])
+            ..['tagDetails'] = [
+              {'name': 'origin_tag', 'category': 'general'},
+            ],
+        ],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await state.search(['starting_query']);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(MediaTile).first);
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaViewer), findsOneWidget);
+    await tester.tap(find.byTooltip('Show details'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('origin_tag'));
+    await tester.tap(find.text('origin_tag'));
+    await tester.pumpAndSettle();
+    expect(state.tags, ['origin_tag']);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(state.tags, ['starting_query']);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets(
     'media viewer navigates between result posts and groups details',
     (tester) async {
@@ -369,11 +499,11 @@ void main() {
       expect(find.text('#1'), findsOneWidget);
 
       final gesture = await tester.startGesture(const Offset(180, 320));
-    await gesture.moveTo(const Offset(60, 320));
-    await gesture.up();
-    await tester.pump();
-    expect(find.text('#2'), findsOneWidget);
-    await tester.pump(const Duration(milliseconds: 350));
+      await gesture.moveTo(const Offset(60, 320));
+      await gesture.up();
+      await tester.pump();
+      expect(find.text('#2'), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 350));
 
       // Reopen the first post to verify the grouped details presentation.
       await tester.pumpWidget(
@@ -407,7 +537,10 @@ void main() {
     );
     await state.initialize();
     await tester.pumpWidget(
-      MaterialApp(theme: appTheme, home: HomeScreen(state: state)),
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.text('Websites'), findsNothing);
@@ -438,11 +571,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: appTheme,
-          home: MediaViewer(
-            post: first,
-            board: Board.danbooru,
-            state: state,
-          ),
+          home: MediaViewer(post: first, board: Board.danbooru, state: state),
         ),
       );
       await tester.pump();
@@ -487,11 +616,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: appTheme,
-        home: MediaViewer(
-          post: videoPost,
-          board: Board.danbooru,
-          state: state,
-        ),
+        home: MediaViewer(post: videoPost, board: Board.danbooru, state: state),
       ),
     );
     await tester.pump();

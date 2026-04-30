@@ -72,6 +72,25 @@ Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
 };
 
 void main() {
+  test(
+    'grid and tag visibility settings persist and legacy data gets defaults',
+    () {
+      final legacy = AppSettings.fromMap({'columns': 4});
+      expect(legacy.hierarchicalGrid, isFalse);
+      expect(legacy.hidePostTags, isFalse);
+      expect(legacy.toMap(), containsPair('hierarchicalGrid', isFalse));
+      expect(legacy.toMap(), containsPair('hidePostTags', isFalse));
+
+      final settings = const AppSettings(
+        hierarchicalGrid: true,
+        hidePostTags: true,
+      );
+      final restored = AppSettings.decode(settings.encode());
+      expect(restored.hierarchicalGrid, isTrue);
+      expect(restored.hidePostTags, isTrue);
+    },
+  );
+
   test('settings default no-AI and legacy JSON migration are compatible', () {
     expect(const AppSettings().excludeAi, isTrue);
     expect(const AppSettings().gesturesEnabled, isTrue);

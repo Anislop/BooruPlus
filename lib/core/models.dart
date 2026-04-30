@@ -257,6 +257,8 @@ class AppSettings {
     this.downloadDirectory,
     this.excludeAi = true,
     this.gesturesEnabled = true,
+    this.hierarchicalGrid = false,
+    this.hidePostTags = false,
     this.savedQueries = const [],
   });
   final int columns, rows, batchSize;
@@ -264,6 +266,8 @@ class AppSettings {
   final String? downloadDirectory;
   final bool excludeAi;
   final bool gesturesEnabled;
+  final bool hierarchicalGrid;
+  final bool hidePostTags;
   final List<List<String>> savedQueries;
 
   AppSettings normalized() => AppSettings(
@@ -274,6 +278,8 @@ class AppSettings {
     downloadDirectory: downloadDirectory,
     excludeAi: excludeAi,
     gesturesEnabled: gesturesEnabled,
+    hierarchicalGrid: hierarchicalGrid,
+    hidePostTags: hidePostTags,
     savedQueries: _normalizedQueries(savedQueries),
   );
 
@@ -285,6 +291,8 @@ class AppSettings {
     Object? downloadDirectory = _unset,
     bool? excludeAi,
     bool? gesturesEnabled,
+    bool? hierarchicalGrid,
+    bool? hidePostTags,
     List<List<String>>? savedQueries,
   }) => AppSettings(
     columns: columns ?? this.columns,
@@ -296,6 +304,8 @@ class AppSettings {
         : downloadDirectory as String?,
     excludeAi: excludeAi ?? this.excludeAi,
     gesturesEnabled: gesturesEnabled ?? this.gesturesEnabled,
+    hierarchicalGrid: hierarchicalGrid ?? this.hierarchicalGrid,
+    hidePostTags: hidePostTags ?? this.hidePostTags,
     savedQueries: savedQueries ?? this.savedQueries,
   ).normalized();
   static const _unset = Object();
@@ -308,6 +318,8 @@ class AppSettings {
     'downloadDirectory': downloadDirectory,
     'excludeAi': excludeAi,
     'gesturesEnabled': gesturesEnabled,
+    'hierarchicalGrid': hierarchicalGrid,
+    'hidePostTags': hidePostTags,
     'savedQueries': savedQueries,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
@@ -320,6 +332,8 @@ class AppSettings {
     downloadDirectory: map['downloadDirectory'] as String?,
     excludeAi: _asBool(map['excludeAi'] ?? map['noAi'], true),
     gesturesEnabled: _asBool(map['gesturesEnabled'], true),
+    hierarchicalGrid: _asBool(map['hierarchicalGrid'], false),
+    hidePostTags: _asBool(map['hidePostTags'], false),
     savedQueries: _queriesFromMap(map['savedQueries']),
   ).normalized();
   String encode() => jsonEncode(toMap());
@@ -377,6 +391,8 @@ class AppSettings {
         other.downloadDirectory != downloadDirectory ||
         other.excludeAi != excludeAi ||
         other.gesturesEnabled != gesturesEnabled ||
+        other.hierarchicalGrid != hierarchicalGrid ||
+        other.hidePostTags != hidePostTags ||
         other.blacklist.length != blacklist.length ||
         other.savedQueries.length != savedQueries.length) {
       return false;
@@ -403,6 +419,8 @@ class AppSettings {
     downloadDirectory,
     excludeAi,
     gesturesEnabled,
+    hierarchicalGrid,
+    hidePostTags,
     Object.hashAll(blacklist),
     Object.hashAll(savedQueries.map(Object.hashAll)),
   );

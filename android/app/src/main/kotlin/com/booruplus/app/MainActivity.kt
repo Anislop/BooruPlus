@@ -18,6 +18,9 @@ import net.kodehawa.lib.imageboards.entities.BoardImage
 import net.kodehawa.lib.imageboards.entities.impl.autocomplete.IAutoComplete
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
@@ -39,11 +42,20 @@ class MainActivity : FlutterActivity() {
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
+    private val gelbooruTagClient = client.newBuilder()
+        .connectTimeout(TAG_LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(TAG_LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .callTimeout(TAG_LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
     private val boards by lazy { ImageBoards(client) }
     private var directoryResult: MethodChannel.Result? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
     private val discoveryWindows = ConcurrentHashMap<Int, Int>()
     private val providerCursors = ConcurrentHashMap<String, ProviderCursor>()
+    private val gelbooruTagCache = object : LinkedHashMap<String, String>(TAG_CACHE_LIMIT, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > TAG_CACHE_LIMIT
+    }
+    private val gelbooruTagCacheLock = Any()
     @Volatile private var closing = false
 
     private data class ProviderCursor(val page: Int, val offset: Int)
@@ -108,7 +120,13 @@ class MainActivity : FlutterActivity() {
         return if (number != null) {
             when (board) {
                 "e621", "e926" -> when (number) { 0 -> "general"; 1 -> "artist"; 3 -> "copyright"; 4 -> "character"; 5 -> "species"; 7 -> "meta"; 8 -> "lore"; else -> "unknown" }
-                else -> when (number) { 0 -> "general"; 1 -> "artist"; 3 -> "copyright"; 4 -> "character"; 5 -> "meta"; else -> "unknown" }
+                // Keep Danbooru's numeric ids local to Danbooru. Gelbooru
+                // autocomplete normally supplies a semantic category string,
+                // while Rule34 supplies a provider-owned type string; numeric
+                // values from either provider remain unknown rather than being
+                // guessed with another board's taxonomy.
+                "danbooru" -> when (number) { 0 -> "general"; 1 -> "artist"; 3 -> "copyright"; 4 -> "character"; 5 -> "meta"; else -> "unknown" }
+                else -> "unknown"
             }
         } else when (raw?.toString()?.trim()?.lowercase()) {
             "general", "artist", "copyright", "character", "species", "meta", "lore" -> raw.toString().trim().lowercase()
@@ -175,8 +193,68 @@ class MainActivity : FlutterActivity() {
             if (discoveryWindows.size > 128) discoveryWindows.keys.filter { it != seed }.take(64).forEach { discoveryWindows.remove(it) }
             if (providerCursors.size > 256) providerCursors.keys.take(128).forEach { providerCursors.remove(it) }
             val ordered = if (random) images.shuffled(Random(seed xor page)) else images
+            enrichProviderTags(board, ordered, key, user)
             ordered.map { mapImage(it, board, key, user) }
         }
+    }
+
+    /**
+     * Gelbooru's tag API accepts a space-separated `names` list and returns
+     * [{"name":"...", "type":0}]. Keep this deliberately bounded: post
+     * fetching must remain useful when the metadata service is unavailable.
+     */
+    private fun enrichProviderTags(
+        board: String,
+        images: List<BoardImage>,
+        apiKey: String?,
+        userId: String?
+    ) {
+        if (board != "gelbooru" || apiKey.isNullOrBlank() || userId.isNullOrBlank()) return
+        val missing = LinkedHashSet<String>()
+        images.flatMap { it.getTags() ?: emptyList() }.forEach { tag ->
+            val name = tag.trim()
+            if (name.isNotEmpty() && tagCategory(board, name) == null) missing.add(name)
+        }
+        if (missing.isEmpty()) return
+        for (batch in missing.chunked(TAG_LOOKUP_BATCH_SIZE).take(TAG_LOOKUP_MAX_BATCHES)) {
+            try {
+                val url = okhttp3.HttpUrl.Builder()
+                    .scheme("https").host("gelbooru.com").addPathSegments("index.php")
+                    .addQueryParameter("page", "dapi").addQueryParameter("s", "tag")
+                    .addQueryParameter("q", "index").addQueryParameter("json", "1")
+                    .addQueryParameter("names", batch.joinToString(" "))
+                    .addQueryParameter("api_key", apiKey).addQueryParameter("user_id", userId)
+                    .build()
+                gelbooruTagClient.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
+                    .execute().use { response ->
+                        if (!response.isSuccessful) return
+                        val body = response.body?.string() ?: return
+                        val records = parseGelbooruTagRecords(body)
+                        val found = HashSet<String>()
+                        for (index in 0 until records.length()) {
+                            val record = records.optJSONObject(index) ?: continue
+                            val name = record.optString("name").trim()
+                            if (name.isEmpty()) continue
+                            putTagCategory(board, name, gelbooruTagCategory(record.opt("type")))
+                            found.add(name)
+                        }
+                        // Negative caching prevents repeated lookups for tags
+                        // omitted by the provider response.
+                        batch.filterNot { found.contains(it) }.forEach { putTagCategory(board, it, "unknown") }
+                    }
+            } catch (_: Exception) {
+                // Metadata is optional; post results must not fail because of it.
+                break
+            }
+        }
+    }
+
+    private fun tagCategory(board: String, tag: String): String? = synchronized(gelbooruTagCacheLock) {
+        gelbooruTagCache["$board\u0000$tag"]
+    }
+
+    private fun putTagCategory(board: String, tag: String, category: String) = synchronized(gelbooruTagCacheLock) {
+        gelbooruTagCache["$board\u0000$tag"] = category
     }
 
     private fun makeCursorKey(board: String, tags: List<String>, limit: Int, random: Boolean, seed: Int): String =
@@ -275,10 +353,20 @@ class MainActivity : FlutterActivity() {
             add(value(groups ?: image, "getLore"), "lore")
             add(rawTags, "general")
         } else if (board == "danbooru") {
+            add(value(image, "getTag_string_general")?.toString()?.split(Regex("\\s+")), "general")
             add(value(image, "getTag_string_artist")?.toString()?.split(Regex("\\s+")), "artist")
             add(value(image, "getTag_string_character")?.toString()?.split(Regex("\\s+")), "character")
             add(value(image, "getTag_string_copyright")?.toString()?.split(Regex("\\s+")), "copyright")
             add(value(image, "getTag_string_meta")?.toString()?.split(Regex("\\s+")), "meta")
+            add(rawTags, "general")
+        } else if (board == "gelbooru") {
+            rawTags.forEach { tag ->
+                val name = tag.trim()
+                if (name.isNotEmpty()) {
+                    val category = tagCategory(board, name)
+                    if (category != null && category != "unknown") result[name] = category
+                }
+            }
             add(rawTags, "general")
         } else add(rawTags, "general")
         return result.map { mapOf("name" to it.key, "category" to it.value) }
@@ -525,9 +613,40 @@ class MainActivity : FlutterActivity() {
         private const val MAX_WINDOW_REQUESTS = 32
         private const val MAX_MEDIA_REDIRECTS = 5
         private const val MAX_MEDIA_BYTES = 50L * 1024L * 1024L
+        private const val TAG_LOOKUP_BATCH_SIZE = 40
+        private const val TAG_LOOKUP_MAX_BATCHES = 4
+        private const val TAG_LOOKUP_TIMEOUT_SECONDS = 8L
+        private const val TAG_CACHE_LIMIT = 512
         private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
         private const val GELBOORU_REFERER = "https://gelbooru.com/"
         private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net")
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
+    }
+}
+
+internal fun parseGelbooruTagRecords(body: String): JSONArray {
+    val payload = body.trim()
+    if (payload.startsWith("[")) return JSONArray(payload)
+    val envelope = JSONObject(payload)
+    val tags = envelope.opt("tag")
+    if (tags is JSONArray) return tags
+    if (tags is JSONObject) return JSONArray().apply { put(tags) }
+    return JSONArray()
+}
+
+internal fun gelbooruTagCategory(raw: Any?): String {
+    val type = when (raw) {
+        is Number -> raw.toInt()
+        else -> raw?.toString()?.trim()?.toIntOrNull()
+    }
+    // Gelbooru tag types are provider-local: 0 general, 1 artist,
+    // 2 invalid/unused, 3 copyright, 4 character, 5 meta.
+    return when (type) {
+        0 -> "general"
+        1 -> "artist"
+        3 -> "copyright"
+        4 -> "character"
+        5 -> "meta"
+        else -> "unknown"
     }
 }
