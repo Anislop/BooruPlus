@@ -248,6 +248,99 @@ class MediaPost {
   }
 }
 
+class SavedPost {
+  const SavedPost({required this.board, required this.post});
+  final Board board;
+  final MediaPost post;
+
+  String get identity => post.id > 0
+      ? '${board.name}:id:${post.id}'
+      : '${board.name}:url:${_withoutCredentials(post.url)}|preview:${_withoutCredentials(post.previewUrl)}|tags:${post.tags.join(' ')}|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
+
+  SavedPost authorized(Credentials? credentials) {
+    if (board != Board.gelbooru ||
+        credentials == null ||
+        !credentials.isValid) {
+      return this;
+    }
+    return SavedPost(
+      board: board,
+      post: _withUrls(
+        post,
+        _authorizeUrl(post.url, credentials),
+        _authorizeUrl(post.previewUrl, credentials),
+      ),
+    );
+  }
+
+  SavedPost sanitized() => SavedPost(
+    board: board,
+    post: _withUrls(
+      post,
+      _withoutCredentials(post.url),
+      _withoutCredentials(post.previewUrl),
+    ),
+  );
+
+  Map<String, dynamic> toMap() => {'board': board.name, 'post': post.toMap()};
+  factory SavedPost.fromMap(Map<dynamic, dynamic> map) => SavedPost(
+    board: Board.values.firstWhere(
+      (value) => value.name == map['board'],
+      orElse: () => Board.safebooru,
+    ),
+    post: MediaPost.fromMap((map['post'] as Map?) ?? map),
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is SavedPost && other.identity == identity;
+
+  @override
+  int get hashCode => identity.hashCode;
+
+  static String _authorizeUrl(String value, Credentials credentials) {
+    if (value.trim().isEmpty) return value;
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        !(uri.host == 'gelbooru.com' || uri.host.endsWith('.gelbooru.com'))) {
+      return value;
+    }
+    final query = Map<String, String>.from(uri.queryParameters)
+      ..['api_key'] = credentials.apiKey
+      ..['user_id'] = credentials.userId;
+    return uri.replace(queryParameters: query).toString();
+  }
+
+  static String _withoutCredentials(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.query.isEmpty) return value;
+    final query = Map<String, String>.from(uri.queryParameters)
+      ..remove('api_key')
+      ..remove('user_id');
+    return uri.replace(queryParameters: query).toString();
+  }
+
+  static MediaPost _withUrls(MediaPost value, String url, String previewUrl) =>
+      MediaPost(
+        id: value.id,
+        url: url,
+        previewUrl: previewUrl,
+        tags: value.tags,
+        rating: value.rating,
+        uploader: value.uploader,
+        source: value.source,
+        width: value.width,
+        height: value.height,
+        score: value.score,
+        description: value.description,
+        isVideo: value.isVideo,
+        extension: value.extension,
+        tagDetails: value.tagDetails,
+        postUrl: value.postUrl,
+      );
+}
+
 class AppSettings {
   const AppSettings({
     this.columns = 3,
@@ -259,6 +352,8 @@ class AppSettings {
     this.gesturesEnabled = true,
     this.hierarchicalGrid = false,
     this.hidePostTags = false,
+    this.blurExplicit = false,
+    this.blurQuestionable = false,
     this.savedQueries = const [],
   });
   final int columns, rows, batchSize;
@@ -268,6 +363,8 @@ class AppSettings {
   final bool gesturesEnabled;
   final bool hierarchicalGrid;
   final bool hidePostTags;
+  final bool blurExplicit;
+  final bool blurQuestionable;
   final List<List<String>> savedQueries;
 
   AppSettings normalized() => AppSettings(
@@ -280,6 +377,8 @@ class AppSettings {
     gesturesEnabled: gesturesEnabled,
     hierarchicalGrid: hierarchicalGrid,
     hidePostTags: hidePostTags,
+    blurExplicit: blurExplicit,
+    blurQuestionable: blurQuestionable,
     savedQueries: _normalizedQueries(savedQueries),
   );
 
@@ -293,6 +392,8 @@ class AppSettings {
     bool? gesturesEnabled,
     bool? hierarchicalGrid,
     bool? hidePostTags,
+    bool? blurExplicit,
+    bool? blurQuestionable,
     List<List<String>>? savedQueries,
   }) => AppSettings(
     columns: columns ?? this.columns,
@@ -306,6 +407,8 @@ class AppSettings {
     gesturesEnabled: gesturesEnabled ?? this.gesturesEnabled,
     hierarchicalGrid: hierarchicalGrid ?? this.hierarchicalGrid,
     hidePostTags: hidePostTags ?? this.hidePostTags,
+    blurExplicit: blurExplicit ?? this.blurExplicit,
+    blurQuestionable: blurQuestionable ?? this.blurQuestionable,
     savedQueries: savedQueries ?? this.savedQueries,
   ).normalized();
   static const _unset = Object();
@@ -320,6 +423,8 @@ class AppSettings {
     'gesturesEnabled': gesturesEnabled,
     'hierarchicalGrid': hierarchicalGrid,
     'hidePostTags': hidePostTags,
+    'blurExplicit': blurExplicit,
+    'blurQuestionable': blurQuestionable,
     'savedQueries': savedQueries,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
@@ -334,6 +439,8 @@ class AppSettings {
     gesturesEnabled: _asBool(map['gesturesEnabled'], true),
     hierarchicalGrid: _asBool(map['hierarchicalGrid'], false),
     hidePostTags: _asBool(map['hidePostTags'], false),
+    blurExplicit: _asBool(map['blurExplicit'], false),
+    blurQuestionable: _asBool(map['blurQuestionable'], false),
     savedQueries: _queriesFromMap(map['savedQueries']),
   ).normalized();
   String encode() => jsonEncode(toMap());
@@ -393,6 +500,8 @@ class AppSettings {
         other.gesturesEnabled != gesturesEnabled ||
         other.hierarchicalGrid != hierarchicalGrid ||
         other.hidePostTags != hidePostTags ||
+        other.blurExplicit != blurExplicit ||
+        other.blurQuestionable != blurQuestionable ||
         other.blacklist.length != blacklist.length ||
         other.savedQueries.length != savedQueries.length) {
       return false;
@@ -421,6 +530,8 @@ class AppSettings {
     gesturesEnabled,
     hierarchicalGrid,
     hidePostTags,
+    blurExplicit,
+    blurQuestionable,
     Object.hashAll(blacklist),
     Object.hashAll(savedQueries.map(Object.hashAll)),
   );

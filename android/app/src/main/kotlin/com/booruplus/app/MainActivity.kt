@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -74,7 +75,20 @@ class MainActivity : FlutterActivity() {
             "fetchMedia" -> fetchMedia(call, result)
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
+            "setKeepScreenOn" -> setKeepScreenOn(call, result)
             else -> result.notImplemented()
+        }
+    }
+
+    private fun setKeepScreenOn(call: MethodCall, result: MethodChannel.Result) {
+        val enabled = call.argument<Boolean>("enabled") ?: false
+        runOnUiThread {
+            if (enabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            result.success(null)
         }
     }
 

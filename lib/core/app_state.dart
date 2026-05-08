@@ -6,11 +6,20 @@ import 'models.dart';
 import 'services.dart';
 
 class AppState extends ChangeNotifier {
-  AppState({BoardRepository? repository, SettingsStore? store})
-    : _repository = repository ?? PlatformBoardRepository(),
-      _store = store ?? LocalSettingsStore();
+  AppState({
+    BoardRepository? repository,
+    SettingsStore? store,
+    PostStore? postStore,
+  }) : _repository = repository ?? PlatformBoardRepository(),
+       _store = store ?? LocalSettingsStore(),
+       _postStore =
+           postStore ??
+           (store == null || store is LocalSettingsStore
+               ? LocalPostStore()
+               : MemoryPostStore());
   final BoardRepository _repository;
   final SettingsStore _store;
+  final PostStore _postStore;
   AppSettings _settings = const AppSettings();
   Board? _board;
   List<MediaPost> _posts = const [];
@@ -21,6 +30,9 @@ class AppState extends ChangeNotifier {
   int _autocompleteGeneration = 0;
   int? _randomSeed;
   Credentials? _credentials;
+  final Map<Board, Credentials?> _credentialsByBoard = {};
+  List<SavedPost> _favoritePosts = const [];
+  List<SavedPost> _hiddenPosts = const [];
 
   AppSettings get settings => _settings;
   Board? get board => _board;
@@ -32,6 +44,67 @@ class AppState extends ChangeNotifier {
   bool get initialized => _initialized;
   List<List<String>> get savedQueries =>
       List.unmodifiable(_settings.savedQueries);
+  List<SavedPost> get favoritePosts => List.unmodifiable(_favoritePosts);
+  List<SavedPost> get hiddenPosts => List.unmodifiable(_hiddenPosts);
+  bool isFavorite(MediaPost post, {Board? board}) => _favoritePosts.any(
+    (saved) => saved.identity == _saved(post, board).identity,
+  );
+  bool isHidden(MediaPost post, {Board? board}) => _hiddenPosts.any(
+    (saved) => saved.identity == _saved(post, board).identity,
+  );
+
+  SavedPost displayReady(SavedPost post) =>
+      post.authorized(_credentialsByBoard[post.board]);
+  MediaPost authorizedPost(MediaPost post, {Board? board}) =>
+      displayReady(_saved(post, board)).post;
+
+  Future<void> toggleFavorite(MediaPost post, {Board? board}) async {
+    if (isFavorite(post, board: board)) {
+      await unfavoritePost(post, board: board);
+    } else {
+      await favoritePost(post, board: board);
+    }
+  }
+
+  Future<void> favoritePost(MediaPost post, {Board? board}) async {
+    final saved = _saved(post, board);
+    if (_favoritePosts.any((value) => value.identity == saved.identity)) return;
+    _favoritePosts = [..._favoritePosts, saved];
+    await _postStore.saveFavorites(_favoritePosts);
+    notifyListeners();
+  }
+
+  Future<void> unfavoritePost(MediaPost post, {Board? board}) async {
+    final saved = _saved(post, board);
+    _favoritePosts = _favoritePosts
+        .where((value) => value.identity != saved.identity)
+        .toList(growable: false);
+    await _postStore.saveFavorites(_favoritePosts);
+    notifyListeners();
+  }
+
+  Future<void> hidePost(MediaPost post, {Board? board}) async {
+    final saved = _saved(post, board);
+    if (!_hiddenPosts.any((value) => value.identity == saved.identity)) {
+      _hiddenPosts = [..._hiddenPosts, saved];
+      await _postStore.saveHidden(_hiddenPosts);
+    }
+    if (saved.board == _board) {
+      _posts = _posts
+          .where((value) => _postKey(value) != _postKey(post))
+          .toList();
+    }
+    notifyListeners();
+  }
+
+  Future<void> unhidePost(MediaPost post, {Board? board}) async {
+    final saved = _saved(post, board);
+    _hiddenPosts = _hiddenPosts
+        .where((value) => value.identity != saved.identity)
+        .toList(growable: false);
+    await _postStore.saveHidden(_hiddenPosts);
+    notifyListeners();
+  }
 
   Future<List<TagSuggestion>> autocomplete(String query) async {
     final generation = ++_autocompleteGeneration;
@@ -69,6 +142,21 @@ class AppState extends ChangeNotifier {
       _settings = settings;
       _board = board;
       _credentials = credentials;
+      if (board != null) _credentialsByBoard[board] = credentials;
+      _favoritePosts = (await _postStore.loadFavorites())
+          .map((saved) => saved.sanitized())
+          .toList(growable: false);
+      _hiddenPosts = (await _postStore.loadHidden())
+          .map((saved) => saved.sanitized())
+          .toList(growable: false);
+      for (final saved in [..._favoritePosts, ..._hiddenPosts]) {
+        if (saved.board.requiresAuth &&
+            !_credentialsByBoard.containsKey(saved.board)) {
+          _credentialsByBoard[saved.board] = await _store.loadCredentials(
+            saved.board,
+          );
+        }
+      }
     } catch (error) {
       _error = _friendly(error);
     }
@@ -90,6 +178,7 @@ class AppState extends ChangeNotifier {
       if (generation != _generation) return;
       _board = value;
       _credentials = loadedCredentials;
+      _credentialsByBoard[value] = loadedCredentials;
       _clearResults();
       _tags = const [];
       notifyListeners();
@@ -183,16 +272,22 @@ class AppState extends ChangeNotifier {
     await _load(reset: true, generation: _generation);
   }
 
-  Future<Credentials?> credentialsFor(Board value) =>
-      _store.loadCredentials(value);
+  Future<Credentials?> credentialsFor(Board value) async {
+    final credentials = await _store.loadCredentials(value);
+    _credentialsByBoard[value] = credentials;
+    return credentials;
+  }
+
   Future<void> saveCredentials(Board value, Credentials credentials) async {
     await _store.saveCredentials(value, credentials);
+    _credentialsByBoard[value] = credentials;
     if (value == _board) _credentials = credentials;
     notifyListeners();
   }
 
   Future<void> forgetCredentials(Board value) async {
     await _store.removeCredentials(value);
+    _credentialsByBoard.remove(value);
     if (value == _board) {
       _invalidate();
       _credentials = null;
@@ -217,6 +312,7 @@ class AppState extends ChangeNotifier {
       credentials: credentials,
     );
     await _store.saveCredentials(value, credentials);
+    _credentialsByBoard[value] = credentials;
     if (value == _board) {
       _invalidate();
       _credentials = credentials;
@@ -313,11 +409,16 @@ class AppState extends ChangeNotifier {
       !_settings.blacklist.any(
         (blocked) =>
             post.tags.any((tag) => _normalize(tag) == _normalize(blocked)),
-      );
-  String _postKey(MediaPost post) => post.id > 0
-      ? 'id:${post.id}'
-      : 'url:${post.url}|preview:${post.previewUrl}|tags:${post.tags.join(' ')}'
-            '|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
+      ) &&
+      !_isHidden(post);
+
+  bool _isHidden(MediaPost post) => isHidden(post, board: _board);
+
+  SavedPost _saved(MediaPost post, Board? board) => SavedPost(
+    board: board ?? _board ?? Board.safebooru,
+    post: post,
+  ).sanitized();
+  String _postKey(MediaPost post) => _saved(post, _board).identity;
   String _normalize(String value) =>
       value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
   void _clearResults() {

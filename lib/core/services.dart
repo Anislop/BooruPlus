@@ -35,6 +35,97 @@ abstract interface class SettingsStore {
   Future<void> removeCredentials(Board board);
 }
 
+abstract interface class PostStore {
+  Future<List<SavedPost>> loadFavorites();
+  Future<List<SavedPost>> loadHidden();
+  Future<void> saveFavorites(Iterable<SavedPost> posts);
+  Future<void> saveHidden(Iterable<SavedPost> posts);
+}
+
+class MemoryPostStore implements PostStore {
+  List<SavedPost> _favorites = const [];
+  List<SavedPost> _hidden = const [];
+  @override
+  Future<List<SavedPost>> loadFavorites() async => _favorites;
+  @override
+  Future<List<SavedPost>> loadHidden() async => _hidden;
+  @override
+  Future<void> saveFavorites(Iterable<SavedPost> posts) async =>
+      _favorites = List.unmodifiable(posts);
+  @override
+  Future<void> saveHidden(Iterable<SavedPost> posts) async =>
+      _hidden = List.unmodifiable(posts);
+}
+
+class LocalPostStore implements PostStore {
+  LocalPostStore({SharedPreferences? preferences}) {
+    _preferences = preferences;
+  }
+  SharedPreferences? _preferences;
+  Future<SharedPreferences> get prefs async =>
+      _preferences ??= await SharedPreferences.getInstance();
+
+  @override
+  Future<List<SavedPost>> loadFavorites() => _load('favorites');
+  @override
+  Future<List<SavedPost>> loadHidden() => _load('hidden');
+  Future<List<SavedPost>> _load(String name) async {
+    final values = (await prefs).getStringList('posts.$name') ?? const [];
+    return values
+        .map((value) {
+          try {
+            return SavedPost.fromMap(jsonDecode(value) as Map);
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<SavedPost>()
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> saveFavorites(Iterable<SavedPost> posts) =>
+      _save('favorites', posts);
+  @override
+  Future<void> saveHidden(Iterable<SavedPost> posts) => _save('hidden', posts);
+  Future<void> _save(String name, Iterable<SavedPost> posts) async {
+    final values = posts
+        .map((saved) => jsonEncode(_sanitized(saved).toMap()))
+        .toList(growable: false);
+    await (await prefs).setStringList('posts.$name', values);
+  }
+
+  SavedPost _sanitized(SavedPost value) =>
+      SavedPost(board: value.board, post: _sanitizePost(value.post));
+
+  MediaPost _sanitizePost(MediaPost value) => MediaPost(
+    id: value.id,
+    url: _sanitizeUrl(value.url),
+    previewUrl: _sanitizeUrl(value.previewUrl),
+    tags: value.tags,
+    rating: value.rating,
+    uploader: value.uploader,
+    source: value.source,
+    width: value.width,
+    height: value.height,
+    score: value.score,
+    description: value.description,
+    isVideo: value.isVideo,
+    extension: value.extension,
+    tagDetails: value.tagDetails,
+    postUrl: value.postUrl,
+  );
+
+  static String _sanitizeUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return value;
+    final query = Map<String, String>.from(uri.queryParameters)
+      ..remove('api_key')
+      ..remove('user_id');
+    return uri.replace(queryParameters: query).toString();
+  }
+}
+
 class PlatformBoardRepository implements BoardRepository {
   PlatformBoardRepository({MethodChannel? channel})
     : channel = channel ?? const MethodChannel('booruplus/platform');
@@ -186,5 +277,20 @@ class MediaService {
       throw StateError('Media response was empty');
     }
     return bytes;
+  }
+}
+
+class ScreenAwakeService {
+  ScreenAwakeService({MethodChannel? channel})
+    : channel = channel ?? const MethodChannel('booruplus/platform');
+  final MethodChannel channel;
+
+  Future<void> setEnabled(bool enabled) async {
+    try {
+      await channel.invokeMethod<void>('setKeepScreenOn', {'enabled': enabled});
+    } catch (_) {
+      // The Android implementation owns this capability. Keep the viewer
+      // usable in widget tests and on platforms without the channel.
+    }
   }
 }
