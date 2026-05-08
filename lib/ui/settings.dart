@@ -4,6 +4,7 @@ import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
 import 'onboarding.dart';
+import 'saved_posts.dart';
 import 'tag_input.dart';
 import 'theme.dart';
 
@@ -117,6 +118,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ],
   );
+
+  Widget _blurSwitch(String title, String subtitle, bool explicit) {
+    final value = explicit
+        ? _settings.blurExplicit
+        : _settings.blurQuestionable;
+    return SwitchListTile.adaptive(
+      value: value,
+      onChanged: _busy
+          ? null
+          : (next) => setState(() {
+              _settings = _settings.copyWith(
+                blurExplicit: explicit ? next : _settings.blurExplicit,
+                blurQuestionable: explicit ? _settings.blurQuestionable : next,
+              );
+            }),
+      secondary: const Icon(Icons.blur_on_outlined),
+      title: Text(title),
+      subtitle: Text(subtitle),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -272,6 +294,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ),
                       const SectionLabel('Media grid'),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              _blurSwitch(
+                                'Blur explicit media',
+                                'Obscure explicit previews and viewer media until revealed.',
+                                true,
+                              ),
+                              _blurSwitch(
+                                'Blur questionable media',
+                                'Obscure questionable previews and viewer media until revealed.',
+                                false,
+                              ),
+                              ListTile(
+                                leading: const Icon(
+                                  Icons.visibility_off_outlined,
+                                ),
+                                title: const Text('Hidden posts'),
+                                subtitle: const Text(
+                                  'Review and unhide locally saved posts.',
+                                ),
+                                onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => SavedPostsScreen(
+                                      state: widget.state,
+                                      hidden: true,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                       _slider(
                         'Columns',
                         'Number of tiles across the screen.',

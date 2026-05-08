@@ -241,6 +241,65 @@ void main() {
     );
   });
 
+  test('sensitive-media blur preferences persist independently', () {
+    const settings = AppSettings(blurExplicit: true, blurQuestionable: false);
+    final restored = AppSettings.decode(settings.encode());
+    expect(restored.blurExplicit, isTrue);
+    expect(restored.blurQuestionable, isFalse);
+  });
+
+  test(
+    'favorites and hidden posts persist locally and filter the feed',
+    () async {
+      final postOne = post(31);
+      final postTwo = post(32);
+      final postStore = MemoryPostStore();
+      final state = AppState(
+        repository: FakeRepo([
+          [postOne, postTwo],
+        ]),
+        store: MemoryStore()..selected = Board.danbooru,
+        postStore: postStore,
+      );
+      await state.initialize();
+      await state.favoritePost(MediaPost.fromMap(postOne));
+      await state.hidePost(MediaPost.fromMap(postTwo));
+
+      expect(state.favoritePosts.single.post.id, 31);
+      expect(state.hiddenPosts.single.post.id, 32);
+      expect(state.posts.map((value) => value.id), [31]);
+
+      final restored = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore()..selected = Board.danbooru,
+        postStore: postStore,
+      );
+      await restored.initialize();
+      expect(restored.favoritePosts.single.post.id, 31);
+      expect(restored.hiddenPosts.single.post.id, 32);
+    },
+  );
+
+  test('saved Gelbooru URLs reauthorize only their own host', () {
+    const credentials = Credentials(userId: 'u', apiKey: 'k');
+    final gelbooru = SavedPost(
+      board: Board.gelbooru,
+      post: MediaPost.fromMap({
+        'id': 33,
+        'url': 'https://gelbooru.com/images/33.jpg',
+      }),
+    );
+    final external = SavedPost(
+      board: Board.gelbooru,
+      post: MediaPost.fromMap({
+        'id': 34,
+        'url': 'https://cdn.example.com/images/34.jpg',
+      }),
+    );
+    expect(gelbooru.authorized(credentials).post.url, contains('api_key=k'));
+    expect(external.authorized(credentials).post.url, external.post.url);
+  });
+
   test('media post serializes derived media fields', () {
     final value = MediaPost.fromMap(
       post(3, tags: ['cat'])..['url'] = 'https://x/a.webm',

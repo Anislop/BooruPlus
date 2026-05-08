@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import '../core/app_state.dart';
@@ -6,6 +9,7 @@ import 'media_viewer.dart';
 import 'media_image.dart';
 import 'search_guide.dart';
 import 'settings.dart';
+import 'saved_posts.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
 import 'theme.dart';
@@ -193,6 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
     bool hidePostTags,
   ) {
     final post = state.posts[index];
+    final quickActions = QuickActionOverlayController();
     return MediaTile(
       post: post,
       board: board,
@@ -212,6 +217,18 @@ class _HomeScreenState extends State<HomeScreen> {
         );
         if (tag != null && mounted) _search([tag]);
       },
+      isFavorite: state.isFavorite(post, board: board),
+      blur: _shouldBlur(state, post),
+      onLongPress: () => showQuickPostActions(
+        context,
+        post: post,
+        board: board,
+        state: state,
+        controller: quickActions,
+      ),
+      onLongPressMove: quickActions.update,
+      onLongPressEnd: quickActions.release,
+      onLongPressCancel: quickActions.cancel,
     );
   }
 
@@ -380,6 +397,33 @@ class _HomeScreenState extends State<HomeScreen> {
                       context,
                       MaterialPageRoute<void>(
                         builder: (_) => SettingsScreen(state: state),
+                      ),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.favorite_rounded),
+                  title: const Text('Favorites'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => SavedPostsScreen(state: state),
+                      ),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.visibility_off_outlined),
+                  title: const Text('Hidden posts'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            SavedPostsScreen(state: state, hidden: true),
                       ),
                     );
                   },
@@ -639,11 +683,23 @@ class MediaTile extends StatefulWidget {
     required this.board,
     required this.onTap,
     this.hidePostTags = false,
+    this.isFavorite = false,
+    this.blur = false,
+    this.onLongPress,
+    this.onLongPressMove,
+    this.onLongPressEnd,
+    this.onLongPressCancel,
   });
   final MediaPost post;
   final Board board;
   final VoidCallback onTap;
   final bool hidePostTags;
+  final bool isFavorite;
+  final bool blur;
+  final VoidCallback? onLongPress;
+  final ValueChanged<Offset>? onLongPressMove;
+  final VoidCallback? onLongPressEnd;
+  final VoidCallback? onLongPressCancel;
   @override
   State<MediaTile> createState() => _MediaTileState();
 }
@@ -688,29 +744,50 @@ class _MediaTileState extends State<MediaTile> {
               child: Icon(Icons.broken_image_outlined, color: Colors.white24),
             ),
           );
+    final ratingColor = _ratingColor(post.rating);
+    final displayedMedia = widget.blur
+        ? ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+            child: media,
+          )
+        : media;
     return Semantics(
       label:
           '${post.isVideo ? 'Video' : 'Image'} ${post.id}, rating ${post.rating}',
       button: true,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onLongPressStart: (_) => setState(() => _pressed = true),
-        onLongPressEnd: (_) => setState(() => _pressed = false),
-        onLongPressCancel: () => setState(() => _pressed = false),
+        onLongPressStart: (_) {
+          setState(() => _pressed = true);
+          widget.onLongPress?.call();
+        },
+        onLongPressMoveUpdate: (details) =>
+            widget.onLongPressMove?.call(details.globalPosition),
+        onLongPressEnd: (_) {
+          setState(() => _pressed = false);
+          widget.onLongPressEnd?.call();
+        },
+        onLongPressCancel: () {
+          setState(() => _pressed = false);
+          widget.onLongPressCancel?.call();
+        },
         child: AnimatedScale(
           scale: _pressed ? 1.08 : 1,
           duration: const Duration(milliseconds: 140),
           curve: Curves.easeOutCubic,
           child: Material(
             color: panel,
-            borderRadius: BorderRadius.circular(12),
+            shape: RoundedRectangleBorder(
+              side: BorderSide(color: ratingColor, width: 2),
+              borderRadius: BorderRadius.circular(12),
+            ),
             clipBehavior: Clip.antiAlias,
             child: InkWell(
               onTap: widget.onTap,
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  media,
+                  displayedMedia,
                   if (post.isVideo)
                     const Center(
                       child: CircleAvatar(
@@ -736,27 +813,24 @@ class _MediaTileState extends State<MediaTile> {
                         ],
                       ),
                     ),
-                  Positioned(
-                    left: 6,
-                    bottom: 6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: .7),
-                        borderRadius: BorderRadius.circular(5),
-                      ),
-                      child: Text(
-                        post.rating.toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w600,
-                        ),
+                  if (widget.isFavorite)
+                    const Positioned(
+                      right: 7,
+                      bottom: 7,
+                      child: Icon(
+                        Icons.favorite,
+                        color: Color(0xFFFF77A8),
+                        size: 20,
                       ),
                     ),
-                  ),
+                  if (widget.blur)
+                    const Center(
+                      child: Icon(
+                        Icons.visibility_off_outlined,
+                        color: Colors.white70,
+                        size: 25,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -813,6 +887,283 @@ String _displayUrl(MediaPost post) {
     }
   } catch (_) {}
   return post.url;
+}
+
+bool _shouldBlur(AppState state, MediaPost post) {
+  final rating = post.rating.trim().toLowerCase();
+  if (rating.contains('explicit') || rating == 'e') {
+    return state.settings.blurExplicit;
+  }
+  return (rating.contains('questionable') || rating == 'q') &&
+      state.settings.blurQuestionable;
+}
+
+Color _ratingColor(String rating) {
+  final normalized = rating.toLowerCase();
+  if (normalized.contains('explicit') || normalized == 'e') {
+    return Colors.redAccent;
+  }
+  if (normalized.contains('questionable') || normalized == 'q') {
+    return Colors.orangeAccent;
+  }
+  return Colors.grey;
+}
+
+class QuickActionOverlayController {
+  void Function(Offset)? _onMove;
+  VoidCallback? _onRelease;
+  VoidCallback? _onCancel;
+
+  void update(Offset position) => _onMove?.call(position);
+  void release() => _onRelease?.call();
+  void cancel() => _onCancel?.call();
+
+  void _attach({
+    required void Function(Offset) onMove,
+    required VoidCallback onRelease,
+    required VoidCallback onCancel,
+  }) {
+    _onMove = onMove;
+    _onRelease = onRelease;
+    _onCancel = onCancel;
+  }
+
+  void _detach() {
+    _onMove = null;
+    _onRelease = null;
+    _onCancel = null;
+  }
+}
+
+Future<void> showQuickPostActions(
+  BuildContext context, {
+  required MediaPost post,
+  required Board board,
+  required AppState state,
+  QuickActionOverlayController? controller,
+}) async {
+  final result = Completer<String?>();
+  late final OverlayEntry entry;
+  void complete(String? action) {
+    if (!result.isCompleted) result.complete(action);
+  }
+
+  entry = OverlayEntry(
+    builder: (_) => Stack(
+      fit: StackFit.expand,
+      children: [
+        ModalBarrier(
+          color: Colors.black.withValues(alpha: .72),
+          dismissible: true,
+          semanticsLabel: 'Post actions',
+          onDismiss: () => complete(null),
+        ),
+        _QuickActionDialog(
+          post: post,
+          board: board,
+          blur: _shouldBlur(state, post),
+          controller: controller,
+          onResult: complete,
+        ),
+      ],
+    ),
+  );
+  Overlay.of(context, rootOverlay: true).insert(entry);
+  final action = await result.future;
+  if (entry.mounted) entry.remove();
+  if (!context.mounted) return;
+  if (action == 'favorite') {
+    await state.toggleFavorite(post, board: board);
+  } else if (action == 'hide') {
+    await state.hidePost(post, board: board);
+  }
+}
+
+class _QuickActionDialog extends StatefulWidget {
+  const _QuickActionDialog({
+    required this.post,
+    required this.board,
+    required this.onResult,
+    required this.blur,
+    this.controller,
+  });
+  final MediaPost post;
+  final Board board;
+  final ValueChanged<String?> onResult;
+  final bool blur;
+  final QuickActionOverlayController? controller;
+
+  @override
+  State<_QuickActionDialog> createState() => _QuickActionDialogState();
+}
+
+class _QuickActionDialogState extends State<_QuickActionDialog> {
+  final _favoriteKey = GlobalKey();
+  final _hideKey = GlobalKey();
+  String? _armed;
+  bool _revealed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller?._attach(
+      onMove: _updateArmed,
+      onRelease: _releaseArmed,
+      onCancel: _cancel,
+    );
+  }
+
+  @override
+  void dispose() {
+    widget.controller?._detach();
+    super.dispose();
+  }
+
+  void _updateArmed(Offset position) {
+    final next = _contains(_favoriteKey, position)
+        ? 'favorite'
+        : _contains(_hideKey, position)
+        ? 'hide'
+        : null;
+    if (next != _armed && mounted) setState(() => _armed = next);
+  }
+
+  bool _contains(GlobalKey key, Offset position) {
+    final render = key.currentContext?.findRenderObject();
+    if (render is! RenderBox || !render.hasSize) return false;
+    final topLeft = render.localToGlobal(Offset.zero);
+    return (topLeft & render.size).contains(position);
+  }
+
+  void _releaseArmed() {
+    final action = _armed;
+    if (action != null) _commit(action);
+  }
+
+  void _cancel() => widget.onResult(null);
+
+  void _commit(String action) => widget.onResult(action);
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final width = (size.width - 32).clamp(240.0, 520.0).toDouble();
+    final height = (size.height * .72).clamp(320.0, 660.0).toDouble();
+    final preview = widget.post.previewUrl.isNotEmpty
+        ? widget.post.previewUrl
+        : widget.post.url;
+    final media = preview.isEmpty
+        ? const Center(child: Icon(Icons.image_not_supported_outlined))
+        : widget.board == Board.gelbooru
+        ? MediaImage(url: preview, board: widget.board, fit: BoxFit.contain)
+        : Image.network(preview, fit: BoxFit.contain);
+    final displayedMedia = widget.blur && !_revealed
+        ? ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: media,
+          )
+        : media;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerMove: (event) => _updateArmed(event.position),
+      onPointerUp: (_) => _releaseArmed(),
+      child: Material(
+        color: Colors.transparent,
+        child: Center(
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: panel,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: _ratingColor(widget.post.rating),
+                  width: 2,
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          color: Colors.black45,
+                          alignment: Alignment.center,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Positioned.fill(child: displayedMedia),
+                              if (widget.blur && !_revealed)
+                                FilledButton.icon(
+                                  onPressed: () =>
+                                      setState(() => _revealed = true),
+                                  icon: const Icon(Icons.visibility),
+                                  label: const Text('Reveal media'),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      widget.post.description.isEmpty
+                          ? 'Post #${widget.post.id}'
+                          : widget.post.description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _actionButton(
+                            key: _favoriteKey,
+                            action: 'favorite',
+                            icon: Icons.favorite_rounded,
+                            label: 'Favorite',
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _actionButton(
+                            key: _hideKey,
+                            action: 'hide',
+                            icon: Icons.visibility_off_rounded,
+                            label: 'Hide',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required Key key,
+    required String action,
+    required IconData icon,
+    required String label,
+  }) => FilledButton.icon(
+    key: key,
+    onPressed: () => _commit(action),
+    style: FilledButton.styleFrom(
+      backgroundColor: _armed == action ? accent : Colors.black54,
+      padding: const EdgeInsets.symmetric(vertical: 13),
+    ),
+    icon: Icon(icon),
+    label: Text(label),
+  );
 }
 
 class FilterBar extends StatelessWidget {

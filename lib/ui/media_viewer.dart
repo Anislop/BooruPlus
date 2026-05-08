@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:chewie/chewie.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -18,12 +20,14 @@ class MediaViewer extends StatefulWidget {
     required this.board,
     required this.state,
     this.posts = const [],
+    this.savedPosts = const [],
     this.initialIndex = 0,
   });
   final MediaPost post;
   final Board board;
   final AppState state;
   final List<MediaPost> posts;
+  final List<SavedPost> savedPosts;
   final int initialIndex;
   @override
   State<MediaViewer> createState() => _MediaViewerState();
@@ -40,23 +44,40 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   late int _index;
   Offset? _pointerDown;
   int _videoGeneration = 0;
+  bool _revealed = false;
+  int _transitionToken = 0;
   static const _videoControlsHeight = 160.0;
   final _downloads = DownloadService();
+  final _screenAwake = ScreenAwakeService();
   AppLifecycleState _lifecycle =
       WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
   @override
   void initState() {
     super.initState();
-    _index = widget.posts.isEmpty
+    _index = _itemCount == 0
         ? 0
-        : widget.initialIndex.clamp(0, widget.posts.length - 1).toInt();
+        : widget.initialIndex.clamp(0, _itemCount - 1).toInt();
     WidgetsBinding.instance.addObserver(this);
-    if (_post.isVideo) _initializeVideo();
+    if (_lifecycle == AppLifecycleState.resumed) {
+      _screenAwake.setEnabled(true);
+    }
+    if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
   }
 
-  MediaPost get _post =>
-      widget.posts.isEmpty ? widget.post : widget.posts[_index];
+  int get _itemCount => widget.savedPosts.isNotEmpty
+      ? widget.savedPosts.length
+      : widget.posts.length;
+
+  Board get _currentBoard => widget.savedPosts.isNotEmpty
+      ? widget.savedPosts[_index].board
+      : widget.board;
+
+  MediaPost get _post => widget.savedPosts.isNotEmpty
+      ? widget.state.displayReady(widget.savedPosts[_index]).post
+      : widget.posts.isEmpty
+      ? widget.post
+      : widget.posts[_index];
 
   void _handlePointerDown(PointerDownEvent event) {
     if (!widget.state.settings.gesturesEnabled) {
@@ -104,17 +125,19 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   void _move(int amount) {
-    if (widget.posts.isEmpty) return;
+    if (_itemCount == 0) return;
     final next = _index + amount;
-    if (next < 0 || next >= widget.posts.length) return;
+    if (next < 0 || next >= _itemCount) return;
     _disposeVideo();
     setState(() {
       _index = next;
+      _revealed = false;
+      _transitionToken++;
       _videoError = null;
       _details = false;
       _transform.value = Matrix4.identity();
     });
-    if (_post.isVideo) _initializeVideo();
+    if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
   }
 
   Future<void> _initializeVideo() async {
@@ -128,7 +151,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: widget.board == Board.gelbooru
+      httpHeaders: _currentBoard == Board.gelbooru
           ? const {
               'Referer': 'https://gelbooru.com/',
               'User-Agent': 'BooruPlus/1.0',
@@ -193,12 +216,14 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _lifecycle = state;
+    _screenAwake.setEnabled(state == AppLifecycleState.resumed);
     if (state != AppLifecycleState.resumed) _video?.pause();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _screenAwake.setEnabled(false);
     _videoGeneration++;
     _player?.dispose();
     _video?.dispose();
@@ -218,7 +243,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           : 'jpg';
       await _downloads.download(
         url: url,
-        name: '${widget.board.name}_${_post.id}.$extension',
+        name: '${_currentBoard.name}_${_post.id}.$extension',
         directory: widget.state.settings.downloadDirectory,
       );
       messenger.showSnackBar(
@@ -262,7 +287,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   Future<void> _openPost() async {
-    final uri = Uri.tryParse(_postBrowserUrl(widget.board, _post));
+    final uri = Uri.tryParse(_postBrowserUrl(_currentBoard, _post));
     if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
     try {
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
@@ -280,21 +305,23 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final post = _post;
-    final site = appearanceFor(widget.board);
-    final browserUrl = _postBrowserUrl(widget.board, post);
+    final board = _currentBoard;
+    final site = appearanceFor(board);
+    final browserUrl = _postBrowserUrl(board, post);
+    final favorited = widget.state.isFavorite(post, board: board);
     return Scaffold(
       backgroundColor: post.isVideo ? Colors.black : canvas,
       appBar: AppBar(
         backgroundColor: site.surface,
         title: Row(
           children: [
-            SiteLogo(widget.board, size: 26, colored: true),
+            SiteLogo(board, size: 26, colored: true),
             const SizedBox(width: 8),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  widget.board.label,
+                  board.label,
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
@@ -319,7 +346,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 onPointerUp: _handlePointerUp,
                 onPointerCancel: _handlePointerCancel,
                 child: post.isVideo
-                    ? _videoError != null
+                    ? _shouldBlur(post) && !_revealed
+                          ? _blurredVideo(post)
+                          : _videoError != null
                           ? Center(
                               child: Padding(
                                 padding: const EdgeInsets.all(24),
@@ -353,11 +382,22 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                       textAlign: TextAlign.center,
                                     ),
                                   )
-                                : MediaImage(
-                                    url: _mediaUrl(post),
-                                    board: widget.board,
-                                    fit: BoxFit.contain,
-                                    errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
+                                : AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 260),
+                                    transitionBuilder: (child, animation) =>
+                                        SlideTransition(
+                                          position: Tween<Offset>(
+                                            begin: const Offset(.22, 0),
+                                            end: Offset.zero,
+                                          ).animate(animation),
+                                          child: child,
+                                        ),
+                                    child: KeyedSubtree(
+                                      key: ValueKey(
+                                        '${post.id}-$_transitionToken',
+                                      ),
+                                      child: _viewerImage(post),
+                                    ),
                                   ),
                           ),
                         ),
@@ -462,59 +502,75 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 color: panel,
                 child: InkWell(
                   onTap: () => setState(() => _details = !_details),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: accent.withValues(alpha: .12),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          post.rating.toUpperCase(),
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                            color: accent,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 16,
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: .12),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            post.rating.toUpperCase(),
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              color: accent,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Text(
-                          'Tags & details',
-                          style: TextStyle(fontWeight: FontWeight.w600),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            'Tags & details',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
                         ),
-                      ),
-                      const Icon(
-                        Icons.favorite_border,
-                        size: 15,
-                        color: Colors.white38,
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        '${post.score}',
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12,
+                        IconButton(
+                          tooltip: favorited
+                              ? 'Remove from favorites'
+                              : 'Add to favorites',
+                          onPressed: () async {
+                            await widget.state.toggleFavorite(
+                              post,
+                              board: board,
+                            );
+                            if (mounted) setState(() {});
+                          },
+                          icon: Icon(
+                            favorited
+                                ? Icons.favorite_rounded
+                                : Icons.favorite_border,
+                            size: 19,
+                            color: favorited
+                                ? const Color(0xFFFF77A8)
+                                : Colors.white38,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                    ],
+                        const SizedBox(width: 5),
+                        Text(
+                          '${post.score}',
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          if (_details)
+            if (_details)
               ConstrainedBox(
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.sizeOf(context).height * .42,
@@ -540,102 +596,169 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                     child: SingleChildScrollView(
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Divider(),
-                        Text(
-                          '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'}',
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
-                          ),
-                        ),
-                        const SectionLabel('Uploaded by'),
-                        SelectableText(
-                          post.uploader.isEmpty
-                              ? 'Not supplied by this website'
-                              : post.uploader,
-                        ),
-                        if (post.description.isNotEmpty) ...[
-                          const SectionLabel('Description'),
-                          SelectableText(post.description),
-                        ],
-                        if (browserUrl.isNotEmpty)
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: TextButton.icon(
-                              onPressed: _openPost,
-                              icon: const Icon(Icons.open_in_browser, size: 16),
-                              label: const Text('Open in browser'),
-                            ),
-                          ),
-                        const SectionLabel('Original source'),
-                        if (post.source.isEmpty)
-                          const Text(
-                            'Not supplied by this website',
-                            style: TextStyle(color: Colors.white38),
-                          )
-                        else
-                          Wrap(
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              TextButton.icon(
-                                onPressed: _openSource,
-                                icon: const Icon(Icons.open_in_new, size: 16),
-                                label: const Text('Open original source'),
-                              ),
-                              SelectableText(
-                                post.source,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.white54,
-                                ),
-                              ),
-                            ],
-                          ),
-                        const SectionLabel('Tags · tap to search'),
-                        for (final entry in _groupedTags(post).entries) ...[
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Divider(),
                           Text(
-                            _categoryLabel(entry.key),
-                            style: TextStyle(
-                              color: _tagColor(entry.key),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
+                            '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'}',
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            children: [
-                              for (final tag in entry.value)
-                                ActionChip(
-                                  label: Text(
-                                    tag.name,
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                  side: BorderSide(
-                                    color: _tagColor(tag.category)
-                                        .withValues(alpha: .6),
-                                  ),
-                                  onPressed: () =>
-                                      Navigator.pop(context, tag.name),
-                                ),
-                            ],
+                          const SectionLabel('Uploaded by'),
+                          SelectableText(
+                            post.uploader.isEmpty
+                                ? 'Not supplied by this website'
+                                : post.uploader,
                           ),
-                          const SizedBox(height: 8),
+                          if (post.description.isNotEmpty) ...[
+                            const SectionLabel('Description'),
+                            SelectableText(post.description),
+                          ],
+                          if (browserUrl.isNotEmpty)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: _openPost,
+                                icon: const Icon(
+                                  Icons.open_in_browser,
+                                  size: 16,
+                                ),
+                                label: const Text('Open in browser'),
+                              ),
+                            ),
+                          const SectionLabel('Original source'),
+                          if (post.source.isEmpty)
+                            const Text(
+                              'Not supplied by this website',
+                              style: TextStyle(color: Colors.white38),
+                            )
+                          else
+                            Wrap(
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                TextButton.icon(
+                                  onPressed: _openSource,
+                                  icon: const Icon(Icons.open_in_new, size: 16),
+                                  label: const Text('Open original source'),
+                                ),
+                                SelectableText(
+                                  post.source,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.white54,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          const SectionLabel('Tags · tap to search'),
+                          for (final entry in _groupedTags(post).entries) ...[
+                            Text(
+                              _categoryLabel(entry.key),
+                              style: TextStyle(
+                                color: _tagColor(entry.key),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                for (final tag in entry.value)
+                                  ActionChip(
+                                    label: Text(
+                                      tag.name,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    side: BorderSide(
+                                      color: _tagColor(tag.category)
+                                          .withValues(alpha: .6),
+                                    ),
+                                    onPressed: () =>
+                                        Navigator.pop(context, tag.name),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
     );
+  }
+
+  Widget _viewerImage(MediaPost post) {
+    final image = MediaImage(
+      url: _mediaUrl(post),
+      board: _currentBoard,
+      fit: BoxFit.contain,
+      errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
+    );
+    if (!_shouldBlur(post) || _revealed) return image;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        ImageFiltered(
+          imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: image,
+        ),
+        FilledButton.icon(
+          onPressed: () => setState(() => _revealed = true),
+          icon: const Icon(Icons.visibility),
+          label: const Text('Reveal media'),
+        ),
+      ],
+    );
+  }
+
+  Widget _blurredVideo(MediaPost post) {
+    final preview = post.previewUrl.isNotEmpty
+        ? post.previewUrl
+        : _mediaUrl(post);
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        if (preview.isNotEmpty)
+          ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: MediaImage(
+              url: preview,
+              board: _currentBoard,
+              fit: BoxFit.contain,
+            ),
+          )
+        else
+          const Icon(Icons.visibility_off_outlined, size: 42),
+        FilledButton.icon(
+          onPressed: () {
+            setState(() => _revealed = true);
+            _initializeVideo();
+          },
+          icon: const Icon(Icons.visibility),
+          label: const Text('Reveal media'),
+        ),
+      ],
+    );
+  }
+
+  bool _shouldBlur(MediaPost post) {
+    final settings = widget.state.settings;
+    final rating = post.rating.trim().toLowerCase();
+    if (rating.contains('explicit') || rating == 'e') {
+      return settings.blurExplicit;
+    }
+    return (rating.contains('questionable') || rating == 'q') &&
+        settings.blurQuestionable;
   }
 }
 
