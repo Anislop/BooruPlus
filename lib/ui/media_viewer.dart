@@ -46,6 +46,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   int _videoGeneration = 0;
   bool _revealed = false;
   int _transitionToken = 0;
+  int _transitionDirection = 1;
   static const _videoControlsHeight = 160.0;
   final _downloads = DownloadService();
   final _screenAwake = ScreenAwakeService();
@@ -99,8 +100,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     if (delta.distance < 90) return;
     if (!(_post.isVideo || _transform.value.getMaxScaleOnAxis() <= 1)) return;
     if (delta.dx.abs() > delta.dy.abs()) {
-      if (delta.dx < -90) _move(1);
-      if (delta.dx > 90) _move(-1);
+      if (delta.dx < -90) _move(-1);
+      if (delta.dx > 90) _move(1);
     } else if (delta.dy > 90) {
       if (_details) {
         setState(() => _details = false);
@@ -132,6 +133,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     setState(() {
       _index = next;
       _revealed = false;
+      _transitionDirection = -amount;
       _transitionToken++;
       _videoError = null;
       _details = false;
@@ -384,14 +386,23 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                   )
                                 : AnimatedSwitcher(
                                     duration: const Duration(milliseconds: 260),
-                                    transitionBuilder: (child, animation) =>
-                                        SlideTransition(
-                                          position: Tween<Offset>(
-                                            begin: const Offset(.22, 0),
-                                            end: Offset.zero,
-                                          ).animate(animation),
-                                          child: child,
-                                        ),
+                                    transitionBuilder: (child, animation) {
+                                      final outgoing =
+                                          animation.status ==
+                                              AnimationStatus.reverse ||
+                                          animation.status ==
+                                              AnimationStatus.dismissed;
+                                      final direction = outgoing
+                                          ? -_transitionDirection
+                                          : _transitionDirection;
+                                      return SlideTransition(
+                                        position: Tween<Offset>(
+                                          begin: Offset(.22 * direction, 0),
+                                          end: Offset.zero,
+                                        ).animate(animation),
+                                        child: child,
+                                      );
+                                    },
                                     child: KeyedSubtree(
                                       key: ValueKey(
                                         '${post.id}-$_transitionToken',

@@ -104,6 +104,7 @@ class _SavedPostCard extends StatelessWidget {
                     post: post,
                     board: saved.board,
                     state: state,
+                    isFavorite: state.isFavorite(post, board: saved.board),
                     controller: quickActions,
                   ),
             onLongPressMove: quickActions.update,
@@ -137,13 +138,15 @@ class _SavedPostCard extends StatelessWidget {
             style: const TextStyle(fontSize: 11, color: Colors.white54),
           ),
         if (hidden)
-          SizedBox(
-            height: 30,
-            child: TextButton.icon(
-              onPressed: () => state.unhidePost(post, board: saved.board),
-              icon: const Icon(Icons.visibility, size: 16),
-              label: const Text('Unhide'),
+          TextButton.icon(
+            onPressed: () => state.unhidePost(post, board: saved.board),
+            style: TextButton.styleFrom(
+              minimumSize: Size.zero,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
             ),
+            icon: const Icon(Icons.visibility, size: 16),
+            label: const Text('Unhide'),
           ),
       ],
     );
