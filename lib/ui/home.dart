@@ -224,6 +224,7 @@ class _HomeScreenState extends State<HomeScreen> {
         post: post,
         board: board,
         state: state,
+        isFavorite: state.isFavorite(post, board: board),
         controller: quickActions,
       ),
       onLongPressMove: quickActions.update,
@@ -410,20 +411,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       context,
                       MaterialPageRoute<void>(
                         builder: (_) => SavedPostsScreen(state: state),
-                      ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.visibility_off_outlined),
-                  title: const Text('Hidden posts'),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) =>
-                            SavedPostsScreen(state: state, hidden: true),
                       ),
                     );
                   },
@@ -940,10 +927,12 @@ Future<void> showQuickPostActions(
   required MediaPost post,
   required Board board,
   required AppState state,
+  bool? isFavorite,
   QuickActionOverlayController? controller,
 }) async {
   final result = Completer<String?>();
   late final OverlayEntry entry;
+  final dialogKey = GlobalKey<_QuickActionDialogState>();
   void complete(String? action) {
     if (!result.isCompleted) result.complete(action);
   }
@@ -952,15 +941,30 @@ Future<void> showQuickPostActions(
     builder: (_) => Stack(
       fit: StackFit.expand,
       children: [
+        Positioned.fill(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+            child: const SizedBox.expand(),
+          ),
+        ),
         ModalBarrier(
-          color: Colors.black.withValues(alpha: .72),
+          color: Colors.black.withValues(alpha: .48),
           dismissible: true,
           semanticsLabel: 'Post actions',
-          onDismiss: () => complete(null),
+          onDismiss: () {
+            final dialog = dialogKey.currentState;
+            if (dialog == null) {
+              complete(null);
+            } else {
+              dialog.dismiss();
+            }
+          },
         ),
         _QuickActionDialog(
+          key: dialogKey,
           post: post,
           board: board,
+          isFavorite: isFavorite ?? state.isFavorite(post, board: board),
           blur: _shouldBlur(state, post),
           controller: controller,
           onResult: complete,
@@ -981,14 +985,17 @@ Future<void> showQuickPostActions(
 
 class _QuickActionDialog extends StatefulWidget {
   const _QuickActionDialog({
+    super.key,
     required this.post,
     required this.board,
+    required this.isFavorite,
     required this.onResult,
     required this.blur,
     this.controller,
   });
   final MediaPost post;
   final Board board;
+  final bool isFavorite;
   final ValueChanged<String?> onResult;
   final bool blur;
   final QuickActionOverlayController? controller;
@@ -997,15 +1004,23 @@ class _QuickActionDialog extends StatefulWidget {
   State<_QuickActionDialog> createState() => _QuickActionDialogState();
 }
 
-class _QuickActionDialogState extends State<_QuickActionDialog> {
+class _QuickActionDialogState extends State<_QuickActionDialog>
+    with SingleTickerProviderStateMixin {
   final _favoriteKey = GlobalKey();
   final _hideKey = GlobalKey();
+  late final AnimationController _animationController;
   String? _armed;
   bool _revealed = false;
+  bool _closing = false;
 
   @override
   void initState() {
     super.initState();
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+      reverseDuration: const Duration(milliseconds: 180),
+    )..forward();
     widget.controller?._attach(
       onMove: _updateArmed,
       onRelease: _releaseArmed,
@@ -1016,6 +1031,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog> {
   @override
   void dispose() {
     widget.controller?._detach();
+    _animationController.dispose();
     super.dispose();
   }
 
@@ -1036,13 +1052,26 @@ class _QuickActionDialogState extends State<_QuickActionDialog> {
   }
 
   void _releaseArmed() {
-    final action = _armed;
-    if (action != null) _commit(action);
+    _finish(_armed);
   }
 
-  void _cancel() => widget.onResult(null);
+  void _cancel() => dismiss();
 
-  void _commit(String action) => widget.onResult(action);
+  void _commit(String action) => _finish(action);
+
+  void dismiss() => _finish(null);
+
+  Future<void> _finish(String? action) async {
+    if (_closing) return;
+    _closing = true;
+    widget.controller?._detach();
+    try {
+      await _animationController.reverse().orCancel;
+    } on TickerCanceled {
+      // Disposal can cancel the ticker; still resolve the dismissal once.
+    }
+    widget.onResult(action);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1066,22 +1095,24 @@ class _QuickActionDialogState extends State<_QuickActionDialog> {
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerMove: (event) => _updateArmed(event.position),
-      onPointerUp: (_) => _releaseArmed(),
-      child: Material(
-        color: Colors.transparent,
-        child: Center(
-          child: SizedBox(
-            width: width,
-            height: height,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: panel,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: _ratingColor(widget.post.rating),
-                  width: 2,
-                ),
-              ),
+      onPointerUp: (event) {
+        _updateArmed(event.position);
+        _releaseArmed();
+      },
+      child: ScaleTransition(
+        scale: Tween<double>(begin: .9, end: 1).animate(
+          CurvedAnimation(
+            parent: _animationController,
+            curve: Curves.easeOutBack,
+            reverseCurve: Curves.easeInCubic,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: Center(
+            child: SizedBox(
+              width: width,
+              height: height,
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -1125,7 +1156,9 @@ class _QuickActionDialogState extends State<_QuickActionDialog> {
                             key: _favoriteKey,
                             action: 'favorite',
                             icon: Icons.favorite_rounded,
-                            label: 'Favorite',
+                            label: widget.isFavorite
+                                ? 'Unfavorite'
+                                : 'Favorite',
                           ),
                         ),
                         const SizedBox(width: 10),

@@ -477,6 +477,7 @@ void main() {
           ..['postUrl'] = 'https://danbooru.donmai.us/posts/1',
       );
       final second = MediaPost.fromMap(post(2, tags: ['plain']));
+      final third = MediaPost.fromMap(post(3, tags: ['another']));
       final state = AppState(
         repository: FakeRepo(const [[]]),
         store: MemoryStore()..selected = Board.danbooru,
@@ -486,23 +487,46 @@ void main() {
         MaterialApp(
           theme: appTheme,
           home: MediaViewer(
-            key: const ValueKey('first-viewer'),
+            key: const ValueKey('middle-viewer'),
             post: first,
             board: Board.danbooru,
             state: state,
-            posts: [first, second],
-            initialIndex: 0,
+            posts: [first, second, third],
+            initialIndex: 1,
           ),
         ),
       );
       await tester.pump();
-      expect(find.text('#1'), findsOneWidget);
-
-      final gesture = await tester.startGesture(const Offset(180, 320));
-      await gesture.moveTo(const Offset(60, 320));
-      await gesture.up();
-      await tester.pump();
       expect(find.text('#2'), findsOneWidget);
+
+      // A leftward swipe from the middle moves to the previous post.
+      final leftGesture = await tester.startGesture(const Offset(180, 320));
+      await leftGesture.moveTo(const Offset(60, 320));
+      await leftGesture.up();
+      await tester.pump();
+      expect(find.text('#1'), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 350));
+
+      // Reopen the middle post, then verify a rightward swipe moves next.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: MediaViewer(
+            key: const ValueKey('right-viewer'),
+            post: second,
+            board: Board.danbooru,
+            state: state,
+            posts: [first, second, third],
+            initialIndex: 1,
+          ),
+        ),
+      );
+      await tester.pump();
+      final rightGesture = await tester.startGesture(const Offset(60, 320));
+      await rightGesture.moveTo(const Offset(180, 320));
+      await rightGesture.up();
+      await tester.pump();
+      expect(find.text('#3'), findsOneWidget);
       await tester.pump(const Duration(milliseconds: 350));
 
       // Reopen the first post to verify the grouped details presentation.
@@ -510,10 +534,11 @@ void main() {
         MaterialApp(
           theme: appTheme,
           home: MediaViewer(
+            key: const ValueKey('details-viewer'),
             post: first,
             board: Board.danbooru,
             state: state,
-            posts: [first, second],
+            posts: [first, second, third],
             initialIndex: 0,
           ),
         ),
