@@ -54,6 +54,38 @@ enum TagCategory {
   unknown,
 }
 
+enum Rating { general, questionable, explicit }
+
+extension RatingInfo on Rating {
+  String get label => switch (this) {
+    Rating.general => 'General',
+    Rating.questionable => 'Questionable',
+    Rating.explicit => 'Explicit',
+  };
+
+  String get queryValue => switch (this) {
+    Rating.general => 'safe',
+    Rating.questionable => 'questionable',
+    Rating.explicit => 'explicit',
+  };
+
+  String get shortQueryValue => switch (this) {
+    Rating.general => 's',
+    Rating.questionable => 'q',
+    Rating.explicit => 'e',
+  };
+
+  static Rating? parse(dynamic value) {
+    final text = '$value'.trim().toLowerCase();
+    return switch (text) {
+      'general' || 'safe' || 's' || 'g' => Rating.general,
+      'questionable' || 'q' => Rating.questionable,
+      'explicit' || 'e' => Rating.explicit,
+      _ => null,
+    };
+  }
+}
+
 extension TagCategoryInfo on TagCategory {
   String get label => switch (this) {
     TagCategory.general => 'General',
@@ -355,6 +387,14 @@ class AppSettings {
     this.blurExplicit = false,
     this.blurQuestionable = false,
     this.savedQueries = const [],
+    this.recentSearches = const [],
+    this.selectedRatings = const [
+      Rating.general,
+      Rating.questionable,
+      Rating.explicit,
+    ],
+    this.searchedTagCounts = const {},
+    this.browsedTagCounts = const {},
   });
   final int columns, rows, batchSize;
   final List<String> blacklist;
@@ -366,6 +406,10 @@ class AppSettings {
   final bool blurExplicit;
   final bool blurQuestionable;
   final List<List<String>> savedQueries;
+  final List<List<String>> recentSearches;
+  final List<Rating> selectedRatings;
+  final Map<String, int> searchedTagCounts;
+  final Map<String, int> browsedTagCounts;
 
   AppSettings normalized() => AppSettings(
     columns: columns.clamp(1, 6),
@@ -380,6 +424,10 @@ class AppSettings {
     blurExplicit: blurExplicit,
     blurQuestionable: blurQuestionable,
     savedQueries: _normalizedQueries(savedQueries),
+    recentSearches: _normalizedQueries(recentSearches, limit: 30),
+    selectedRatings: _normalizedRatings(selectedRatings),
+    searchedTagCounts: _normalizedCounts(searchedTagCounts),
+    browsedTagCounts: _normalizedCounts(browsedTagCounts),
   );
 
   AppSettings copyWith({
@@ -395,6 +443,10 @@ class AppSettings {
     bool? blurExplicit,
     bool? blurQuestionable,
     List<List<String>>? savedQueries,
+    List<List<String>>? recentSearches,
+    List<Rating>? selectedRatings,
+    Map<String, int>? searchedTagCounts,
+    Map<String, int>? browsedTagCounts,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -410,6 +462,10 @@ class AppSettings {
     blurExplicit: blurExplicit ?? this.blurExplicit,
     blurQuestionable: blurQuestionable ?? this.blurQuestionable,
     savedQueries: savedQueries ?? this.savedQueries,
+    recentSearches: recentSearches ?? this.recentSearches,
+    selectedRatings: selectedRatings ?? this.selectedRatings,
+    searchedTagCounts: searchedTagCounts ?? this.searchedTagCounts,
+    browsedTagCounts: browsedTagCounts ?? this.browsedTagCounts,
   ).normalized();
   static const _unset = Object();
 
@@ -426,6 +482,10 @@ class AppSettings {
     'blurExplicit': blurExplicit,
     'blurQuestionable': blurQuestionable,
     'savedQueries': savedQueries,
+    'recentSearches': recentSearches,
+    'selectedRatings': selectedRatings.map((rating) => rating.name).toList(),
+    'searchedTagCounts': searchedTagCounts,
+    'browsedTagCounts': browsedTagCounts,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -442,6 +502,10 @@ class AppSettings {
     blurExplicit: _asBool(map['blurExplicit'], false),
     blurQuestionable: _asBool(map['blurQuestionable'], false),
     savedQueries: _queriesFromMap(map['savedQueries']),
+    recentSearches: _queriesFromMap(map['recentSearches']),
+    selectedRatings: _ratingsFromMap(map['selectedRatings']),
+    searchedTagCounts: _countsFromMap(map['searchedTagCounts']),
+    browsedTagCounts: _countsFromMap(map['browsedTagCounts']),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -468,7 +532,10 @@ class AppSettings {
     return List.unmodifiable(result);
   }
 
-  static List<List<String>> _normalizedQueries(Iterable<List<String>> values) {
+  static List<List<String>> _normalizedQueries(
+    Iterable<List<String>> values, {
+    int limit = 50,
+  }) {
     final result = <List<String>>[];
     final seen = <String>{};
     for (final query in values) {
@@ -476,7 +543,7 @@ class AppSettings {
       if (tags.isEmpty) continue;
       final key = tags.join('\u0000');
       if (seen.add(key)) result.add(tags);
-      if (result.length == 50) break;
+      if (result.length == limit) break;
     }
     return List.unmodifiable(result);
   }
@@ -487,6 +554,34 @@ class AppSettings {
             .map((query) => query.map((tag) => '$tag').toList())
             .toList()
       : const [];
+
+  static List<Rating> _ratingsFromMap(dynamic value) => value is List
+      ? value.map(RatingInfo.parse).whereType<Rating>().toList()
+      : Rating.values;
+
+  static List<Rating> _normalizedRatings(Iterable<Rating> values) => List.unmodifiable(
+    Rating.values.where(values.toSet().contains),
+  );
+
+  static Map<String, int> _countsFromMap(dynamic value) => value is Map
+      ? value.map((key, count) => MapEntry('$key', _asInt(count, 0)))
+      : const {};
+
+  static Map<String, int> _normalizedCounts(Map<String, int> values) {
+    final result = <String, int>{};
+    for (final entry in values.entries) {
+      final key = _normalizeTag(entry.key);
+      if (key.isNotEmpty && entry.value > 0) {
+        result[key] = (result[key] ?? 0) + entry.value;
+      }
+    }
+    final entries = result.entries.toList()
+      ..sort((a, b) {
+        final byCount = b.value.compareTo(a.value);
+        return byCount == 0 ? a.key.compareTo(b.key) : byCount;
+      });
+    return Map.unmodifiable(Map.fromEntries(entries.take(100)));
+  }
 
   @override
   bool operator ==(Object other) {
@@ -503,7 +598,16 @@ class AppSettings {
         other.blurExplicit != blurExplicit ||
         other.blurQuestionable != blurQuestionable ||
         other.blacklist.length != blacklist.length ||
-        other.savedQueries.length != savedQueries.length) {
+        other.savedQueries.length != savedQueries.length ||
+        other.recentSearches.length != recentSearches.length) {
+      return false;
+    }
+    if (other.selectedRatings.length != selectedRatings.length ||
+        other.searchedTagCounts.length != searchedTagCounts.length ||
+        other.browsedTagCounts.length != browsedTagCounts.length ||
+        !_sameRatings(other.selectedRatings, selectedRatings) ||
+        !_sameCounts(other.searchedTagCounts, searchedTagCounts) ||
+        !_sameCounts(other.browsedTagCounts, browsedTagCounts)) {
       return false;
     }
     for (var i = 0; i < blacklist.length; i++) {
@@ -512,6 +616,14 @@ class AppSettings {
     for (var i = 0; i < savedQueries.length; i++) {
       final a = savedQueries[i];
       final b = other.savedQueries[i];
+      if (a.length != b.length) return false;
+      for (var j = 0; j < a.length; j++) {
+        if (a[j] != b[j]) return false;
+      }
+    }
+    for (var i = 0; i < recentSearches.length; i++) {
+      final a = recentSearches[i];
+      final b = other.recentSearches[i];
       if (a.length != b.length) return false;
       for (var j = 0; j < a.length; j++) {
         if (a[j] != b[j]) return false;
@@ -534,5 +646,33 @@ class AppSettings {
     blurQuestionable,
     Object.hashAll(blacklist),
     Object.hashAll(savedQueries.map(Object.hashAll)),
+    Object.hashAll(recentSearches.map(Object.hashAll)),
+    Object.hashAll(selectedRatings),
+    _countsHash(searchedTagCounts),
+    _countsHash(browsedTagCounts),
+  );
+
+  static bool _sameRatings(List<Rating> a, List<Rating> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static bool _sameCounts(Map<String, int> a, Map<String, int> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static int _countsHash(Map<String, int> counts) => Object.hashAll(
+    (counts.entries.toList()..sort((a, b) => a.key.compareTo(b.key))).map(
+      (entry) => Object.hash(entry.key, entry.value),
+    ),
   );
 }

@@ -63,6 +63,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     if (_lifecycle == AppLifecycleState.resumed) {
       _screenAwake.setEnabled(true);
     }
+    widget.state.recordBrowsedTags(_post.tags);
     if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
   }
 
@@ -139,6 +140,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       _details = false;
       _transform.value = Matrix4.identity();
     });
+    widget.state.recordBrowsedTags(_post.tags);
     if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
   }
 
@@ -690,7 +692,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                           .withValues(alpha: .6),
                                     ),
                                     onPressed: () =>
-                                        Navigator.pop(context, tag.name),
+                                        _browseTag(tag.name),
                                   ),
                               ],
                             ),
@@ -706,6 +708,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  void _browseTag(String tag) {
+    widget.state.recordBrowsedTags([tag]);
+    Navigator.pop(context, tag);
   }
 
   Widget _viewerImage(MediaPost post) {

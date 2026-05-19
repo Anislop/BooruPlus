@@ -376,6 +376,315 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('bookmark and history buttons open separate query popups', (
+    tester,
+  ) async {
+    final store = MemoryStore()
+      ..selected = Board.safebooru
+      ..settings = const AppSettings(
+        savedQueries: [
+          ['saved_tag'],
+        ],
+        recentSearches: [
+          ['recent_tag'],
+        ],
+      );
+    final state = AppState(repository: FakeRepo(const [[]]), store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Open recent searches'));
+    await tester.pumpAndSettle();
+    expect(find.text('Recent searches'), findsOneWidget);
+    expect(find.text('recent_tag'), findsOneWidget);
+    expect(find.text('saved_tag'), findsNothing);
+    Navigator.of(tester.element(find.text('Recent searches'))).pop();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Saved searches'));
+    await tester.pumpAndSettle();
+    expect(find.text('Saved searches'), findsOneWidget);
+    expect(find.text('saved_tag'), findsOneWidget);
+    expect(find.text('recent_tag'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('rating popup applies checkbox selection', (tester) async {
+    final store = MemoryStore()..selected = Board.konachan;
+    final repo = FakeRepo(const [[]]);
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Ratings'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CheckboxListTile), findsNWidgets(3));
+
+    await tester.tap(find.text('General'));
+    await tester.tap(find.text('Questionable'));
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+
+    expect(state.selectedRatings, [Rating.explicit]);
+    expect(repo.queries.last, contains('rating:e'));
+    expect(store.settings.selectedRatings, [Rating.explicit]);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets(
+    'quick actions use the original image and dismiss on transformed release',
+    (tester) async {
+      final postValue = MediaPost.fromMap({
+        ...post(14),
+        'url': 'https://example.com/original.jpg',
+        'previewUrl': 'https://example.com/preview.jpg',
+      });
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore(),
+      );
+      await state.initialize();
+      await state.favoritePost(postValue, board: Board.danbooru);
+      final controller = QuickActionOverlayController();
+      await tester.pumpWidget(
+        MaterialApp(theme: appTheme, home: const Scaffold()),
+      );
+
+      final actions = showQuickPostActions(
+        tester.element(find.byType(Scaffold)),
+        post: postValue,
+        board: Board.danbooru,
+        state: state,
+        controller: controller,
+        origin: const Rect.fromLTWH(20, 40, 120, 120),
+      );
+      await tester.pump();
+      expect(find.text('Unfavorite'), findsOneWidget);
+      final image = tester.widget<Image>(find.byType(Image).first);
+      expect((image.image as NetworkImage).url, postValue.url);
+      final favoriteButtonFinder = find.ancestor(
+        of: find.text('Unfavorite'),
+        matching: find.byType(FilledButton),
+      );
+      final button = tester.widget<FilledButton>(favoriteButtonFinder);
+      expect(button.style?.foregroundColor?.resolve({}), Colors.white);
+
+      final favoriteRender = tester.renderObject<RenderBox>(
+        favoriteButtonFinder,
+      );
+      final earlyTopLeft = favoriteRender.localToGlobal(Offset.zero);
+      final earlyBottomRight = favoriteRender.localToGlobal(
+        Offset(favoriteRender.size.width, favoriteRender.size.height),
+      );
+      final earlyButtonCenter = Offset(
+        (earlyTopLeft.dx + earlyBottomRight.dx) / 2,
+        (earlyTopLeft.dy + earlyBottomRight.dy) / 2,
+      );
+      controller.update(earlyButtonCenter);
+      await tester.pumpAndSettle();
+      controller.releaseAt(earlyButtonCenter);
+      await tester.pumpAndSettle();
+      await actions;
+      expect(find.text('Unfavorite'), findsNothing);
+      expect(state.isFavorite(postValue, board: Board.danbooru), isTrue);
+      expect(tester.takeException(), isNull);
+
+      final videoPost = MediaPost.fromMap({
+        ...post(15),
+        'url': 'https://example.com/video.mp4',
+        'previewUrl': 'https://example.com/video-preview.jpg',
+        'isVideo': true,
+      });
+      final videoController = QuickActionOverlayController();
+      final videoActions = showQuickPostActions(
+        tester.element(find.byType(Scaffold)),
+        post: videoPost,
+        board: Board.danbooru,
+        state: state,
+        controller: videoController,
+        origin: const Rect.fromLTWH(20, 40, 120, 120),
+      );
+      await tester.pump();
+      final videoImage = tester.widget<Image>(find.byType(Image).first);
+      expect((videoImage.image as NetworkImage).url, videoPost.previewUrl);
+      videoController.release();
+      await tester.pumpAndSettle();
+      await videoActions;
+
+      await tester.pumpWidget(const SizedBox());
+      state.dispose();
+    },
+  );
+
+  testWidgets('quick actions survive a feed rebuild during a long press', (
+    tester,
+  ) async {
+    final feedMap = {
+      ...post(16),
+      'url': 'https://example.com/feed-original.jpg',
+      'previewUrl': 'https://example.com/feed-preview.jpg',
+    };
+    final state = AppState(
+      repository: FakeRepo([
+        <Map<String, dynamic>>[feedMap],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final hold = await tester.startGesture(
+      tester.getCenter(find.byType(MediaTile).first),
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.text('Favorite'), findsOneWidget);
+
+    await state.favoritePost(
+      MediaPost.fromMap({
+        ...post(17),
+        'url': 'https://example.com/other.jpg',
+        'previewUrl': 'https://example.com/other-preview.jpg',
+      }),
+      board: Board.danbooru,
+    );
+    await tester.pump();
+    await hold.up();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Favorite'), findsNothing);
+    expect(
+      state.isFavorite(MediaPost.fromMap(feedMap), board: Board.danbooru),
+      isFalse,
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('quick actions retain release and cancel before first frame', (
+    tester,
+  ) async {
+    final postValue = MediaPost.fromMap({
+      ...post(18),
+      'url': 'https://example.com/immediate-original.jpg',
+      'previewUrl': 'https://example.com/immediate-preview.jpg',
+    });
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(theme: appTheme, home: const Scaffold()),
+    );
+
+    final releaseController = QuickActionOverlayController();
+    final releaseActions = showQuickPostActions(
+      tester.element(find.byType(Scaffold)),
+      post: postValue,
+      board: Board.danbooru,
+      state: state,
+      controller: releaseController,
+      origin: const Rect.fromLTWH(20, 40, 120, 120),
+    );
+    releaseController.release();
+    await tester.pumpAndSettle();
+    await releaseActions;
+    expect(find.text('Favorite'), findsNothing);
+
+    final cancelController = QuickActionOverlayController();
+    final cancelActions = showQuickPostActions(
+      tester.element(find.byType(Scaffold)),
+      post: postValue,
+      board: Board.danbooru,
+      state: state,
+      controller: cancelController,
+      origin: const Rect.fromLTWH(20, 40, 120, 120),
+    );
+    cancelController.cancel();
+    await tester.pumpAndSettle();
+    await cancelActions;
+    expect(find.text('Favorite'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('a cancelled tap does not cancel the next quick-action hold', (
+    tester,
+  ) async {
+    final postValue = MediaPost.fromMap({
+      ...post(19),
+      'url': 'https://example.com/tap-original.jpg',
+      'previewUrl': 'https://example.com/tap-preview.jpg',
+    });
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: SizedBox(
+            width: 240,
+            height: 180,
+            child: MediaTile(
+              post: postValue,
+              board: Board.danbooru,
+              onTap: () {},
+              onLongPressOrigin: (origin, controller) => showQuickPostActions(
+                tester.element(find.byType(Scaffold)),
+                post: postValue,
+                board: Board.danbooru,
+                state: state,
+                controller: controller,
+                origin: origin,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final tile = find.byType(MediaTile);
+    await tester.tap(tile);
+    await tester.pumpAndSettle();
+    final hold = await tester.startGesture(tester.getCenter(tile));
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.text('Favorite'), findsOneWidget);
+    await hold.up();
+    await tester.pumpAndSettle();
+    expect(find.text('Favorite'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets(
     'media tile enlarges only during a long press and taps normally',
     (tester) async {

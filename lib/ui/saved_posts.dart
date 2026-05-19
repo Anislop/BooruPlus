@@ -69,12 +69,12 @@ class _SavedPostCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final post = display.post;
-    final quickActions = QuickActionOverlayController();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(
           child: MediaTile(
+            key: ValueKey(saved.identity),
             post: post,
             board: saved.board,
             isFavorite: !hidden,
@@ -97,19 +97,18 @@ class _SavedPostCard extends StatelessWidget {
                 ),
               );
             },
-            onLongPress: hidden
+            onLongPress: null,
+            onLongPressOrigin: hidden
                 ? null
-                : () => showQuickPostActions(
+                : (origin, controller) => showQuickPostActions(
                     context,
                     post: post,
                     board: saved.board,
                     state: state,
                     isFavorite: state.isFavorite(post, board: saved.board),
-                    controller: quickActions,
+                    controller: controller,
+                    origin: origin,
                   ),
-            onLongPressMove: quickActions.update,
-            onLongPressEnd: quickActions.release,
-            onLongPressCancel: quickActions.cancel,
           ),
         ),
         const SizedBox(height: 7),

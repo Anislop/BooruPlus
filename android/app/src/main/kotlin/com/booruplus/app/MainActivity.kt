@@ -15,7 +15,9 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import net.kodehawa.lib.imageboards.ImageBoard
 import net.kodehawa.lib.imageboards.ImageBoards
+import net.kodehawa.lib.imageboards.boards.KonachanBoard
 import net.kodehawa.lib.imageboards.entities.BoardImage
+import net.kodehawa.lib.imageboards.entities.impl.KonachanImage
 import net.kodehawa.lib.imageboards.entities.impl.autocomplete.IAutoComplete
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -49,6 +51,8 @@ class MainActivity : FlutterActivity() {
         .callTimeout(TAG_LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
     private val boards by lazy { ImageBoards(client) }
+    private val konachanCom by lazy { ImageBoard(client, KonachanBoard.COM, KonachanImage::class.java) }
+    private val konachanNet by lazy { ImageBoard(client, KonachanBoard.NET, KonachanImage::class.java) }
     private var directoryResult: MethodChannel.Result? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
     private val discoveryWindows = ConcurrentHashMap<Int, Int>()
@@ -115,7 +119,12 @@ class MainActivity : FlutterActivity() {
             }
             try {
                 api.autocomplete<IAutoComplete>(query, limit).blocking().mapNotNull { suggestion ->
-                    val name = value(suggestion, "getTagName", "getName", "getValue", "getLabel")?.toString()?.trim()
+                    val nameGetters = if (board == "rule34") {
+                        arrayOf("getValue", "getTagName", "getName", "getLabel")
+                    } else {
+                        arrayOf("getTagName", "getName", "getValue", "getLabel")
+                    }
+                    val name = value(suggestion, *nameGetters)?.toString()?.trim()
                     if (name.isNullOrEmpty()) return@mapNotNull null
                     mapOf(
                         "name" to name,
@@ -190,7 +199,9 @@ class MainActivity : FlutterActivity() {
                 "gelbooru" -> ImageBoards.createGelbooru(key!!, user!!, client)
                 "e621" -> boards.E621
                 "e926" -> boards.E926
-                "konachan" -> boards.KONACHAN
+                // Keep konachan.com as the full-content primary. Its direct
+                // custom board avoids any provider-specific default changes.
+                "konachan" -> konachanCom
                 "yandere" -> boards.YANDERE
                 "danbooru" -> boards.DANBOORU
                 else -> boards.SAFEBOORU
@@ -198,7 +209,11 @@ class MainActivity : FlutterActivity() {
             val window = if (random) discoveryWindows.getOrPut(seed) { Random(seed).nextInt(21) } else 0
             val cursorKey = makeCursorKey(board!!, tags, limit, random, seed)
             if (page == 0) providerCursors.remove(cursorKey)
-            var images = fetchWindow(api, board, tags, page, limit, window, cursorKey)
+            var images = if (board == "konachan") {
+                fetchKonachanWindow(tags, page, limit, window, cursorKey)
+            } else {
+                fetchWindow(api, board, tags, page, limit, window, cursorKey)
+            }
             if (random && page == 0 && images.isEmpty() && window > 0) {
                 discoveryWindows[seed] = 0
                 providerCursors.remove(cursorKey)
@@ -326,6 +341,42 @@ class MainActivity : FlutterActivity() {
         }
         return result
     }
+
+    private fun fetchKonachanWindow(
+        tags: List<String>,
+        page: Int,
+        limit: Int,
+        window: Int,
+        cursorKey: String,
+    ): List<BoardImage> {
+        val safeFallback = konachanFallbackAllowed(tags)
+        try {
+            val primary = fetchWindow(konachanCom, "konachan", tags, page, limit, window, cursorKey)
+            if (primary.isNotEmpty() || !safeFallback) return primary
+        } catch (error: RuntimeException) {
+            if (!safeFallback) throw error
+        }
+
+        // konachan.net is safe-mode only: never send an explicit query there.
+        // Reset a partially advanced cursor so the fallback keeps page offsets
+        // and provider-page semantics independent of the failed .com request.
+        providerCursors.remove(cursorKey)
+        return fetchWindow(konachanNet, "konachan", tags, page, limit, window, cursorKey)
+    }
+
+    private fun konachanFallbackAllowed(tags: List<String>): Boolean =
+        tags.none { tag ->
+            when (tag.trim().lowercase()) {
+                // konachan.net is the safe-mode mirror. Do not use it for a
+                // query that explicitly asks for questionable or explicit
+                // posts, otherwise a successful fallback would look like a
+                // complete result set while silently omitting those ratings.
+                "questionable", "rating:q", "rating:questionable",
+                "rating:se", "rating:sensitive",
+                "explicit", "rating:e", "rating:explicit" -> true
+                else -> false
+            }
+        }
 
     private fun mapImage(image: BoardImage, board: String, apiKey: String?, userId: String?): Map<String, Any?> {
         val original = authorizeMediaUrl(normalizeUrl(image.getURL(), board), board, apiKey, userId)
