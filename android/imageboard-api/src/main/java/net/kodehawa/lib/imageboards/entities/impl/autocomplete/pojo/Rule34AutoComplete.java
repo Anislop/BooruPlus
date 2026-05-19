@@ -33,6 +33,7 @@ public class Rule34AutoComplete implements IAutoComplete {
 
     @Override
     public String getTagName() {
-        return label;
+        if (value != null && !value.trim().isEmpty()) return value;
+        return label == null ? null : label.replaceFirst("\\s*\\(\\d+\\)\\s*$", "").trim();
     }
 }

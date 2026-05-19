@@ -94,6 +94,7 @@ void main() {
   test('settings default no-AI and legacy JSON migration are compatible', () {
     expect(const AppSettings().excludeAi, isTrue);
     expect(const AppSettings().gesturesEnabled, isTrue);
+    expect(const AppSettings().selectedRatings, Rating.values);
     final migrated = AppSettings.fromMap({'columns': 3});
     expect(migrated.excludeAi, isTrue);
     expect(
@@ -111,6 +112,60 @@ void main() {
       AppSettings.fromMap({'gesturesEnabled': false}).gesturesEnabled,
       isFalse,
     );
+  });
+
+  test('rating filters and tag usage counters persist with normalization', () {
+    const settings = AppSettings(
+      selectedRatings: [Rating.explicit],
+      searchedTagCounts: {' Cat ': 2, 'cat': 3},
+      browsedTagCounts: {'Dog': 4},
+    );
+    final restored = AppSettings.decode(settings.encode());
+
+    expect(restored.selectedRatings, [Rating.explicit]);
+    expect(restored.searchedTagCounts, {'cat': 5});
+    expect(restored.browsedTagCounts, {'dog': 4});
+  });
+
+  test('search and browse usage are counted independently', () async {
+    final store = MemoryStore()..selected = Board.konachan;
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: store,
+    );
+    await state.initialize();
+
+    await state.search([' Cat ', '-dog', 'order:score', 'cat']);
+    await state.recordBrowsedTags(['cat', 'bird', 'bird']);
+
+    expect(state.searchedTagCounts, {'cat': 1, 'dog': 1});
+    expect(state.browsedTagCounts, {'bird': 1, 'cat': 1});
+    expect(state.topSearchedTags, ['cat', 'dog']);
+    expect(state.topBrowsedTags, ['bird', 'cat']);
+    expect(store.settings.searchedTagCounts, state.searchedTagCounts);
+    expect(store.settings.browsedTagCounts, state.browsedTagCounts);
+  });
+
+  test('Konachan rating filters query and locally filter returned posts', () async {
+    final general = post(101)..['rating'] = 'safe';
+    final explicit = post(102)..['rating'] = 'explicit';
+    final repo = FakeRepo([
+      [general, explicit],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()
+        ..selected = Board.konachan
+        ..settings = const AppSettings(selectedRatings: [Rating.general]),
+    );
+    await state.initialize();
+
+    expect(repo.queries.first, contains('rating:s'));
+    expect(state.posts.map((value) => value.id), [101]);
+
+    await state.setRatingFilters([Rating.explicit]);
+    expect(repo.queries.last, contains('rating:e'));
+    expect(state.posts.map((value) => value.id), [102]);
   });
 
   test(
@@ -161,6 +216,117 @@ void main() {
     await state.removeSavedQuery(['CAT']);
     expect(state.savedQueries, isEmpty);
   });
+
+  test(
+    'recent searches normalize, persist independently, and move to front',
+    () async {
+      final store = MemoryStore()
+        ..selected = Board.safebooru
+        ..settings = const AppSettings(
+          savedQueries: [
+            ['saved'],
+          ],
+        );
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+      await state.search([' Cat ', 'cat', '', ' DOG ']);
+      await state.search(['dog', 'CAT']);
+      await state.search([' DOG ', 'cat', 'dog']);
+
+      expect(state.recentSearches, [
+        ['dog', 'cat'],
+        ['cat', 'dog'],
+      ]);
+      expect(state.savedQueries, [
+        ['saved'],
+      ]);
+      expect(store.settings.recentSearches, state.recentSearches);
+      final restored = AppSettings.decode(store.settings.encode());
+      expect(restored.recentSearches, state.recentSearches);
+    },
+  );
+
+  test(
+    'recent searches discard empty queries and keep the latest 30',
+    () async {
+      final store = MemoryStore();
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      for (var index = 0; index < 35; index++) {
+        await state.search([' tag_$index ']);
+      }
+      expect(state.recentSearches, hasLength(30));
+      expect(state.recentSearches.first, ['tag_34']);
+      expect(state.recentSearches.last, ['tag_5']);
+      await state.search(['  ', '']);
+      expect(state.recentSearches, hasLength(30));
+      expect(
+        AppSettings(
+          recentSearches: [
+            [],
+            ['  '],
+            ['A', 'a'],
+          ],
+        ).normalized().recentSearches,
+        [
+          ['a'],
+        ],
+      );
+    },
+  );
+
+  test('overlapping searches preserve ordered recent history', () async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    final first = state.search(['first']);
+    final second = state.search(['second']);
+    await Future.wait([first, second]);
+
+    expect(state.tags, ['second']);
+    expect(state.recentSearches, [
+      ['second'],
+      ['first'],
+    ]);
+  });
+
+  test('search continues when recent-history persistence fails', () async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: _FailingStore(),
+    );
+    await state.search(['searchable']);
+
+    expect(state.tags, ['searchable']);
+    expect(state.recentSearches, isEmpty);
+  });
+
+  test(
+    'pending history and saved-search writes preserve both query lists',
+    () async {
+      final store = _DelayedSettingsStore();
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+
+      final recent = state.search(['recent']);
+      await Future<void>.delayed(Duration.zero);
+      final saved = state.addSavedQuery(['saved']);
+      expect(store.writes, hasLength(1));
+
+      store.gates.first.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(store.writes, hasLength(2));
+      store.gates.last.complete();
+      await Future.wait([recent, saved]);
+
+      expect(state.recentSearches, [
+        ['recent'],
+      ]);
+      expect(state.savedQueries, [
+        ['saved'],
+      ]);
+    },
+  );
 
   test('filtered pages continue until an allowed post is found', () async {
     final repo = FakeRepo([
@@ -619,6 +785,20 @@ class _FailingStore extends MemoryStore {
   @override
   Future<void> saveSettings(AppSettings value) =>
       Future.error(StateError('settings write failed'));
+}
+
+class _DelayedSettingsStore extends MemoryStore {
+  final writes = <AppSettings>[];
+  final gates = <Completer<void>>[];
+
+  @override
+  Future<void> saveSettings(AppSettings value) async {
+    writes.add(value);
+    final gate = Completer<void>();
+    gates.add(gate);
+    await gate.future;
+    settings = value;
+  }
 }
 
 class _FailOnceRepo implements BoardRepository {

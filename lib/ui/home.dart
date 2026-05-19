@@ -75,25 +75,46 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showSavedQueries() async {
-    final savedQueries = widget.state.savedQueries;
+    await _showQueryPopup(
+      title: 'Saved searches',
+      headerIcon: Icons.bookmarks_outlined,
+      queries: widget.state.savedQueries,
+      emptyMessage: 'No saved searches yet. Search tags, then tap the bookmark to save them.',
+      deleteTooltip: 'Delete saved search',
+      onDelete: widget.state.removeSavedQuery,
+    );
+  }
+
+  Future<void> _showRecentSearches() async {
+    await _showQueryPopup(
+      title: 'Recent searches',
+      headerIcon: Icons.history_rounded,
+      queries: widget.state.recentSearches,
+      emptyMessage:
+          'No recent searches yet. Search tags to build your history.',
+      deleteTooltip: 'Delete recent search',
+      onDelete: widget.state.removeRecentSearch,
+    );
+  }
+
+  Future<void> _showQueryPopup({
+    required String title,
+    required IconData headerIcon,
+    required List<List<String>> queries,
+    required String emptyMessage,
+    required String deleteTooltip,
+    required Future<void> Function(List<String>) onDelete,
+  }) async {
     await showModalBottomSheet<void>(
       context: context,
       builder: (context) => SafeArea(
-        child: savedQueries.isEmpty
-            ? const Padding(
-                padding: EdgeInsets.all(28),
-                child: Text(
-                  'No saved searches yet. Search tags, then tap the bookmark to save them.',
-                ),
-              )
+        child: queries.isEmpty
+            ? Padding(padding: EdgeInsets.all(28), child: Text(emptyMessage))
             : ListView(
                 shrinkWrap: true,
                 children: [
-                  const ListTile(
-                    title: Text('Saved searches'),
-                    leading: Icon(Icons.bookmarks_outlined),
-                  ),
-                  for (final query in savedQueries)
+                  ListTile(title: Text(title), leading: Icon(headerIcon)),
+                  for (final query in queries)
                     ListTile(
                       title: Text(query.join(' ')),
                       leading: const Icon(Icons.search_rounded),
@@ -102,10 +123,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         _search(query);
                       },
                       trailing: IconButton(
-                        tooltip: 'Delete saved search',
+                        tooltip: deleteTooltip,
                         icon: const Icon(Icons.delete_outline),
                         onPressed: () async {
-                          await widget.state.removeSavedQuery(query);
+                          await onDelete(query);
                           if (context.mounted) Navigator.pop(context);
                         },
                       ),
@@ -159,6 +180,51 @@ class _HomeScreenState extends State<HomeScreen> {
     _search(sort == null ? tags : [...tags, sort]);
   }
 
+  Future<void> _chooseRatings() async {
+    var selected = widget.state.selectedRatings.toSet();
+    final result = await showModalBottomSheet<Set<Rating>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const ListTile(
+                leading: Icon(Icons.filter_alt_outlined),
+                title: Text('Ratings'),
+                subtitle: Text('Choose which ratings appear in the feed'),
+              ),
+              for (final rating in Rating.values)
+                CheckboxListTile(
+                  title: Text(rating.label),
+                  value: selected.contains(rating),
+                  onChanged: (value) => setSheetState(() {
+                    if (value == true) {
+                      selected.add(rating);
+                    } else {
+                      selected.remove(rating);
+                    }
+                  }),
+                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(context, selected),
+                    child: const Text('Apply'),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (result != null && mounted) await widget.state.setRatingFilters(result);
+  }
+
   String? _sortTag(Board board, String filter) {
     if (filter == 'none') return null;
     final gelbooruSyntax = board == Board.gelbooru || board == Board.rule34;
@@ -197,8 +263,8 @@ class _HomeScreenState extends State<HomeScreen> {
     bool hidePostTags,
   ) {
     final post = state.posts[index];
-    final quickActions = QuickActionOverlayController();
     return MediaTile(
+      key: ValueKey('${board.name}:${post.id}:${post.url}'),
       post: post,
       board: board,
       hidePostTags: hidePostTags,
@@ -219,17 +285,16 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       isFavorite: state.isFavorite(post, board: board),
       blur: _shouldBlur(state, post),
-      onLongPress: () => showQuickPostActions(
+      onLongPress: null,
+      onLongPressOrigin: (origin, controller) => showQuickPostActions(
         context,
         post: post,
         board: board,
         state: state,
         isFavorite: state.isFavorite(post, board: board),
-        controller: quickActions,
+        controller: controller,
+        origin: origin,
       ),
-      onLongPressMove: quickActions.update,
-      onLongPressEnd: quickActions.release,
-      onLongPressCancel: quickActions.cancel,
     );
   }
 
@@ -351,10 +416,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     : Icons.bookmark_add_outlined,
               ),
             ),
-            if (state.savedQueries.isNotEmpty)
+            if (state.recentSearches.isNotEmpty)
               IconButton(
-                tooltip: 'Open saved searches',
-                onPressed: _showSavedQueries,
+                tooltip: 'Open recent searches',
+                onPressed: _showRecentSearches,
                 icon: const Icon(Icons.history_rounded),
               ),
             IconButton(
@@ -508,8 +573,10 @@ class _HomeScreenState extends State<HomeScreen> {
               FilterBar(
                 board: board,
                 tags: state.tags,
+                selectedRatings: state.selectedRatings,
                 onFilter: _chooseFilter,
                 onDate: _pickDate,
+                onRatings: _chooseRatings,
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
@@ -673,6 +740,7 @@ class MediaTile extends StatefulWidget {
     this.isFavorite = false,
     this.blur = false,
     this.onLongPress,
+    this.onLongPressOrigin,
     this.onLongPressMove,
     this.onLongPressEnd,
     this.onLongPressCancel,
@@ -684,15 +752,23 @@ class MediaTile extends StatefulWidget {
   final bool isFavorite;
   final bool blur;
   final VoidCallback? onLongPress;
+  final void Function(Rect, QuickActionOverlayController)? onLongPressOrigin;
   final ValueChanged<Offset>? onLongPressMove;
-  final VoidCallback? onLongPressEnd;
+  final ValueChanged<Offset>? onLongPressEnd;
   final VoidCallback? onLongPressCancel;
   @override
   State<MediaTile> createState() => _MediaTileState();
 }
 
 class _MediaTileState extends State<MediaTile> {
+  final _quickActions = QuickActionOverlayController();
   bool _pressed = false;
+
+  @override
+  void dispose() {
+    _quickActions.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -745,17 +821,29 @@ class _MediaTileState extends State<MediaTile> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onLongPressStart: (_) {
+          _quickActions.beginGesture();
           setState(() => _pressed = true);
+          final render = context.findRenderObject();
+          if (render is RenderBox && render.hasSize) {
+            widget.onLongPressOrigin?.call(
+              render.localToGlobal(Offset.zero) & render.size,
+              _quickActions,
+            );
+          }
           widget.onLongPress?.call();
         },
-        onLongPressMoveUpdate: (details) =>
-            widget.onLongPressMove?.call(details.globalPosition),
-        onLongPressEnd: (_) {
+        onLongPressMoveUpdate: (details) {
+          _quickActions.update(details.globalPosition);
+          widget.onLongPressMove?.call(details.globalPosition);
+        },
+        onLongPressEnd: (details) {
           setState(() => _pressed = false);
-          widget.onLongPressEnd?.call();
+          _quickActions.releaseAt(details.globalPosition);
+          widget.onLongPressEnd?.call(details.globalPosition);
         },
         onLongPressCancel: () {
           setState(() => _pressed = false);
+          _quickActions.cancel();
           widget.onLongPressCancel?.call();
         },
         child: AnimatedScale(
@@ -876,6 +964,29 @@ String _displayUrl(MediaPost post) {
   return post.url;
 }
 
+String _quickActionUrl(MediaPost post) {
+  if (post.isVideo) {
+    return post.previewUrl.isNotEmpty ? post.previewUrl : _displayUrl(post);
+  }
+  final dynamic value = post;
+  try {
+    final authenticated = value.authenticatedUrl;
+    if (authenticated is String && authenticated.isNotEmpty) {
+      return authenticated;
+    }
+  } catch (_) {}
+  try {
+    final urls = value.urlMap;
+    if (urls is Map) {
+      for (final key in const ['original', 'file', 'url']) {
+        final candidate = urls[key];
+        if (candidate is String && candidate.isNotEmpty) return candidate;
+      }
+    }
+  } catch (_) {}
+  return post.url;
+}
+
 bool _shouldBlur(AppState state, MediaPost post) {
   final rating = post.rating.trim().toLowerCase();
   if (rating.contains('explicit') || rating == 'e') {
@@ -900,10 +1011,46 @@ class QuickActionOverlayController {
   void Function(Offset)? _onMove;
   VoidCallback? _onRelease;
   VoidCallback? _onCancel;
+  bool _pendingRelease = false;
+  bool _pendingCancel = false;
+  Offset? _pendingReleasePosition;
 
   void update(Offset position) => _onMove?.call(position);
-  void release() => _onRelease?.call();
-  void cancel() => _onCancel?.call();
+  void beginGesture() {
+    _pendingRelease = false;
+    _pendingCancel = false;
+    _pendingReleasePosition = null;
+  }
+
+  void release() {
+    final callback = _onRelease;
+    if (callback == null) {
+      _pendingRelease = true;
+      return;
+    }
+    callback();
+  }
+
+  void releaseAt(Offset position) {
+    final move = _onMove;
+    final release = _onRelease;
+    if (move == null || release == null) {
+      _pendingReleasePosition = position;
+      _pendingRelease = true;
+      return;
+    }
+    move(position);
+    release();
+  }
+
+  void cancel() {
+    final callback = _onCancel;
+    if (callback == null) {
+      _pendingCancel = true;
+      return;
+    }
+    callback();
+  }
 
   void _attach({
     required void Function(Offset) onMove,
@@ -913,12 +1060,29 @@ class QuickActionOverlayController {
     _onMove = onMove;
     _onRelease = onRelease;
     _onCancel = onCancel;
+    final pendingCancel = _pendingCancel;
+    final pendingRelease = _pendingRelease;
+    final pendingPosition = _pendingReleasePosition;
+    _pendingCancel = false;
+    _pendingRelease = false;
+    _pendingReleasePosition = null;
+    if (pendingCancel) {
+      scheduleMicrotask(onCancel);
+    } else if (pendingRelease) {
+      scheduleMicrotask(() {
+        if (pendingPosition != null) onMove(pendingPosition);
+        onRelease();
+      });
+    }
   }
 
   void _detach() {
     _onMove = null;
     _onRelease = null;
     _onCancel = null;
+    _pendingRelease = false;
+    _pendingCancel = false;
+    _pendingReleasePosition = null;
   }
 }
 
@@ -929,6 +1093,7 @@ Future<void> showQuickPostActions(
   required AppState state,
   bool? isFavorite,
   QuickActionOverlayController? controller,
+  Rect? origin,
 }) async {
   final result = Completer<String?>();
   late final OverlayEntry entry;
@@ -967,6 +1132,7 @@ Future<void> showQuickPostActions(
           isFavorite: isFavorite ?? state.isFavorite(post, board: board),
           blur: _shouldBlur(state, post),
           controller: controller,
+          origin: origin,
           onResult: complete,
         ),
       ],
@@ -992,6 +1158,7 @@ class _QuickActionDialog extends StatefulWidget {
     required this.onResult,
     required this.blur,
     this.controller,
+    this.origin,
   });
   final MediaPost post;
   final Board board;
@@ -999,6 +1166,7 @@ class _QuickActionDialog extends StatefulWidget {
   final ValueChanged<String?> onResult;
   final bool blur;
   final QuickActionOverlayController? controller;
+  final Rect? origin;
 
   @override
   State<_QuickActionDialog> createState() => _QuickActionDialogState();
@@ -1009,6 +1177,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   final _favoriteKey = GlobalKey();
   final _hideKey = GlobalKey();
   late final AnimationController _animationController;
+  late final CurvedAnimation _positionAnimation;
   String? _armed;
   bool _revealed = false;
   bool _closing = false;
@@ -1021,6 +1190,11 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       duration: const Duration(milliseconds: 220),
       reverseDuration: const Duration(milliseconds: 180),
     )..forward();
+    _positionAnimation = CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.easeOutBack,
+      reverseCurve: Curves.easeInCubic,
+    );
     widget.controller?._attach(
       onMove: _updateArmed,
       onRelease: _releaseArmed,
@@ -1031,6 +1205,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   @override
   void dispose() {
     widget.controller?._detach();
+    _positionAnimation.dispose();
     _animationController.dispose();
     super.dispose();
   }
@@ -1047,8 +1222,8 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   bool _contains(GlobalKey key, Offset position) {
     final render = key.currentContext?.findRenderObject();
     if (render is! RenderBox || !render.hasSize) return false;
-    final topLeft = render.localToGlobal(Offset.zero);
-    return (topLeft & render.size).contains(position);
+    final local = render.globalToLocal(position);
+    return (Offset.zero & render.size).contains(local);
   }
 
   void _releaseArmed() {
@@ -1075,17 +1250,17 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final width = (size.width - 32).clamp(240.0, 520.0).toDouble();
-    final height = (size.height * .72).clamp(320.0, 660.0).toDouble();
-    final preview = widget.post.previewUrl.isNotEmpty
-        ? widget.post.previewUrl
-        : widget.post.url;
-    final media = preview.isEmpty
+    final mediaUrl = _quickActionUrl(widget.post);
+    final media = mediaUrl.isEmpty
         ? const Center(child: Icon(Icons.image_not_supported_outlined))
         : widget.board == Board.gelbooru
-        ? MediaImage(url: preview, board: widget.board, fit: BoxFit.contain)
-        : Image.network(preview, fit: BoxFit.contain);
+        ? MediaImage(url: mediaUrl, board: widget.board, fit: BoxFit.contain)
+        : Image.network(
+            mediaUrl,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) =>
+                const Center(child: Icon(Icons.broken_image_outlined)),
+          );
     final displayedMedia = widget.blur && !_revealed
         ? ImageFiltered(
             imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
@@ -1099,84 +1274,107 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
         _updateArmed(event.position);
         _releaseArmed();
       },
-      child: ScaleTransition(
-        scale: Tween<double>(begin: .9, end: 1).animate(
-          CurvedAnimation(
-            parent: _animationController,
-            curve: Curves.easeOutBack,
-            reverseCurve: Curves.easeInCubic,
-          ),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: Center(
-            child: SizedBox(
-              width: width,
-              height: height,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: Container(
-                          color: Colors.black45,
-                          alignment: Alignment.center,
-                          child: Stack(
+      child: SizedBox.expand(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            AnimatedBuilder(
+              animation: _animationController,
+              builder: (context, child) {
+                final size = MediaQuery.sizeOf(context);
+                final width = (size.width - 32).clamp(240.0, 520.0).toDouble();
+                final height = (size.height * .72)
+                    .clamp(320.0, 660.0)
+                    .toDouble();
+                final target = Rect.fromLTWH(
+                  (size.width - width) / 2,
+                  (size.height - height) / 2,
+                  width,
+                  height,
+                );
+                final rect = RectTween(
+                  begin: widget.origin ?? target,
+                  end: target,
+                ).evaluate(_positionAnimation)!;
+                return Positioned.fromRect(
+                  rect: rect,
+                  child: FittedBox(
+                    fit: BoxFit.contain,
+                    child: SizedBox(
+                      width: target.width,
+                      height: target.height,
+                      child: child,
+                    ),
+                  ),
+                );
+              },
+              child: Material(
+                color: Colors.transparent,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            color: Colors.black45,
                             alignment: Alignment.center,
-                            children: [
-                              Positioned.fill(child: displayedMedia),
-                              if (widget.blur && !_revealed)
-                                FilledButton.icon(
-                                  onPressed: () =>
-                                      setState(() => _revealed = true),
-                                  icon: const Icon(Icons.visibility),
-                                  label: const Text('Reveal media'),
-                                ),
-                            ],
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                Positioned.fill(child: displayedMedia),
+                                if (widget.blur && !_revealed)
+                                  FilledButton.icon(
+                                    onPressed: () =>
+                                        setState(() => _revealed = true),
+                                    icon: const Icon(Icons.visibility),
+                                    label: const Text('Reveal media'),
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      widget.post.description.isEmpty
-                          ? 'Post #${widget.post.id}'
-                          : widget.post.description,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _actionButton(
-                            key: _favoriteKey,
-                            action: 'favorite',
-                            icon: Icons.favorite_rounded,
-                            label: widget.isFavorite
-                                ? 'Unfavorite'
-                                : 'Favorite',
+                      const SizedBox(height: 10),
+                      Text(
+                        widget.post.description.isEmpty
+                            ? 'Post #${widget.post.id}'
+                            : widget.post.description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _actionButton(
+                              key: _favoriteKey,
+                              action: 'favorite',
+                              icon: Icons.favorite_rounded,
+                              label: widget.isFavorite
+                                  ? 'Unfavorite'
+                                  : 'Favorite',
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: _actionButton(
-                            key: _hideKey,
-                            action: 'hide',
-                            icon: Icons.visibility_off_rounded,
-                            label: 'Hide',
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: _actionButton(
+                              key: _hideKey,
+                              action: 'hide',
+                              icon: Icons.visibility_off_rounded,
+                              label: 'Hide',
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ],
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -1192,6 +1390,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
     onPressed: () => _commit(action),
     style: FilledButton.styleFrom(
       backgroundColor: _armed == action ? accent : Colors.black54,
+      foregroundColor: Colors.white,
       padding: const EdgeInsets.symmetric(vertical: 13),
     ),
     icon: Icon(icon),
@@ -1204,13 +1403,17 @@ class FilterBar extends StatelessWidget {
     super.key,
     required this.board,
     required this.tags,
+    required this.selectedRatings,
     required this.onFilter,
     required this.onDate,
+    required this.onRatings,
   });
   final Board board;
   final List<String> tags;
+  final List<Rating> selectedRatings;
   final ValueChanged<String> onFilter;
   final VoidCallback onDate;
+  final VoidCallback onRatings;
 
   @override
   Widget build(BuildContext context) {
@@ -1234,24 +1437,39 @@ class FilterBar extends StatelessWidget {
     ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      child: Row(
-        children: [
-          PopupMenuButton<String>(
-            tooltip: 'Sort results',
-            onSelected: onFilter,
-            itemBuilder: (_) => sortItems,
-            child: Chip(
-              avatar: const Icon(Icons.sort_rounded, size: 17),
-              label: Text(order == null ? 'Sort' : order.split(':').last),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            PopupMenuButton<String>(
+              tooltip: 'Sort results',
+              onSelected: onFilter,
+              itemBuilder: (_) => sortItems,
+              child: Chip(
+                avatar: const Icon(Icons.sort_rounded, size: 17),
+                label: Text(order == null ? 'Sort' : order.split(':').last),
+              ),
             ),
-          ),
-          const SizedBox(width: 6),
-          ActionChip(
-            avatar: const Icon(Icons.calendar_today_outlined, size: 16),
-            label: Text(date == null ? 'Date' : date.split('>=').last),
-            onPressed: onDate,
-          ),
-        ],
+            const SizedBox(width: 6),
+            ActionChip(
+              avatar: const Icon(Icons.calendar_today_outlined, size: 16),
+              label: Text(date == null ? 'Date' : date.split('>=').last),
+              onPressed: onDate,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              avatar: const Icon(Icons.shield_outlined, size: 16),
+              label: Text(
+                selectedRatings.length == Rating.values.length
+                    ? 'Ratings'
+                    : selectedRatings.isEmpty
+                    ? 'No ratings'
+                    : selectedRatings.map((rating) => rating.label).join(', '),
+              ),
+              onPressed: onRatings,
+            ),
+          ],
+        ),
       ),
     );
   }

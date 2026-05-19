@@ -173,8 +173,10 @@ public class KonachanImage implements BoardImage {
     private static String firstUrl(String... values) {
         for (String value : values) {
             if (value == null || value.trim().isEmpty()) continue;
-            String normalized = value.trim().toLowerCase();
-            if (normalized.startsWith("https://") || normalized.startsWith("http://")) return value;
+            String trimmed = value.trim();
+            String normalized = trimmed.toLowerCase();
+            if (normalized.startsWith("//")) return "https:" + trimmed;
+            if (normalized.startsWith("https://") || normalized.startsWith("http://")) return trimmed;
         }
         return null;
     }

@@ -21,6 +21,7 @@ class AppState extends ChangeNotifier {
   final SettingsStore _store;
   final PostStore _postStore;
   AppSettings _settings = const AppSettings();
+  Future<void> _settingsQueue = Future<void>.value();
   Board? _board;
   List<MediaPost> _posts = const [];
   List<String> _tags = const [];
@@ -44,6 +45,15 @@ class AppState extends ChangeNotifier {
   bool get initialized => _initialized;
   List<List<String>> get savedQueries =>
       List.unmodifiable(_settings.savedQueries);
+  List<List<String>> get recentSearches =>
+      List.unmodifiable(_settings.recentSearches);
+  List<Rating> get selectedRatings => List.unmodifiable(_settings.selectedRatings);
+  Map<String, int> get searchedTagCounts =>
+      Map.unmodifiable(_settings.searchedTagCounts);
+  Map<String, int> get browsedTagCounts =>
+      Map.unmodifiable(_settings.browsedTagCounts);
+  List<String> get topSearchedTags => _topTags(_settings.searchedTagCounts);
+  List<String> get topBrowsedTags => _topTags(_settings.browsedTagCounts);
   List<SavedPost> get favoritePosts => List.unmodifiable(_favoritePosts);
   List<SavedPost> get hiddenPosts => List.unmodifiable(_hiddenPosts);
   bool isFavorite(MediaPost post, {Board? board}) => _favoritePosts.any(
@@ -211,13 +221,162 @@ class AppState extends ChangeNotifier {
 
   Future<void> search(List<String> value) async {
     _invalidate();
+    final generation = _generation;
     _tags = value
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList(growable: false);
     _clearResults();
     notifyListeners();
-    if (_board != null) await _load(reset: true, generation: _generation);
+    final recent = _recordRecentSearch(value);
+    if (_board != null) {
+      await Future.wait<void>([
+        recent,
+        _load(reset: true, generation: generation),
+      ]);
+    } else {
+      await recent;
+    }
+  }
+
+  Future<void> recordBrowsedTags(Iterable<String> tags) =>
+      _recordTagCounts(tags, searched: false);
+
+  Future<void> recordBrowsedTag(String tag) =>
+      _recordTagCounts([tag], searched: false);
+
+  Future<void> setRatingFilters(Iterable<Rating> ratings) async {
+    final normalized = ratings.toSet().toList();
+    await _enqueueSettingsUpdate(() async {
+      final next = _settings.copyWith(selectedRatings: normalized);
+      try {
+        await _store.saveSettings(next);
+      } catch (_) {
+        return;
+      }
+      _settings = next;
+    });
+    _invalidate();
+    _clearResults();
+    notifyListeners();
+    await _load(reset: true, generation: _generation);
+  }
+
+  Future<void> _recordRecentSearch(List<String> value) {
+    final query = value
+        .map(_normalize)
+        .where((tag) => tag.isNotEmpty)
+        .toSet()
+        .toList();
+    final searchedTags = _usageTags(value, searched: true);
+    if (query.isEmpty && searchedTags.isEmpty) return Future<void>.value();
+    return _enqueueSettingsUpdate(() async {
+      final counts = {..._settings.searchedTagCounts};
+      for (final tag in searchedTags) {
+        counts[tag] = (counts[tag] ?? 0) + 1;
+      }
+      final normalized = _settings.copyWith(
+        recentSearches: query.isEmpty
+            ? _settings.recentSearches
+            : [query, ..._settings.recentSearches],
+        searchedTagCounts: counts,
+      );
+      try {
+        await _store.saveSettings(normalized);
+      } catch (_) {
+        return;
+      }
+      _settings = normalized;
+      notifyListeners();
+    });
+  }
+
+  Future<void> _recordTagCounts(
+    Iterable<String> values, {
+    required bool searched,
+  }) {
+    final tags = _usageTags(values, searched: searched);
+    if (tags.isEmpty) return Future<void>.value();
+    return _enqueueSettingsUpdate(() async {
+      final source = searched
+          ? _settings.searchedTagCounts
+          : _settings.browsedTagCounts;
+      final counts = {...source};
+      for (final tag in tags) {
+        counts[tag] = (counts[tag] ?? 0) + 1;
+      }
+      final next = _settings.copyWith(
+        searchedTagCounts: searched ? counts : _settings.searchedTagCounts,
+        browsedTagCounts: searched ? _settings.browsedTagCounts : counts,
+      );
+      try {
+        await _store.saveSettings(next);
+      } catch (_) {
+        return;
+      }
+      _settings = next;
+      notifyListeners();
+    });
+  }
+
+  Set<String> _usageTags(
+    Iterable<String> values, {
+    required bool searched,
+  }) => values
+        .map(_normalize)
+        .map(
+          (tag) => tag.startsWith('-') || tag.startsWith('~')
+              ? tag.substring(1)
+              : tag,
+        )
+        .where((tag) => tag.isNotEmpty && (!searched || _isOrdinaryTag(tag)))
+        .toSet();
+
+  List<String> _topTags(Map<String, int> counts) => (counts.entries.toList()
+        ..sort((a, b) {
+          final byCount = b.value.compareTo(a.value);
+          return byCount == 0 ? a.key.compareTo(b.key) : byCount;
+        }))
+      .take(10)
+      .map((entry) => entry.key)
+      .toList(growable: false);
+
+  Future<void> removeRecentSearch(List<String> value) async {
+    final key = value
+        .map(_normalize)
+        .where((tag) => tag.isNotEmpty)
+        .toSet()
+        .join('\u0000');
+    await _enqueueSettingsUpdate(() async {
+      final next = _settings.recentSearches
+          .where(
+            (query) =>
+                query
+                    .map(_normalize)
+                    .where((tag) => tag.isNotEmpty)
+                    .toSet()
+                    .join('\u0000') !=
+                key,
+          )
+          .toList();
+      final normalized = _settings.copyWith(recentSearches: next);
+      try {
+        await _store.saveSettings(normalized);
+      } catch (_) {
+        return;
+      }
+      _settings = normalized;
+      notifyListeners();
+    });
+  }
+
+  Future<T> _enqueueSettingsUpdate<T>(Future<T> Function() update) {
+    final operation = _settingsQueue.then<T>((_) => update());
+    _settingsQueue = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return operation;
   }
 
   Future<void> addSavedQuery(List<String> value) async {
@@ -227,11 +386,13 @@ class AppState extends ChangeNotifier {
         .toSet()
         .toList();
     if (query.isEmpty) return;
-    final next = [query, ..._settings.savedQueries];
-    final normalized = _settings.copyWith(savedQueries: next);
-    await _store.saveSettings(normalized);
-    _settings = normalized;
-    notifyListeners();
+    await _enqueueSettingsUpdate(() async {
+      final next = [query, ..._settings.savedQueries];
+      final normalized = _settings.copyWith(savedQueries: next);
+      await _store.saveSettings(normalized);
+      _settings = normalized;
+      notifyListeners();
+    });
   }
 
   Future<void> removeSavedQuery(List<String> value) async {
@@ -240,13 +401,15 @@ class AppState extends ChangeNotifier {
         .where((e) => e.isNotEmpty)
         .toSet()
         .join('\u0000');
-    final next = _settings.savedQueries
-        .where((query) => query.map(_normalize).toSet().join('\u0000') != key)
-        .toList();
-    final normalized = _settings.copyWith(savedQueries: next);
-    await _store.saveSettings(normalized);
-    _settings = normalized;
-    notifyListeners();
+    await _enqueueSettingsUpdate(() async {
+      final next = _settings.savedQueries
+          .where((query) => query.map(_normalize).toSet().join('\u0000') != key)
+          .toList();
+      final normalized = _settings.copyWith(savedQueries: next);
+      await _store.saveSettings(normalized);
+      _settings = normalized;
+      notifyListeners();
+    });
   }
 
   Future<void> refresh() async {
@@ -263,9 +426,19 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> updateSettings(AppSettings value) async {
-    final normalized = value.normalized();
-    await _store.saveSettings(normalized);
-    _settings = normalized;
+    await _enqueueSettingsUpdate(() async {
+      final normalized = value
+          .copyWith(
+            savedQueries: _settings.savedQueries,
+            recentSearches: _settings.recentSearches,
+            selectedRatings: _settings.selectedRatings,
+            searchedTagCounts: _settings.searchedTagCounts,
+            browsedTagCounts: _settings.browsedTagCounts,
+          )
+          .normalized();
+      await _store.saveSettings(normalized);
+      _settings = normalized;
+    });
     _invalidate();
     _clearResults();
     notifyListeners();
@@ -386,6 +559,7 @@ class AppState extends ChangeNotifier {
       ..._settings.blacklist.map((tag) => '-$tag'),
       if (_settings.excludeAi) '-ai_generated',
     ];
+    final rating = _singleProviderRating;
     // Anonymous Danbooru searches accept only two ordinary tags. Keep the
     // user's search intact and let the local filter enforce any remaining
     // blacklist/no-AI exclusions instead of turning a valid query into a
@@ -393,10 +567,27 @@ class AppState extends ChangeNotifier {
     if (_board == Board.danbooru) {
       final ordinary = _tags.where(_isOrdinaryTag).length;
       final budget = (2 - ordinary).clamp(0, 2);
-      return [..._tags, ...exclusions.take(budget)];
+      return [
+        ..._tags,
+        if (rating != null)
+          'rating:${_board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
+        ...exclusions.take(budget),
+      ];
     }
-    return [..._tags, ...exclusions];
+    return [
+      ..._tags,
+      if (rating != null)
+        'rating:${_board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
+      ...exclusions,
+    ];
   }
+
+  Rating? get _singleProviderRating =>
+      _settings.selectedRatings.length == 1 &&
+          _board != Board.gelbooru &&
+          _board != Board.rule34
+      ? _settings.selectedRatings.single
+      : null;
 
   bool _isOrdinaryTag(String value) {
     final tag = value.startsWith('-') ? value.substring(1) : value;
@@ -410,7 +601,15 @@ class AppState extends ChangeNotifier {
         (blocked) =>
             post.tags.any((tag) => _normalize(tag) == _normalize(blocked)),
       ) &&
+      _ratingAllowed(post) &&
       !_isHidden(post);
+
+  Rating? _postRating(MediaPost post) => RatingInfo.parse(post.rating);
+  bool _ratingAllowed(MediaPost post) {
+    if (_settings.selectedRatings.length == Rating.values.length) return true;
+    final rating = _postRating(post);
+    return rating != null && _settings.selectedRatings.contains(rating);
+  }
 
   bool _isHidden(MediaPost post) => isHidden(post, board: _board);
 
