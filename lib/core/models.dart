@@ -153,6 +153,50 @@ class TagSuggestion {
   );
 }
 
+/// A lower-bitrate rendition of a video post, when the provider supplies one.
+class VideoVariant {
+  const VideoVariant({
+    required this.label,
+    required this.url,
+    this.width = 0,
+    this.height = 0,
+    this.quality = 0,
+  });
+  final String label, url;
+  final int width, height;
+
+  /// Resolution tier such as 720 for "720p". Providers name tiers by the
+  /// short side, so a portrait 720p rendition can be 1440 pixels tall.
+  final int quality;
+
+  Map<String, dynamic> toMap() => {
+    'label': label,
+    'url': url,
+    'width': width,
+    'height': height,
+    'quality': quality,
+  };
+
+  factory VideoVariant.fromMap(Map<dynamic, dynamic> map) {
+    final width = MediaPost._int(map['width']);
+    final height = MediaPost._int(map['height']);
+    final label = '${map['label'] ?? ''}'.trim();
+    final named = int.tryParse(
+      RegExp(r'^(\d+)p').firstMatch(label)?.group(1) ?? '',
+    );
+    final quality = MediaPost._int(map['quality']) > 0
+        ? MediaPost._int(map['quality'])
+        : named ?? MediaPost._tier(width, height);
+    return VideoVariant(
+      label: label.isEmpty && quality > 0 ? '${quality}p' : label,
+      url: '${map['url'] ?? ''}'.trim(),
+      width: width,
+      height: height,
+      quality: quality,
+    );
+  }
+}
+
 class Credentials {
   const Credentials({required this.userId, required this.apiKey});
   final String userId;
@@ -177,6 +221,7 @@ class MediaPost {
     required this.extension,
     this.tagDetails = const [],
     this.postUrl,
+    this.videoVariants = const [],
   });
 
   factory MediaPost.fromMap(Map<dynamic, dynamic> map) {
@@ -212,6 +257,14 @@ class MediaPost {
       }
     }
     final extension = _extension(url);
+    final variantsValue = map['videoVariants'];
+    final variants = variantsValue is List
+        ? variantsValue
+              .whereType<Map>()
+              .map(VideoVariant.fromMap)
+              .where((variant) => variant.url.isNotEmpty && variant.url != url)
+              .toList(growable: false)
+        : const <VideoVariant>[];
     return MediaPost(
       id: _int(map['id']),
       url: url,
@@ -230,6 +283,7 @@ class MediaPost {
       extension: extension,
       tagDetails: List.unmodifiable(details),
       postUrl: _stringOrNull(map['postUrl'] ?? map['post_url']),
+      videoVariants: variants,
     );
   }
 
@@ -246,6 +300,46 @@ class MediaPost {
   final String? postUrl;
   final int width, height, score;
   final bool isVideo;
+  final List<VideoVariant> videoVariants;
+
+  /// Resolution tier of the original file (its short side).
+  int get videoQuality => _tier(width, height);
+
+  /// The best stream at or below the [maxQuality] tier; null means the
+  /// original file. A [maxQuality] of 0 always selects the original.
+  VideoVariant? videoVariantFor(int maxQuality) {
+    if (maxQuality <= 0 || videoVariants.isEmpty) return null;
+    final original = videoQuality;
+    if (original > 0 && original <= maxQuality) return null;
+    VideoVariant? best;
+    for (final variant in videoVariants) {
+      if (variant.quality <= 0 || variant.quality > maxQuality) continue;
+      if (best == null || variant.quality > best.quality) best = variant;
+    }
+    if (best != null) return best;
+    // Every rendition exceeds the request: the smallest is still closest.
+    return videoVariants.reduce((a, b) => a.quality <= b.quality ? a : b);
+  }
+
+  MediaPost withUrls({required String url, required String previewUrl}) =>
+      MediaPost(
+        id: id,
+        url: url,
+        previewUrl: previewUrl,
+        tags: tags,
+        rating: rating,
+        uploader: uploader,
+        source: source,
+        width: width,
+        height: height,
+        score: score,
+        description: description,
+        isVideo: isVideo,
+        extension: extension,
+        tagDetails: tagDetails,
+        postUrl: postUrl,
+        videoVariants: videoVariants,
+      );
 
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -263,10 +357,16 @@ class MediaPost {
     'extension': extension,
     'tagDetails': tagDetails.map((tag) => tag.toMap()).toList(growable: false),
     'postUrl': postUrl,
+    if (videoVariants.isNotEmpty)
+      'videoVariants': videoVariants
+          .map((variant) => variant.toMap())
+          .toList(growable: false),
   };
 
   static int _int(dynamic value) =>
       value is num ? value.toInt() : int.tryParse('$value') ?? 0;
+  static int _tier(int width, int height) =>
+      width > 0 && height > 0 ? (width < height ? width : height) : height;
   static String? _stringOrNull(dynamic value) =>
       value is String && value.trim().isNotEmpty ? value : null;
   static bool _bool(dynamic value) =>
@@ -354,23 +454,7 @@ class SavedPost {
   }
 
   static MediaPost _withUrls(MediaPost value, String url, String previewUrl) =>
-      MediaPost(
-        id: value.id,
-        url: url,
-        previewUrl: previewUrl,
-        tags: value.tags,
-        rating: value.rating,
-        uploader: value.uploader,
-        source: value.source,
-        width: value.width,
-        height: value.height,
-        score: value.score,
-        description: value.description,
-        isVideo: value.isVideo,
-        extension: value.extension,
-        tagDetails: value.tagDetails,
-        postUrl: value.postUrl,
-      );
+      value.withUrls(url: url, previewUrl: previewUrl);
 }
 
 class AppSettings {
@@ -395,8 +479,13 @@ class AppSettings {
     ],
     this.searchedTagCounts = const {},
     this.browsedTagCounts = const {},
+    this.videoQuality = 0,
   });
   final int columns, rows, batchSize;
+
+  /// Preferred maximum video tier (e.g. 720 for 720p); 0 streams the
+  /// original file.
+  final int videoQuality;
   final List<String> blacklist;
   final String? downloadDirectory;
   final bool excludeAi;
@@ -428,6 +517,7 @@ class AppSettings {
     selectedRatings: _normalizedRatings(selectedRatings),
     searchedTagCounts: _normalizedCounts(searchedTagCounts),
     browsedTagCounts: _normalizedCounts(browsedTagCounts),
+    videoQuality: videoQuality < 0 ? 0 : videoQuality,
   );
 
   AppSettings copyWith({
@@ -447,6 +537,7 @@ class AppSettings {
     List<Rating>? selectedRatings,
     Map<String, int>? searchedTagCounts,
     Map<String, int>? browsedTagCounts,
+    int? videoQuality,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -466,6 +557,7 @@ class AppSettings {
     selectedRatings: selectedRatings ?? this.selectedRatings,
     searchedTagCounts: searchedTagCounts ?? this.searchedTagCounts,
     browsedTagCounts: browsedTagCounts ?? this.browsedTagCounts,
+    videoQuality: videoQuality ?? this.videoQuality,
   ).normalized();
   static const _unset = Object();
 
@@ -486,6 +578,7 @@ class AppSettings {
     'selectedRatings': selectedRatings.map((rating) => rating.name).toList(),
     'searchedTagCounts': searchedTagCounts,
     'browsedTagCounts': browsedTagCounts,
+    'videoQuality': videoQuality,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -506,6 +599,7 @@ class AppSettings {
     selectedRatings: _ratingsFromMap(map['selectedRatings']),
     searchedTagCounts: _countsFromMap(map['searchedTagCounts']),
     browsedTagCounts: _countsFromMap(map['browsedTagCounts']),
+    videoQuality: _asInt(map['videoQuality'], 0),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -597,6 +691,7 @@ class AppSettings {
         other.hidePostTags != hidePostTags ||
         other.blurExplicit != blurExplicit ||
         other.blurQuestionable != blurQuestionable ||
+        other.videoQuality != videoQuality ||
         other.blacklist.length != blacklist.length ||
         other.savedQueries.length != savedQueries.length ||
         other.recentSearches.length != recentSearches.length) {
@@ -650,6 +745,7 @@ class AppSettings {
     Object.hashAll(selectedRatings),
     _countsHash(searchedTagCounts),
     _countsHash(browsedTagCounts),
+    videoQuality,
   );
 
   static bool _sameRatings(List<Rating> a, List<Rating> b) {

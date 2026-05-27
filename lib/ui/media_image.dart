@@ -13,6 +13,7 @@ class MediaImage extends StatefulWidget {
     this.fit = BoxFit.contain,
     this.cacheWidth,
     this.cacheHeight,
+    this.maxDimension,
     this.errorMessage = 'The original image is unavailable.',
     this.mediaService,
     this.errorWidget,
@@ -23,6 +24,10 @@ class MediaImage extends StatefulWidget {
   final BoxFit fit;
   final int? cacheWidth;
   final int? cacheHeight;
+
+  /// Caps the decoded size on the longest side, preserving aspect ratio.
+  /// Overrides [cacheWidth] and [cacheHeight]; images are never upscaled.
+  final int? maxDimension;
   final String errorMessage;
   final MediaService? mediaService;
   final Widget? errorWidget;
@@ -69,6 +74,23 @@ class _MediaImageState extends State<MediaImage> {
         : null;
   }
 
+  ImageProvider _bounded(ImageProvider provider) {
+    final max = widget.maxDimension;
+    if (max == null) {
+      return ResizeImage.resizeIfNeeded(
+        widget.cacheWidth,
+        widget.cacheHeight,
+        provider,
+      );
+    }
+    return ResizeImage(
+      provider,
+      width: max,
+      height: max,
+      policy: ResizeImagePolicy.fit,
+    );
+  }
+
   Widget _error() =>
       widget.errorWidget ??
       Padding(
@@ -80,11 +102,9 @@ class _MediaImageState extends State<MediaImage> {
   Widget build(BuildContext context) {
     if (!_hasUrl) return _error();
     if (!_useNativeFetch) {
-      return Image.network(
-        widget.url,
+      return Image(
+        image: _bounded(NetworkImage(widget.url)),
         fit: widget.fit,
-        cacheWidth: widget.cacheWidth,
-        cacheHeight: widget.cacheHeight,
         loadingBuilder: (_, child, progress) => progress == null
             ? child
             : const Center(child: CircularProgressIndicator()),
@@ -101,11 +121,9 @@ class _MediaImageState extends State<MediaImage> {
           }
           return _error();
         }
-        return Image.memory(
-          snapshot.data!,
+        return Image(
+          image: _bounded(MemoryImage(snapshot.data!)),
           fit: widget.fit,
-          cacheWidth: widget.cacheWidth,
-          cacheHeight: widget.cacheHeight,
           errorBuilder: (_, _, _) => _error(),
         );
       },

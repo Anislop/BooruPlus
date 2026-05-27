@@ -36,18 +36,20 @@ class MediaViewer extends StatefulWidget {
 class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   VideoPlayerController? _video;
   ChewieController? _player;
-  final _transform = TransformationController();
+  late final PageController _pages;
   String? _videoError;
   bool _downloading = false;
   bool _details = false;
   bool _muted = false;
   late int _index;
+  late int _quality;
   Offset? _pointerDown;
+  int _pointers = 0;
+  bool _multiTouch = false;
+  bool _zoomed = false;
   int _videoGeneration = 0;
+  int _streamQuality = 0;
   bool _revealed = false;
-  int _transitionToken = 0;
-  int _transitionDirection = 1;
-  static const _videoControlsHeight = 160.0;
   final _downloads = DownloadService();
   final _screenAwake = ScreenAwakeService();
   AppLifecycleState _lifecycle =
@@ -59,62 +61,89 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     _index = _itemCount == 0
         ? 0
         : widget.initialIndex.clamp(0, _itemCount - 1).toInt();
+    _quality = widget.state.settings.videoQuality;
+    _pages = PageController(initialPage: _index);
     WidgetsBinding.instance.addObserver(this);
     if (_lifecycle == AppLifecycleState.resumed) {
       _screenAwake.setEnabled(true);
     }
     widget.state.recordBrowsedTags(_post.tags);
-    if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
+    _ensureVideo();
   }
 
   int get _itemCount => widget.savedPosts.isNotEmpty
       ? widget.savedPosts.length
       : widget.posts.length;
 
-  Board get _currentBoard => widget.savedPosts.isNotEmpty
-      ? widget.savedPosts[_index].board
+  int get _pageCount => _itemCount == 0 ? 1 : _itemCount;
+
+  Board _boardAt(int index) => widget.savedPosts.isNotEmpty
+      ? widget.savedPosts[index].board
       : widget.board;
 
-  MediaPost get _post => widget.savedPosts.isNotEmpty
-      ? widget.state.displayReady(widget.savedPosts[_index]).post
+  MediaPost _postAt(int index) => widget.savedPosts.isNotEmpty
+      ? widget.state.displayReady(widget.savedPosts[index]).post
       : widget.posts.isEmpty
       ? widget.post
-      : widget.posts[_index];
+      : widget.posts[index];
 
+  Board get _currentBoard => _boardAt(_index);
+
+  MediaPost get _post => _postAt(_index);
+
+  // Paging pauses while zoomed (so the image pans) and while more than one
+  // finger is down (so a pinch is not stolen by the page drag).
+  bool get _pagingLocked =>
+      _zoomed ||
+      (_multiTouch && _pointers > 0) ||
+      !widget.state.settings.gesturesEnabled;
+
+  void _updatePointers(int delta) {
+    final locked = _pagingLocked;
+    _pointers = (_pointers + delta).clamp(0, 10).toInt();
+    if (_pointers > 1) _multiTouch = true;
+    if (locked != _pagingLocked) setState(() {});
+  }
+
+  // Horizontal swipes belong to the PageView; this only tracks vertical
+  // swipes, which open details (up) or close details/the viewer (down).
   void _handlePointerDown(PointerDownEvent event) {
-    if (!widget.state.settings.gesturesEnabled) {
-      _pointerDown = null;
-      return;
-    }
-    final inVideoControls =
-        _post.isVideo &&
-        event.position.dy >=
-            MediaQuery.sizeOf(context).height - _videoControlsHeight;
-    _pointerDown = inVideoControls ? null : event.position;
+    if (_pointers == 0) _multiTouch = false;
+    _updatePointers(1);
+    _pointerDown =
+        widget.state.settings.gesturesEnabled && !_multiTouch
+        ? event.position
+        : null;
   }
 
   void _handlePointerUp(PointerUpEvent event) {
     final start = _pointerDown;
+    final multiTouch = _multiTouch;
     _pointerDown = null;
-    if (start == null || !widget.state.settings.gesturesEnabled) return;
+    _updatePointers(-1);
+    if (start == null || multiTouch || _zoomed) return;
+    if (!widget.state.settings.gesturesEnabled) return;
     final delta = event.position - start;
-    if (delta.distance < 90) return;
-    if (!(_post.isVideo || _transform.value.getMaxScaleOnAxis() <= 1)) return;
-    if (delta.dx.abs() > delta.dy.abs()) {
-      if (delta.dx < -90) _move(-1);
-      if (delta.dx > 90) _move(1);
-    } else if (delta.dy > 90) {
+    if (delta.dy.abs() < 90 || delta.dy.abs() <= delta.dx.abs()) return;
+    if (delta.dy > 0) {
       if (_details) {
         setState(() => _details = false);
       } else {
         Navigator.maybePop(context);
       }
-    } else if (delta.dy < -90) {
+    } else {
       setState(() => _details = true);
     }
   }
 
-  void _handlePointerCancel(PointerCancelEvent _) => _pointerDown = null;
+  void _handlePointerCancel(PointerCancelEvent _) {
+    _pointerDown = null;
+    _updatePointers(-1);
+  }
+
+  void _setZoomed(bool zoomed) {
+    if (zoomed != _zoomed) setState(() => _zoomed = zoomed);
+  }
 
   void _disposeVideo() {
     _videoGeneration++;
@@ -126,27 +155,54 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     video?.dispose();
   }
 
-  void _move(int amount) {
-    if (_itemCount == 0) return;
-    final next = _index + amount;
-    if (next < 0 || next >= _itemCount) return;
+  void _handlePageChanged(int index) {
+    if (index == _index) return;
     _disposeVideo();
     setState(() {
-      _index = next;
+      _index = index;
       _revealed = false;
-      _transitionDirection = -amount;
-      _transitionToken++;
       _videoError = null;
       _details = false;
-      _transform.value = Matrix4.identity();
+      _zoomed = false;
     });
     widget.state.recordBrowsedTags(_post.tags);
-    if (_post.isVideo && !_shouldBlur(_post)) _initializeVideo();
   }
 
-  Future<void> _initializeVideo() async {
+  // Video starts once paging settles so fast swipes past videos do not
+  // open a network stream for every page crossed.
+  bool _handleScrollEnd(ScrollEndNotification notification) {
+    if (notification.depth == 0) _ensureVideo();
+    return false;
+  }
+
+  void _ensureVideo() {
+    final post = _post;
+    if (!post.isVideo || _video != null || _videoError != null) return;
+    if (_shouldBlur(post) && !_revealed) return;
+    _initializeVideo();
+  }
+
+  Future<void> _selectQuality(int quality) async {
+    _quality = quality;
+    widget.state.setVideoQuality(quality);
+    final target = _post.videoVariantFor(quality)?.quality ?? 0;
+    if (target == _streamQuality && _video != null) return;
+    final position = _video?.value.position ?? Duration.zero;
+    final playing = _video?.value.isPlaying ?? true;
+    _disposeVideo();
+    setState(() => _videoError = null);
+    await _initializeVideo(startAt: position, autoPlay: playing);
+  }
+
+  Future<void> _initializeVideo({
+    Duration startAt = Duration.zero,
+    bool autoPlay = true,
+    VideoVariant? fallback,
+  }) async {
     final generation = ++_videoGeneration;
-    final url = _mediaUrl(_post);
+    final post = _post;
+    final variant = fallback ?? post.videoVariantFor(_quality);
+    final url = variant?.url ?? _mediaUrl(post);
     if (url.isEmpty) {
       if (mounted) {
         setState(() => _videoError = 'This video has no playable URL.');
@@ -163,14 +219,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           : const {},
     );
     _video = video;
+    _streamQuality = variant?.quality ?? 0;
+    bool stale() =>
+        !mounted || generation != _videoGeneration || !identical(_video, video);
     try {
       await video.initialize();
-      if (!mounted ||
-          generation != _videoGeneration ||
-          !identical(_video, video)) {
+      if (stale()) {
         await video.dispose();
         return;
       }
+      if (startAt > Duration.zero) await video.seekTo(startAt);
       final player = ChewieController(
         videoPlayerController: video,
         autoPlay: false,
@@ -186,34 +244,42 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           child: Text('This video could not be played. Try reopening it.'),
         ),
       );
-      if (!mounted ||
-          generation != _videoGeneration ||
-          !identical(_video, video)) {
+      if (stale()) {
         player.dispose();
         await video.dispose();
         return;
       }
       _player = player;
       await video.setVolume(_muted ? 0 : 1);
-      if (!mounted ||
-          generation != _videoGeneration ||
-          !identical(_video, video)) {
+      if (stale()) {
         player.dispose();
         await video.dispose();
         return;
       }
-      if (_lifecycle == AppLifecycleState.resumed) await video.play();
+      if (autoPlay && _lifecycle == AppLifecycleState.resumed) {
+        await video.play();
+      }
       if (mounted && generation == _videoGeneration) setState(() {});
     } catch (_) {
-      if (generation == _videoGeneration && mounted) {
-        setState(
-          () => _videoError = 'Unable to stream this video. The server or this device may not support its format.',
+      if (identical(_video, video)) _video = null;
+      // dispose() never completes for a player whose creation failed, so
+      // it must not gate the fallback below.
+      video.dispose().ignore();
+      if (!mounted || generation != _videoGeneration) return;
+      // Some originals use codecs the device cannot decode; a provider
+      // rendition (usually H.264 MP4) is the best remaining option.
+      if (variant == null && post.videoVariants.isNotEmpty) {
+        await _initializeVideo(
+          startAt: startAt,
+          autoPlay: autoPlay,
+          fallback: post.videoVariants.first,
         );
+        return;
       }
-      if (generation == _videoGeneration && identical(_video, video)) {
-        _video = null;
-      }
-      await video.dispose();
+      setState(
+        () => _videoError =
+            'Unable to stream this video. The server or this device may not support its format.',
+      );
     }
   }
 
@@ -231,7 +297,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     _videoGeneration++;
     _player?.dispose();
     _video?.dispose();
-    _transform.dispose();
+    _pages.dispose();
     super.dispose();
   }
 
@@ -349,72 +415,23 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 onPointerDown: _handlePointerDown,
                 onPointerUp: _handlePointerUp,
                 onPointerCancel: _handlePointerCancel,
-                child: post.isVideo
-                    ? _shouldBlur(post) && !_revealed
-                          ? _blurredVideo(post)
-                          : _videoError != null
-                          ? Center(
-                              child: Padding(
-                                padding: const EdgeInsets.all(24),
-                                child: Text(
-                                  _videoError!,
-                                  textAlign: TextAlign.center,
-                                ),
-                              ),
-                            )
-                          : _player == null
-                          ? const Center(child: CircularProgressIndicator())
-                          : Container(
-                              color: Colors.black,
-                              child: Chewie(controller: _player!),
-                            )
-                    : GestureDetector(
-                        onDoubleTap: () => _transform.value =
-                            _transform.value.getMaxScaleOnAxis() > 1
-                            ? Matrix4.identity()
-                            : Matrix4.diagonal3Values(2.5, 2.5, 1),
-                        child: InteractiveViewer(
-                          transformationController: _transform,
-                          minScale: .5,
-                          maxScale: 8,
-                          child: Center(
-                            child: _mediaUrl(post).isEmpty
-                                ? const Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Text(
-                                      'The original image is unavailable. It may have been removed or require website access.',
-                                      textAlign: TextAlign.center,
-                                    ),
-                                  )
-                                : AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 260),
-                                    transitionBuilder: (child, animation) {
-                                      final outgoing =
-                                          animation.status ==
-                                              AnimationStatus.reverse ||
-                                          animation.status ==
-                                              AnimationStatus.dismissed;
-                                      final direction = outgoing
-                                          ? -_transitionDirection
-                                          : _transitionDirection;
-                                      return SlideTransition(
-                                        position: Tween<Offset>(
-                                          begin: Offset(.22 * direction, 0),
-                                          end: Offset.zero,
-                                        ).animate(animation),
-                                        child: child,
-                                      );
-                                    },
-                                    child: KeyedSubtree(
-                                      key: ValueKey(
-                                        '${post.id}-$_transitionToken',
-                                      ),
-                                      child: _viewerImage(post),
-                                    ),
-                                  ),
+                child: NotificationListener<ScrollEndNotification>(
+                  onNotification: _handleScrollEnd,
+                  child: PageView.builder(
+                    controller: _pages,
+                    // Neighbouring posts are built ahead of time so their
+                    // media is already loading when a swipe reveals them.
+                    allowImplicitScrolling: true,
+                    physics: _pagingLocked
+                        ? const NeverScrollableScrollPhysics()
+                        : const _ViewerPagePhysics(
+                            parent: ClampingScrollPhysics(),
                           ),
-                        ),
-                      ),
+                    itemCount: _pageCount,
+                    onPageChanged: _handlePageChanged,
+                    itemBuilder: _buildPage,
+                  ),
+                ),
               ),
             ),
             if (post.isVideo && _player != null)
@@ -483,6 +500,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                // Outside the player controls so a lower quality can be
+                // chosen even when the original fails to load.
+                if (post.isVideo && post.videoVariants.isNotEmpty)
+                  _qualityMenu(post),
                 IconButton(
                   tooltip: 'Download original media',
                   onPressed: _downloading ? null : _download,
@@ -715,14 +736,41 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     Navigator.pop(context, tag);
   }
 
-  Widget _viewerImage(MediaPost post) {
+  Widget _buildPage(BuildContext context, int index) {
+    final post = _postAt(index);
+    final board = _boardAt(index);
+    final active = index == _index;
+    if (post.isVideo) return _videoPage(post, board, active: active);
+    if (_mediaUrl(post).isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'The original image is unavailable. It may have been removed or require website access.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return _ZoomableMedia(
+      active: active,
+      onZoomChanged: _setZoomed,
+      child: _viewerImage(post, board, active: active),
+    );
+  }
+
+  Widget _viewerImage(MediaPost post, Board board, {required bool active}) {
     final image = MediaImage(
       url: _mediaUrl(post),
-      board: _currentBoard,
+      board: board,
       fit: BoxFit.contain,
+      // Bounded decoding keeps huge originals under common GPU texture
+      // limits and out of multi-hundred-megabyte bitmaps, while leaving
+      // enough detail for zooming.
+      maxDimension: 4096,
       errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
     );
-    if (!_shouldBlur(post) || _revealed) return image;
+    if (!_shouldBlur(post) || (active && _revealed)) return image;
     return Stack(
       alignment: Alignment.center,
       children: [
@@ -730,16 +778,55 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
           child: image,
         ),
-        FilledButton.icon(
-          onPressed: () => setState(() => _revealed = true),
-          icon: const Icon(Icons.visibility),
-          label: const Text('Reveal media'),
-        ),
+        if (active)
+          FilledButton.icon(
+            onPressed: () => setState(() => _revealed = true),
+            icon: const Icon(Icons.visibility),
+            label: const Text('Reveal media'),
+          ),
       ],
     );
   }
 
-  Widget _blurredVideo(MediaPost post) {
+  Widget _videoPage(MediaPost post, Board board, {required bool active}) {
+    if (_shouldBlur(post) && !(active && _revealed)) {
+      return _blurredVideo(post, board, active: active);
+    }
+    if (!active) return _videoPoster(post, board);
+    final error = _videoError;
+    if (error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(error, textAlign: TextAlign.center),
+        ),
+      );
+    }
+    final player = _player;
+    if (player == null) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          _videoPoster(post, board),
+          const Center(child: CircularProgressIndicator()),
+        ],
+      );
+    }
+    return Container(color: Colors.black, child: Chewie(controller: player));
+  }
+
+  Widget _videoPoster(MediaPost post, Board board) {
+    final preview = post.previewUrl;
+    if (preview.isEmpty || preview == post.url) return const SizedBox.expand();
+    return MediaImage(
+      url: preview,
+      board: board,
+      fit: BoxFit.contain,
+      errorWidget: const SizedBox.shrink(),
+    );
+  }
+
+  Widget _blurredVideo(MediaPost post, Board board, {required bool active}) {
     final preview = post.previewUrl.isNotEmpty
         ? post.previewUrl
         : _mediaUrl(post);
@@ -749,22 +836,50 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         if (preview.isNotEmpty)
           ImageFiltered(
             imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-            child: MediaImage(
-              url: preview,
-              board: _currentBoard,
-              fit: BoxFit.contain,
-            ),
+            child: MediaImage(url: preview, board: board, fit: BoxFit.contain),
           )
         else
           const Icon(Icons.visibility_off_outlined, size: 42),
-        FilledButton.icon(
-          onPressed: () {
-            setState(() => _revealed = true);
-            _initializeVideo();
-          },
-          icon: const Icon(Icons.visibility),
-          label: const Text('Reveal media'),
+        if (active)
+          FilledButton.icon(
+            onPressed: () {
+              setState(() => _revealed = true);
+              _ensureVideo();
+            },
+            icon: const Icon(Icons.visibility),
+            label: const Text('Reveal media'),
+          ),
+      ],
+    );
+  }
+
+  Widget _qualityMenu(MediaPost post) {
+    // Renditions at or above the original's tier add nothing selectable.
+    final original = post.videoQuality;
+    final tiers = <int>{};
+    final options = <VideoVariant>[];
+    for (final variant in post.videoVariants) {
+      if (original > 0 && variant.quality >= original) continue;
+      if (tiers.add(variant.quality)) options.add(variant);
+    }
+    return PopupMenuButton<int>(
+      tooltip: 'Video quality',
+      onSelected: _selectQuality,
+      icon: const Icon(Icons.high_quality_outlined),
+      itemBuilder: (_) => [
+        CheckedPopupMenuItem(
+          value: 0,
+          checked: _streamQuality == 0,
+          child: Text(
+            original > 0 ? 'Original · ${original}p' : 'Original',
+          ),
         ),
+        for (final variant in options)
+          CheckedPopupMenuItem(
+            value: variant.quality,
+            checked: _streamQuality == variant.quality,
+            child: Text(variant.label),
+          ),
       ],
     );
   }
@@ -843,4 +958,89 @@ Map<TagCategory, List<TagInfo>> _groupedTags(MediaPost post) {
     grouped.putIfAbsent(tag.category, () => []).add(tag);
   }
   return grouped;
+}
+
+/// Pinch/double-tap zoom for one viewer page. Reports zoom changes while
+/// [active] so the pager can lock, and resets when the page is left.
+class _ZoomableMedia extends StatefulWidget {
+  const _ZoomableMedia({
+    required this.active,
+    required this.onZoomChanged,
+    required this.child,
+  });
+  final bool active;
+  final ValueChanged<bool> onZoomChanged;
+  final Widget child;
+
+  @override
+  State<_ZoomableMedia> createState() => _ZoomableMediaState();
+}
+
+class _ZoomableMediaState extends State<_ZoomableMedia> {
+  final _transform = TransformationController();
+  Offset _doubleTapAt = Offset.zero;
+  bool _zoomed = false;
+
+  @override
+  void didUpdateWidget(covariant _ZoomableMedia oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Neighbouring pages stay alive; return them to fit once left.
+    if (oldWidget.active && !widget.active) {
+      _transform.value = Matrix4.identity();
+      _zoomed = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _transform.dispose();
+    super.dispose();
+  }
+
+  void _report() {
+    final zoomed = _transform.value.getMaxScaleOnAxis() > 1.01;
+    if (zoomed == _zoomed) return;
+    _zoomed = zoomed;
+    if (widget.active) widget.onZoomChanged(zoomed);
+  }
+
+  void _toggleZoom() {
+    const scale = 2.5;
+    // Zoom around the tapped point rather than the top-left corner.
+    _transform.value = _zoomed
+        ? Matrix4.identity()
+        : (Matrix4.diagonal3Values(scale, scale, 1)..setTranslationRaw(
+            -_doubleTapAt.dx * (scale - 1),
+            -_doubleTapAt.dy * (scale - 1),
+            0,
+          ));
+    _report();
+  }
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onDoubleTapDown: (details) => _doubleTapAt = details.localPosition,
+    onDoubleTap: _toggleZoom,
+    child: InteractiveViewer(
+      transformationController: _transform,
+      minScale: .5,
+      maxScale: 8,
+      onInteractionEnd: (_) => _report(),
+      child: Center(child: widget.child),
+    ),
+  );
+}
+
+/// Page physics with a stiffer, critically damped spring so a released
+/// swipe settles on the next post quickly instead of drifting.
+class _ViewerPagePhysics extends ScrollPhysics {
+  const _ViewerPagePhysics({super.parent});
+
+  @override
+  _ViewerPagePhysics applyTo(ScrollPhysics? ancestor) =>
+      _ViewerPagePhysics(parent: buildParent(ancestor));
+
+  @override
+  SpringDescription get spring =>
+      SpringDescription.withDampingRatio(mass: .5, stiffness: 180, ratio: 1);
 }

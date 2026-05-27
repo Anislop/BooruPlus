@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
 import '../core/models.dart';
@@ -258,11 +259,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _tile(
     BuildContext context,
     AppState state,
+    List<MediaPost> posts,
     Board board,
     int index,
     bool hidePostTags,
   ) {
-    final post = state.posts[index];
+    final post = posts[index];
     return MediaTile(
       key: ValueKey('${board.name}:${post.id}:${post.url}'),
       post: post,
@@ -275,7 +277,7 @@ class _HomeScreenState extends State<HomeScreen> {
             builder: (_) => MediaViewer(
               post: post,
               board: board,
-              posts: state.posts,
+              posts: posts,
               initialIndex: index,
               state: state,
             ),
@@ -301,6 +303,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _gallery(
     BuildContext context,
     AppState state,
+    List<MediaPost> posts,
     Board board,
     double tileHeight,
     bool hierarchical,
@@ -315,8 +318,9 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisSpacing: 8,
         ),
         delegate: SliverChildBuilderDelegate(
-          (context, index) => _tile(context, state, board, index, hidePostTags),
-          childCount: state.posts.length,
+          (context, index) =>
+              _tile(context, state, posts, board, index, hidePostTags),
+          childCount: posts.length,
         ),
       );
     }
@@ -324,10 +328,10 @@ class _HomeScreenState extends State<HomeScreen> {
       delegate: SliverChildBuilderDelegate((context, rowIndex) {
         final start = rowIndex * state.settings.columns;
         final end = (start + state.settings.columns)
-            .clamp(0, state.posts.length)
+            .clamp(0, posts.length)
             .toInt();
-        final posts = state.posts.sublist(start, end);
-        final aspects = posts.map((post) {
+        final row = posts.sublist(start, end);
+        final aspects = row.map((post) {
           final width = post.width > 0 ? post.width : 1;
           final height = post.height > 0 ? post.height : 1;
           return (width / height).clamp(.5, 3.0).toDouble();
@@ -340,7 +344,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                for (var i = 0; i < posts.length; i++)
+                for (var i = 0; i < row.length; i++)
                   Expanded(
                     flex: (aspects[i] / total * 1000)
                         .round()
@@ -348,11 +352,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         .toInt(),
                     child: Padding(
                       padding: EdgeInsets.only(
-                        right: i + 1 == posts.length ? 0 : 8,
+                        right: i + 1 == row.length ? 0 : 8,
                       ),
                       child: _tile(
                         context,
                         state,
+                        posts,
                         board,
                         start + i,
                         hidePostTags,
@@ -363,7 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         );
-      }, childCount: (state.posts.length / state.settings.columns).ceil()),
+      }, childCount: (posts.length / state.settings.columns).ceil()),
     );
   }
 
@@ -374,6 +379,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final site = appearanceFor(board);
     final hierarchicalGrid = state.settings.hierarchicalGrid;
     final hidePostTags = state.settings.hidePostTags;
+    final posts = state.posts;
     return PopScope<void>(
       canPop: _searchHistory.isEmpty || _drawerOpen,
       onPopInvokedWithResult: (didPop, _) {
@@ -605,7 +611,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const Spacer(),
                     Text(
-                      '${state.posts.length} posts',
+                      '${posts.length} posts',
                       style: const TextStyle(
                         fontSize: 12,
                         color: Colors.white38,
@@ -633,6 +639,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             sliver: _gallery(
                               context,
                               state,
+                              posts,
                               board,
                               tileHeight,
                               hierarchicalGrid,
@@ -673,7 +680,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                           ),
                                         ],
                                       )
-                                    : state.posts.isEmpty
+                                    : posts.isEmpty
                                     ? Column(
                                         children: [
                                           const Icon(
@@ -964,10 +971,7 @@ String _displayUrl(MediaPost post) {
   return post.url;
 }
 
-String _quickActionUrl(MediaPost post) {
-  if (post.isVideo) {
-    return post.previewUrl.isNotEmpty ? post.previewUrl : _displayUrl(post);
-  }
+String _originalUrl(MediaPost post) {
   final dynamic value = post;
   try {
     final authenticated = value.authenticatedUrl;
@@ -985,6 +989,22 @@ String _quickActionUrl(MediaPost post) {
     }
   } catch (_) {}
   return post.url;
+}
+
+String _quickActionUrl(MediaPost post) {
+  if (post.isVideo) {
+    return post.previewUrl.isNotEmpty ? post.previewUrl : _displayUrl(post);
+  }
+  return _originalUrl(post);
+}
+
+/// The hold preview is small, so a provider rendition of at most 720p (or
+/// the user's lower preference) starts sooner than the original file.
+String _peekVideoUrl(MediaPost post, int preferredHeight) {
+  final limit = preferredHeight > 0 && preferredHeight < 720
+      ? preferredHeight
+      : 720;
+  return post.videoVariantFor(limit)?.url ?? _originalUrl(post);
 }
 
 bool _shouldBlur(AppState state, MediaPost post) {
@@ -1098,6 +1118,7 @@ Future<void> showQuickPostActions(
   final result = Completer<String?>();
   late final OverlayEntry entry;
   final dialogKey = GlobalKey<_QuickActionDialogState>();
+  final blur = _shouldBlur(state, post);
   void complete(String? action) {
     if (!result.isCompleted) result.complete(action);
   }
@@ -1130,7 +1151,10 @@ Future<void> showQuickPostActions(
           post: post,
           board: board,
           isFavorite: isFavorite ?? state.isFavorite(post, board: board),
-          blur: _shouldBlur(state, post),
+          blur: blur,
+          videoUrl: post.isVideo && !blur
+              ? _peekVideoUrl(post, state.settings.videoQuality)
+              : null,
           controller: controller,
           origin: origin,
           onResult: complete,
@@ -1141,7 +1165,8 @@ Future<void> showQuickPostActions(
   Overlay.of(context, rootOverlay: true).insert(entry);
   final action = await result.future;
   if (entry.mounted) entry.remove();
-  if (!context.mounted) return;
+  // Actions only touch app state, so they still apply if the tile that
+  // opened the preview was rebuilt or scrolled away meanwhile.
   if (action == 'favorite') {
     await state.toggleFavorite(post, board: board);
   } else if (action == 'hide') {
@@ -1157,6 +1182,7 @@ class _QuickActionDialog extends StatefulWidget {
     required this.isFavorite,
     required this.onResult,
     required this.blur,
+    this.videoUrl,
     this.controller,
     this.origin,
   });
@@ -1165,6 +1191,10 @@ class _QuickActionDialog extends StatefulWidget {
   final bool isFavorite;
   final ValueChanged<String?> onResult;
   final bool blur;
+
+  /// Stream to autoplay (muted, looping) for video posts; null shows only
+  /// the poster.
+  final String? videoUrl;
   final QuickActionOverlayController? controller;
   final Rect? origin;
 
@@ -1174,10 +1204,14 @@ class _QuickActionDialog extends StatefulWidget {
 
 class _QuickActionDialogState extends State<_QuickActionDialog>
     with SingleTickerProviderStateMixin {
+  static const _inset = 12.0;
+  static const _gap = 10.0;
   final _favoriteKey = GlobalKey();
   final _hideKey = GlobalKey();
   late final AnimationController _animationController;
   late final CurvedAnimation _positionAnimation;
+  VideoPlayerController? _video;
+  bool _videoReady = false;
   String? _armed;
   bool _revealed = false;
   bool _closing = false;
@@ -1200,14 +1234,45 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       onRelease: _releaseArmed,
       onCancel: _cancel,
     );
+    final videoUrl = widget.videoUrl;
+    if (videoUrl != null && videoUrl.isNotEmpty) _startVideo(videoUrl);
   }
 
   @override
   void dispose() {
     widget.controller?._detach();
+    // dispose() never completes for a player whose creation failed.
+    _video?.dispose().ignore();
+    _video = null;
     _positionAnimation.dispose();
     _animationController.dispose();
     super.dispose();
+  }
+
+  Future<void> _startVideo(String url) async {
+    final video = VideoPlayerController.networkUrl(
+      Uri.parse(url),
+      httpHeaders: widget.board == Board.gelbooru
+          ? const {
+              'Referer': 'https://gelbooru.com/',
+              'User-Agent': 'BooruPlus/1.0',
+            }
+          : const {},
+    );
+    _video = video;
+    bool stale() => !mounted || _closing || !identical(_video, video);
+    try {
+      await video.initialize();
+      if (stale()) return;
+      await video.setLooping(true);
+      // A hold is a quick peek; stay silent until the post is opened.
+      await video.setVolume(0);
+      if (stale()) return;
+      await video.play();
+      if (!stale()) setState(() => _videoReady = true);
+    } catch (_) {
+      // The poster remains when the stream cannot start.
+    }
   }
 
   void _updateArmed(Offset position) {
@@ -1248,19 +1313,117 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
     widget.onResult(action);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final mediaUrl = _quickActionUrl(widget.post);
-    final media = mediaUrl.isEmpty
+  Widget _media(double width) {
+    final post = widget.post;
+    final mediaUrl = _quickActionUrl(post);
+    final cacheWidth = (width * MediaQuery.devicePixelRatioOf(context)).round();
+    const broken = Center(child: Icon(Icons.broken_image_outlined));
+    // The grid already decoded the thumbnail at this size, so it shows
+    // instantly while the original image loads above it.
+    final placeholder =
+        !post.isVideo &&
+            widget.board != Board.gelbooru &&
+            post.previewUrl.isNotEmpty &&
+            post.previewUrl != mediaUrl
+        ? Image.network(
+            post.previewUrl,
+            fit: BoxFit.contain,
+            cacheWidth: 480,
+            errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          )
+        : null;
+    final Widget media = mediaUrl.isEmpty
         ? const Center(child: Icon(Icons.image_not_supported_outlined))
         : widget.board == Board.gelbooru
-        ? MediaImage(url: mediaUrl, board: widget.board, fit: BoxFit.contain)
+        ? MediaImage(
+            url: mediaUrl,
+            board: widget.board,
+            fit: BoxFit.contain,
+            cacheWidth: cacheWidth,
+          )
         : Image.network(
             mediaUrl,
             fit: BoxFit.contain,
+            cacheWidth: post.isVideo ? 480 : cacheWidth,
             errorBuilder: (_, _, _) =>
-                const Center(child: Icon(Icons.broken_image_outlined)),
+                placeholder == null ? broken : const SizedBox.shrink(),
           );
+    final video = _video;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ?placeholder,
+        media,
+        if (_videoReady && video != null)
+          Center(
+            child: AspectRatio(
+              aspectRatio: video.value.aspectRatio,
+              child: VideoPlayer(video),
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final post = widget.post;
+    final size = MediaQuery.sizeOf(context);
+    final safe = MediaQuery.paddingOf(context);
+    final textScaler = MediaQuery.textScalerOf(context);
+    final captionStyle =
+        (Theme.of(context).textTheme.bodyMedium ?? const TextStyle()).copyWith(
+          color: Colors.white70,
+        );
+    final caption = post.description.isEmpty
+        ? 'Post #${post.id}'
+        : post.description;
+
+    // Size the card from the post's own aspect ratio so the preview hugs
+    // the media instead of letterboxing it inside a fixed box.
+    final maxCardWidth = (size.width - 32).clamp(240.0, 520.0).toDouble();
+    final maxCardHeight = ((size.height - safe.vertical) * .82)
+        .clamp(320.0, 760.0)
+        .toDouble();
+    final maxContentWidth = maxCardWidth - _inset * 2;
+    final minContentWidth = maxContentWidth < 236 ? maxContentWidth : 236.0;
+    // Measured at the narrowest width so the estimate never falls short.
+    final captionPainter = TextPainter(
+      text: TextSpan(text: caption, style: captionStyle),
+      maxLines: 2,
+      ellipsis: '…',
+      textDirection: Directionality.of(context),
+      textScaler: textScaler,
+    )..layout(maxWidth: minContentWidth);
+    final captionHeight = captionPainter.height;
+    captionPainter.dispose();
+    final buttonHeight = 30 + textScaler.scale(20);
+    final chrome = _inset * 2 + _gap * 2 + captionHeight + buttonHeight;
+    final aspect = post.width > 0 && post.height > 0
+        ? (post.width / post.height).clamp(1 / 3, 3.0).toDouble()
+        : 1.0;
+    final maxMediaHeight = (maxCardHeight - chrome) < 120
+        ? 120.0
+        : maxCardHeight - chrome;
+    var mediaWidth = maxContentWidth;
+    var mediaHeight = mediaWidth / aspect;
+    if (mediaHeight > maxMediaHeight) {
+      mediaHeight = maxMediaHeight;
+      mediaWidth = mediaHeight * aspect;
+    }
+    final contentWidth = mediaWidth < minContentWidth
+        ? minContentWidth
+        : mediaWidth;
+    final target = Rect.fromCenter(
+      center: Offset(
+        size.width / 2,
+        safe.top + (size.height - safe.vertical) / 2,
+      ),
+      width: contentWidth + _inset * 2,
+      height: mediaHeight + chrome,
+    );
+
+    final media = _media(mediaWidth);
     final displayedMedia = widget.blur && !_revealed
         ? ImageFiltered(
             imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
@@ -1281,17 +1444,6 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
             AnimatedBuilder(
               animation: _animationController,
               builder: (context, child) {
-                final size = MediaQuery.sizeOf(context);
-                final width = (size.width - 32).clamp(240.0, 520.0).toDouble();
-                final height = (size.height * .72)
-                    .clamp(320.0, 660.0)
-                    .toDouble();
-                final target = Rect.fromLTWH(
-                  (size.width - width) / 2,
-                  (size.height - height) / 2,
-                  width,
-                  height,
-                );
                 final rect = RectTween(
                   begin: widget.origin ?? target,
                   end: target,
@@ -1311,65 +1463,85 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
               child: Material(
                 color: Colors.transparent,
                 child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(14),
-                          child: Container(
-                            color: Colors.black45,
-                            alignment: Alignment.center,
-                            child: Stack(
-                              alignment: Alignment.center,
-                              children: [
-                                Positioned.fill(child: displayedMedia),
-                                if (widget.blur && !_revealed)
-                                  FilledButton.icon(
-                                    onPressed: () =>
-                                        setState(() => _revealed = true),
-                                    icon: const Icon(Icons.visibility),
-                                    label: const Text('Reveal media'),
+                  padding: const EdgeInsets.all(_inset),
+                  child: Center(
+                    // Absorbs any shortfall in the height estimate (e.g.
+                    // unusual fonts) by scaling instead of overflowing.
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: SizedBox(
+                        width: contentWidth,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: mediaWidth,
+                              height: mediaHeight,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(14),
+                                child: ColoredBox(
+                                  color: Colors.black45,
+                                  child: Stack(
+                                    alignment: Alignment.center,
+                                    children: [
+                                      Positioned.fill(child: displayedMedia),
+                                      if (_videoReady)
+                                        const Positioned(
+                                          right: 8,
+                                          bottom: 8,
+                                          child: Icon(
+                                            Icons.volume_off_rounded,
+                                            size: 18,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      if (widget.blur && !_revealed)
+                                        FilledButton.icon(
+                                          onPressed: () =>
+                                              setState(() => _revealed = true),
+                                          icon: const Icon(Icons.visibility),
+                                          label: const Text('Reveal media'),
+                                        ),
+                                    ],
                                   ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: _gap),
+                            Text(
+                              caption,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: captionStyle,
+                            ),
+                            const SizedBox(height: _gap),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _actionButton(
+                                    key: _favoriteKey,
+                                    action: 'favorite',
+                                    icon: Icons.favorite_rounded,
+                                    label: widget.isFavorite
+                                        ? 'Unfavorite'
+                                        : 'Favorite',
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _actionButton(
+                                    key: _hideKey,
+                                    action: 'hide',
+                                    icon: Icons.visibility_off_rounded,
+                                    label: 'Hide',
+                                  ),
+                                ),
                               ],
                             ),
-                          ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      Text(
-                        widget.post.description.isEmpty
-                            ? 'Post #${widget.post.id}'
-                            : widget.post.description,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white70),
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _actionButton(
-                              key: _favoriteKey,
-                              action: 'favorite',
-                              icon: Icons.favorite_rounded,
-                              label: widget.isFavorite
-                                  ? 'Unfavorite'
-                                  : 'Favorite',
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: _actionButton(
-                              key: _hideKey,
-                              action: 'hide',
-                              icon: Icons.visibility_off_rounded,
-                              label: 'Hide',
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),

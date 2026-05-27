@@ -24,6 +24,7 @@ import net.kodehawa.lib.imageboards.entities.Rating;
 import java.time.ZonedDateTime;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -36,6 +37,8 @@ public class FurryImage implements BoardImage {
     private int uploader_id;
     private List<String> sources;
     private Preview preview;
+    // Kept untyped: e621 has shipped more than one alternates layout.
+    private Map<String, Object> sample;
     @JsonProperty("created_at")
     private String created_at;
     private String description;
@@ -68,6 +71,7 @@ public class FurryImage implements BoardImage {
     public int getUploader_id() { return uploader_id; }
     public List<String> getSources() { return sources; }
     public String getPreview_url() { return preview == null ? null : preview.getUrl(); }
+    public Map<String, Object> getSample() { return sample; }
 
     static class Preview {
         private String url;

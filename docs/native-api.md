@@ -4,13 +4,15 @@ The Android implementation exposes a Flutter method channel named `booruplus/pla
 
 The bridge uses the exact Apache-2.0 licensed upstream `imageboard-api` 3.0.0 source, vendored as the local Gradle module `android/imageboard-api`. The upstream tag is `3.0.0` at commit `3ec69ae`; the published README advertises `io.github.kodehawa:imageboard-api:3.0.0`, but that coordinate is not present in Maven Central. The vendored module preserves the upstream `LICENSE` file and uses the upstream package names and implementation.
 
-The vendored model classes include a small project patch, documented in their source comments, to expose provider fields omitted by the upstream common interface: Rule34 id, preview URL, source, and owner; e621/e926 id, uploader id, sources, and preview URL. This keeps the upstream implementation intact while making the Flutter map metadata complete.
+The vendored model classes include a small project patch, documented in their source comments, to expose provider fields omitted by the upstream common interface: Rule34 id, preview URL, source, and owner; e621/e926 id, uploader id, sources, preview URL, and the raw `sample` object (for video alternates). This keeps the upstream implementation intact while making the Flutter map metadata complete.
 
 ## `fetch`
 
 Arguments are `board`, `tags` (`List<String>`), `limit`, `page`, `random`, and optional `apiKey` and `userId`. `page` is zero based. Limits up to 200 are supported; the bridge fetches successive provider pages in batches of at most 100 and combines them before applying random ordering. Supported board ids are `rule34`, `e621`, `konachan`, `yandere`, `danbooru`, `safebooru`, `gelbooru`, and `e926`.
 
-The result is a list of maps with `id`, `url`, `previewUrl`, `tags`, `rating`, `uploader`, `source`, `width`, `height`, `score`, and `description`. Rule34 and Gelbooru credentials are supplied only to the library call and are never logged.
+The result is a list of maps with `id`, `url`, `previewUrl`, `tags`, `rating`, `uploader`, `source`, `width`, `height`, `score`, `description`, and `videoVariants`. Rule34 and Gelbooru credentials are supplied only to the library call and are never logged.
+
+`videoVariants` lists alternate video streams as maps with `label`, `url`, `width`, `height`, and `quality`. `quality` is the resolution tier, such as 720 for "720p". e621 names tiers by the short side, so a portrait 720p sample can be 1440 pixels tall. Only e621/e926 supply alternates. They are read from `sample.alternates` in either the current `{original, variants, samples}` layout or the legacy `{"480p": {urls: [...]}}` layout, with MP4 preferred and the original file excluded. Other boards return an empty list. Danbooru ugoira posts, whose originals are ZIP frame archives, report their WebM sample as `url` so they play as video.
 
 ## `pickDownloadDirectory`
 

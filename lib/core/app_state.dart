@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -34,10 +35,16 @@ class AppState extends ChangeNotifier {
   final Map<Board, Credentials?> _credentialsByBoard = {};
   List<SavedPost> _favoritePosts = const [];
   List<SavedPost> _hiddenPosts = const [];
+  // Identity indexes keep favorite/hidden checks O(1) per tile and per
+  // incoming post instead of scanning every saved post.
+  Set<String> _favoriteIds = const {};
+  Set<String> _hiddenIds = const {};
 
   AppSettings get settings => _settings;
   Board? get board => _board;
-  List<MediaPost> get posts => List.unmodifiable(_posts);
+  // _posts is always replaced, never mutated in place, so a view is a
+  // stable snapshot without copying the whole feed on every access.
+  List<MediaPost> get posts => UnmodifiableListView(_posts);
   List<String> get tags => List.unmodifiable(_tags);
   bool get loading => _loading;
   String? get error => _error;
@@ -56,12 +63,10 @@ class AppState extends ChangeNotifier {
   List<String> get topBrowsedTags => _topTags(_settings.browsedTagCounts);
   List<SavedPost> get favoritePosts => List.unmodifiable(_favoritePosts);
   List<SavedPost> get hiddenPosts => List.unmodifiable(_hiddenPosts);
-  bool isFavorite(MediaPost post, {Board? board}) => _favoritePosts.any(
-    (saved) => saved.identity == _saved(post, board).identity,
-  );
-  bool isHidden(MediaPost post, {Board? board}) => _hiddenPosts.any(
-    (saved) => saved.identity == _saved(post, board).identity,
-  );
+  bool isFavorite(MediaPost post, {Board? board}) =>
+      _favoriteIds.contains(_identity(post, board));
+  bool isHidden(MediaPost post, {Board? board}) =>
+      _hiddenIds.contains(_identity(post, board));
 
   SavedPost displayReady(SavedPost post) =>
       post.authorized(_credentialsByBoard[post.board]);
@@ -78,25 +83,27 @@ class AppState extends ChangeNotifier {
 
   Future<void> favoritePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    if (_favoritePosts.any((value) => value.identity == saved.identity)) return;
-    _favoritePosts = [..._favoritePosts, saved];
+    if (_favoriteIds.contains(saved.identity)) return;
+    _setFavorites([..._favoritePosts, saved]);
     await _postStore.saveFavorites(_favoritePosts);
     notifyListeners();
   }
 
   Future<void> unfavoritePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    _favoritePosts = _favoritePosts
-        .where((value) => value.identity != saved.identity)
-        .toList(growable: false);
+    _setFavorites(
+      _favoritePosts
+          .where((value) => value.identity != saved.identity)
+          .toList(growable: false),
+    );
     await _postStore.saveFavorites(_favoritePosts);
     notifyListeners();
   }
 
   Future<void> hidePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    if (!_hiddenPosts.any((value) => value.identity == saved.identity)) {
-      _hiddenPosts = [..._hiddenPosts, saved];
+    if (!_hiddenIds.contains(saved.identity)) {
+      _setHidden([..._hiddenPosts, saved]);
       await _postStore.saveHidden(_hiddenPosts);
     }
     if (saved.board == _board) {
@@ -109,9 +116,11 @@ class AppState extends ChangeNotifier {
 
   Future<void> unhidePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    _hiddenPosts = _hiddenPosts
-        .where((value) => value.identity != saved.identity)
-        .toList(growable: false);
+    _setHidden(
+      _hiddenPosts
+          .where((value) => value.identity != saved.identity)
+          .toList(growable: false),
+    );
     await _postStore.saveHidden(_hiddenPosts);
     notifyListeners();
   }
@@ -153,12 +162,16 @@ class AppState extends ChangeNotifier {
       _board = board;
       _credentials = credentials;
       if (board != null) _credentialsByBoard[board] = credentials;
-      _favoritePosts = (await _postStore.loadFavorites())
-          .map((saved) => saved.sanitized())
-          .toList(growable: false);
-      _hiddenPosts = (await _postStore.loadHidden())
-          .map((saved) => saved.sanitized())
-          .toList(growable: false);
+      _setFavorites(
+        (await _postStore.loadFavorites())
+            .map((saved) => saved.sanitized())
+            .toList(growable: false),
+      );
+      _setHidden(
+        (await _postStore.loadHidden())
+            .map((saved) => saved.sanitized())
+            .toList(growable: false),
+      );
       for (final saved in [..._favoritePosts, ..._hiddenPosts]) {
         if (saved.board.requiresAuth &&
             !_credentialsByBoard.containsKey(saved.board)) {
@@ -261,6 +274,20 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     await _load(reset: true, generation: _generation);
   }
+
+  /// Persists the preferred video height without reloading the feed.
+  Future<void> setVideoQuality(int maxHeight) =>
+      _enqueueSettingsUpdate(() async {
+        final next = _settings.copyWith(videoQuality: maxHeight);
+        if (next == _settings) return;
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+        notifyListeners();
+      });
 
   Future<void> _recordRecentSearch(List<String> value) {
     final query = value
@@ -617,7 +644,22 @@ class AppState extends ChangeNotifier {
     board: board ?? _board ?? Board.safebooru,
     post: post,
   ).sanitized();
-  String _postKey(MediaPost post) => _saved(post, _board).identity;
+  // identity already strips credentials, so it needs no sanitized copy.
+  String _identity(MediaPost post, Board? board) => SavedPost(
+    board: board ?? _board ?? Board.safebooru,
+    post: post,
+  ).identity;
+  String _postKey(MediaPost post) => _identity(post, _board);
+  void _setFavorites(List<SavedPost> value) {
+    _favoritePosts = value;
+    _favoriteIds = {for (final saved in value) saved.identity};
+  }
+
+  void _setHidden(List<SavedPost> value) {
+    _hiddenPosts = value;
+    _hiddenIds = {for (final saved in value) saved.identity};
+  }
+
   String _normalize(String value) =>
       value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
   void _clearResults() {

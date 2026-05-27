@@ -16,6 +16,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const _videoQualities = [0, 1080, 720, 480];
   late AppSettings _settings;
   final _downloads = DownloadService();
   final _blacklistKey = GlobalKey<TagInputState>();
@@ -502,6 +503,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             title: const Text('Gestures'),
                             subtitle: const Text(
                               'Enable edge drawer opening and swipe navigation in the media viewer.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: ListTile(
+                            leading: const Icon(Icons.high_quality_outlined),
+                            title: const Text('Video quality'),
+                            subtitle: const Text(
+                              'Stream a lower resolution when the website offers one (e621 and e926). Others always play the original.',
+                            ),
+                            trailing: DropdownButton<int>(
+                              value:
+                                  _videoQualities.contains(
+                                    _settings.videoQuality,
+                                  )
+                                  ? _settings.videoQuality
+                                  : 0,
+                              underline: const SizedBox.shrink(),
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => setState(
+                                      () => _settings = _settings.copyWith(
+                                        videoQuality: value ?? 0,
+                                      ),
+                                    ),
+                              items: [
+                                for (final quality in _videoQualities)
+                                  DropdownMenuItem(
+                                    value: quality,
+                                    child: Text(
+                                      quality == 0 ? 'Original' : '${quality}p',
+                                    ),
+                                  ),
+                              ],
                             ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16,
