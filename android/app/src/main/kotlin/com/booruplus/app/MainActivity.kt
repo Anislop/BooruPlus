@@ -379,7 +379,7 @@ class MainActivity : FlutterActivity() {
         }
 
     private fun mapImage(image: BoardImage, board: String, apiKey: String?, userId: String?): Map<String, Any?> {
-        val original = authorizeMediaUrl(normalizeUrl(image.getURL(), board), board, apiKey, userId)
+        val original = authorizeMediaUrl(normalizeUrl(playableUrl(image, board), board), board, apiKey, userId)
         val preview = authorizeMediaUrl(
             normalizeUrl(value(image, "getParsedPreviewFileUrl", "getPreview_url", "getPreviewUrl")?.toString(), board),
             board, apiKey, userId
@@ -395,8 +395,33 @@ class MainActivity : FlutterActivity() {
             "rating" to (image.getRating()?.toString() ?: "Unknown"),
             "uploader" to (value(image, "getUploader_name", "getOwner", "getAuthor", "getUploader_id")?.toString() ?: ""),
             "source" to sourceValue(image), "width" to image.getWidth(), "height" to image.getHeight(),
-            "score" to image.getScore(), "description" to (value(image, "getDescription")?.toString() ?: "")
+            "score" to image.getScore(), "description" to (value(image, "getDescription")?.toString() ?: ""),
+            "videoVariants" to videoVariants(image, board, original)
         )
+    }
+
+    /**
+     * Danbooru ugoira originals are ZIP frame archives. Their large sample is
+     * a WebM rendition that the video player can stream directly.
+     */
+    private fun playableUrl(image: BoardImage, board: String): String? {
+        val url = image.getURL()
+        if (board != "danbooru" || value(image, "getFile_ext")?.toString()?.lowercase() != "zip") return url
+        val sample = value(image, "getParsedLargeFileUrl")?.toString() ?: return url
+        return if (sample.substringBefore('?').lowercase().let { it.endsWith(".webm") || it.endsWith(".mp4") }) sample else url
+    }
+
+    private fun videoVariants(image: BoardImage, board: String, original: String): List<Map<String, Any?>> {
+        if (board != "e621" && board != "e926") return emptyList()
+        val alternates = (value(image, "getSample") as? Map<*, *>)?.get("alternates") as? Map<*, *> ?: return emptyList()
+        return parseVideoAlternates(alternates).mapNotNull { variant ->
+            val url = normalizeUrl(variant.url, board)
+            if (url.isEmpty() || url == original) null
+            else mapOf(
+                "label" to variant.label, "url" to url, "width" to variant.width,
+                "height" to variant.height, "quality" to variant.quality
+            )
+        }.distinctBy { it["url"] }
     }
 
     private fun tagDetails(image: BoardImage, board: String, rawTags: List<String>): List<Map<String, String>> {
@@ -697,6 +722,50 @@ internal fun parseGelbooruTagRecords(body: String): JSONArray {
     if (tags is JSONArray) return tags
     if (tags is JSONObject) return JSONArray().apply { put(tags) }
     return JSONArray()
+}
+
+/** [quality] is the resolution tier (e.g. 720 for "720p"), not the height. */
+internal data class VideoAlternate(val label: String, val url: String, val width: Int, val height: Int, val quality: Int)
+
+/**
+ * Reads e621 `sample.alternates`. Current responses group entries with a
+ * single `url` under "original", "variants" (same-size MP4) and "samples"
+ * ("480p", "720p"); older ones mapped "480p"/"original" directly to
+ * `{type, width, height, urls: [webm, mp4]}`. Both shapes are accepted and MP4
+ * is preferred for device decoder support. e621 names tiers by the short side
+ * (a portrait "720p" sample can be 810x1440), so quality uses the tier from the
+ * key, or the short side when the key has none. Results are best first.
+ */
+internal fun parseVideoAlternates(alternates: Map<*, *>): List<VideoAlternate> {
+    val found = ArrayList<VideoAlternate>()
+    val tier = Regex("(\\d+)p")
+    fun visit(key: String, node: Any?, depth: Int) {
+        val entry = node as? Map<*, *> ?: return
+        val type = entry["type"] as? String
+        if (type != null && type != "video") return
+        val urls = (entry["urls"] as? List<*>)?.filterIsInstance<String>()?.filter { it.isNotBlank() } ?: emptyList()
+        val url = (entry["url"] as? String)?.takeIf { it.isNotBlank() }
+            ?: urls.firstOrNull { it.substringBefore('?').endsWith(".mp4", ignoreCase = true) }
+            ?: urls.firstOrNull()
+        if (url != null) {
+            val height = (entry["height"] as? Number)?.toInt() ?: 0
+            val width = (entry["width"] as? Number)?.toInt() ?: 0
+            val named = tier.matchEntire(key)?.groupValues?.get(1)?.toIntOrNull()
+            val quality = named ?: if (width > 0 && height > 0) minOf(width, height) else height
+            if (quality <= 0) return
+            val label = if (named != null) key else {
+                val extension = url.substringBefore('?').substringAfterLast('.', "").uppercase()
+                if (extension.isEmpty()) "${quality}p" else "${quality}p $extension"
+            }
+            found.add(VideoAlternate(label, url, width, height, quality))
+            return
+        }
+        if (depth < 2) entry.forEach { (child, value) -> if (child is String && child != "has") visit(child, value, depth + 1) }
+    }
+    alternates.forEach { (key, value) -> if (key is String && key != "has") visit(key, value, 0) }
+    return found
+        .sortedWith(compareByDescending<VideoAlternate> { it.quality }.thenBy { if (it.url.substringBefore('?').endsWith(".mp4", true)) 0 else 1 })
+        .distinctBy { it.url }
 }
 
 internal fun gelbooruTagCategory(raw: Any?): String {

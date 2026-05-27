@@ -98,22 +98,9 @@ class LocalPostStore implements PostStore {
   SavedPost _sanitized(SavedPost value) =>
       SavedPost(board: value.board, post: _sanitizePost(value.post));
 
-  MediaPost _sanitizePost(MediaPost value) => MediaPost(
-    id: value.id,
+  MediaPost _sanitizePost(MediaPost value) => value.withUrls(
     url: _sanitizeUrl(value.url),
     previewUrl: _sanitizeUrl(value.previewUrl),
-    tags: value.tags,
-    rating: value.rating,
-    uploader: value.uploader,
-    source: value.source,
-    width: value.width,
-    height: value.height,
-    score: value.score,
-    description: value.description,
-    isVideo: value.isVideo,
-    extension: value.extension,
-    tagDetails: value.tagDetails,
-    postUrl: value.postUrl,
   );
 
   static String _sanitizeUrl(String value) {

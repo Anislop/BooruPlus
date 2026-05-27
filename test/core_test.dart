@@ -475,6 +475,104 @@ void main() {
     expect(MediaPost.fromMap(value.toMap()).id, 3);
   });
 
+  test('video variants round-trip and pick the closest stream', () {
+    final value = MediaPost.fromMap({
+      ...post(4),
+      'url': 'https://x/original.webm',
+      'height': 1080,
+      'videoVariants': [
+        {'label': '720p', 'url': 'https://x/720.mp4', 'height': 720},
+        {'url': 'https://x/480.mp4', 'height': 480},
+        // The original itself is never listed as a rendition.
+        {'label': 'dup', 'url': 'https://x/original.webm', 'height': 1080},
+      ],
+    });
+    expect(value.videoVariants.map((v) => v.label), ['720p', '480p']);
+    expect(value.videoVariantFor(0), isNull);
+    expect(value.videoVariantFor(1080), isNull);
+    expect(value.videoVariantFor(720)?.url, 'https://x/720.mp4');
+    expect(value.videoVariantFor(600)?.url, 'https://x/480.mp4');
+    // Below every rendition, the smallest is still the closest match.
+    expect(value.videoVariantFor(240)?.url, 'https://x/480.mp4');
+    final restored = MediaPost.fromMap(value.toMap());
+    expect(restored.videoVariants.length, 2);
+    expect(restored.videoVariantFor(720)?.label, '720p');
+    final sanitized = value.withUrls(url: 'https://y/a.webm', previewUrl: '');
+    expect(sanitized.videoVariants.length, 2);
+  });
+
+  test('portrait video tiers follow the short side like e621 labels', () {
+    // Mirrors a live e926 response for a 1080x1920 WebM.
+    final value = MediaPost.fromMap({
+      ...post(5),
+      'url': 'https://x/original.webm',
+      'width': 1080,
+      'height': 1920,
+      'videoVariants': [
+        {
+          'label': '1080p MP4',
+          'url': 'https://x/alt.mp4',
+          'width': 1080,
+          'height': 1920,
+          'quality': 1080,
+        },
+        {
+          'label': '720p',
+          'url': 'https://x/720p.mp4',
+          'width': 810,
+          'height': 1440,
+          'quality': 720,
+        },
+        // Legacy maps without "quality" fall back to the label, then the
+        // short side.
+        {'url': 'https://x/480p.mp4', 'width': 540, 'height': 960},
+      ],
+    });
+    expect(value.videoQuality, 1080);
+    expect(value.videoVariants.map((v) => v.quality), [1080, 720, 540]);
+    expect(value.videoVariantFor(1080), isNull);
+    expect(value.videoVariantFor(720)?.url, 'https://x/720p.mp4');
+    expect(value.videoVariantFor(600)?.url, 'https://x/480p.mp4');
+  });
+
+  test('video quality persists without reloading the feed', () async {
+    final store = MemoryStore()..selected = Board.e621;
+    final repo = FakeRepo([
+      [post(1)],
+    ]);
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    final calls = repo.calls;
+    await state.setVideoQuality(720);
+    expect(state.settings.videoQuality, 720);
+    expect(store.settings.videoQuality, 720);
+    expect(repo.calls, calls);
+    expect(
+      AppSettings.decode(store.settings.encode()).videoQuality,
+      720,
+    );
+    expect(AppSettings.decode('{}').videoQuality, 0);
+  });
+
+  test('favorite and hidden lookups follow add and remove', () async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    final value = MediaPost.fromMap(post(9));
+    expect(state.isFavorite(value), isFalse);
+    await state.favoritePost(value);
+    expect(state.isFavorite(value), isTrue);
+    expect(state.isFavorite(value, board: Board.e621), isFalse);
+    await state.unfavoritePost(value);
+    expect(state.isFavorite(value), isFalse);
+    await state.hidePost(value);
+    expect(state.isHidden(value), isTrue);
+    await state.unhidePost(value);
+    expect(state.isHidden(value), isFalse);
+  });
+
   test(
     'autocomplete converts repository maps and records the active board',
     () async {

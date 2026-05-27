@@ -476,8 +476,7 @@ void main() {
       );
       await tester.pump();
       expect(find.text('Unfavorite'), findsOneWidget);
-      final image = tester.widget<Image>(find.byType(Image).first);
-      expect((image.image as NetworkImage).url, postValue.url);
+      expect(networkImageUrls(tester), contains(postValue.url));
       final favoriteButtonFinder = find.ancestor(
         of: find.text('Unfavorite'),
         matching: find.byType(FilledButton),
@@ -521,8 +520,8 @@ void main() {
         origin: const Rect.fromLTWH(20, 40, 120, 120),
       );
       await tester.pump();
-      final videoImage = tester.widget<Image>(find.byType(Image).first);
-      expect((videoImage.image as NetworkImage).url, videoPost.previewUrl);
+      expect(networkImageUrls(tester), contains(videoPost.previewUrl));
+      expect(networkImageUrls(tester), isNot(contains(videoPost.url)));
       videoController.release();
       await tester.pumpAndSettle();
       await videoActions;
@@ -531,6 +530,45 @@ void main() {
       state.dispose();
     },
   );
+
+  testWidgets('quick action preview matches the post aspect ratio', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(theme: appTheme, home: const Scaffold()),
+    );
+    for (final (width, height) in [(1000, 2000), (1600, 900), (800, 800)]) {
+      final controller = QuickActionOverlayController();
+      final actions = showQuickPostActions(
+        tester.element(find.byType(Scaffold)),
+        post: MediaPost.fromMap({
+          ...post(width),
+          'url': 'https://example.com/$width.jpg',
+          'previewUrl': 'https://example.com/$width-preview.jpg',
+          'width': width,
+          'height': height,
+        }),
+        board: Board.danbooru,
+        state: state,
+        controller: controller,
+        origin: const Rect.fromLTWH(20, 40, 120, 120),
+      );
+      await tester.pumpAndSettle();
+      final box = tester.getSize(find.byType(ClipRRect).last);
+      expect(box.width / box.height, closeTo(width / height, .01));
+      expect(tester.takeException(), isNull);
+      controller.release();
+      await tester.pumpAndSettle();
+      await actions;
+    }
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
 
   testWidgets('quick actions survive a feed rebuild during a long press', (
     tester,
@@ -808,15 +846,12 @@ void main() {
       await tester.pump();
       expect(find.text('#2'), findsOneWidget);
 
-      // A leftward swipe from the middle moves to the previous post.
-      final leftGesture = await tester.startGesture(const Offset(180, 320));
-      await leftGesture.moveTo(const Offset(60, 320));
-      await leftGesture.up();
-      await tester.pump();
-      expect(find.text('#1'), findsOneWidget);
-      await tester.pump(const Duration(milliseconds: 350));
+      // Swiping left (finger moving right to left) advances to the next post.
+      await tester.drag(find.byType(PageView), const Offset(-600, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('#3'), findsOneWidget);
 
-      // Reopen the middle post, then verify a rightward swipe moves next.
+      // Reopen the middle post, then verify a rightward swipe goes back.
       await tester.pumpWidget(
         MaterialApp(
           theme: appTheme,
@@ -831,12 +866,15 @@ void main() {
         ),
       );
       await tester.pump();
-      final rightGesture = await tester.startGesture(const Offset(60, 320));
-      await rightGesture.moveTo(const Offset(180, 320));
-      await rightGesture.up();
-      await tester.pump();
-      expect(find.text('#3'), findsOneWidget);
-      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('#2'), findsOneWidget);
+      await tester.drag(find.byType(PageView), const Offset(600, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('#1'), findsOneWidget);
+
+      // A short drag that is released early settles back on the same post.
+      await tester.drag(find.byType(PageView), const Offset(-120, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('#1'), findsOneWidget);
 
       // Reopen the first post to verify the grouped details presentation.
       await tester.pumpWidget(
@@ -932,6 +970,44 @@ void main() {
     },
   );
 
+  testWidgets('video quality menu lists renditions and saves the choice', (
+    tester,
+  ) async {
+    final videoPost = MediaPost.fromMap({
+      'id': 98,
+      'url': 'https://example.com/video.webm',
+      'previewUrl': 'https://example.com/thumb.jpg',
+      'height': 1080,
+      'width': 1920,
+      'isVideo': true,
+      'videoVariants': [
+        {'label': '720p', 'url': 'https://example.com/720.mp4', 'height': 720},
+        {'label': '480p', 'url': 'https://example.com/480.mp4', 'height': 480},
+      ],
+    });
+    final store = MemoryStore()..selected = Board.e621;
+    final state = AppState(repository: FakeRepo(const [[]]), store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: videoPost, board: Board.e621, state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Video quality'));
+    await tester.pumpAndSettle();
+    expect(find.text('Original · 1080p'), findsOneWidget);
+    expect(find.text('720p'), findsOneWidget);
+    await tester.tap(find.widgetWithText(CheckedPopupMenuItem<int>, '480p'));
+    await tester.pumpAndSettle();
+    expect(state.settings.videoQuality, 480);
+    expect(store.settings.videoQuality, 480);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('video post renders black background and bottom controls', (
     tester,
   ) async {
@@ -963,6 +1039,16 @@ void main() {
     state.dispose();
   });
 }
+
+/// Network URLs of every rendered [Image], unwrapping decode-size wrappers.
+List<String> networkImageUrls(WidgetTester tester) => [
+  for (final image in tester.widgetList<Image>(find.byType(Image)))
+    switch (image.image) {
+      NetworkImage(:final url) => url,
+      ResizeImage(imageProvider: NetworkImage(:final url)) => url,
+      _ => '',
+    },
+];
 
 Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
   'id': id,
