@@ -53,6 +53,7 @@ class MainActivity : FlutterActivity() {
     private val boards by lazy { ImageBoards(client) }
     private val konachanCom by lazy { ImageBoard(client, KonachanBoard.COM, KonachanImage::class.java) }
     private val konachanNet by lazy { ImageBoard(client, KonachanBoard.NET, KonachanImage::class.java) }
+    private val sankaku by lazy { SankakuApi(client, USER_AGENT) }
     private var directoryResult: MethodChannel.Result? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
     private val discoveryWindows = ConcurrentHashMap<Int, Int>()
@@ -107,6 +108,7 @@ class MainActivity : FlutterActivity() {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
         }
         if (board in setOf("konachan", "yandere")) { result.success(emptyList<Map<String, Any?>>()); return }
+        if (board == "sankaku") { background(result) { sankaku.autocomplete(query, limit) }; return }
         background(result) {
             val api = when (board) {
                 "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
@@ -192,6 +194,19 @@ class MainActivity : FlutterActivity() {
         val user = call.argument<String>("userId")
         if (board in setOf("rule34", "gelbooru") && (key.isNullOrBlank() || user.isNullOrBlank())) {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
+        }
+        if (board == "sankaku") {
+            background(result) {
+                // Sankaku pages by keyset token and orders discovery with
+                // order:random, so it bypasses the windowed library path.
+                // Only random feeds key their token chain by seed: callers
+                // that omit it get a fresh seed per call.
+                sankaku.fetch(
+                    tags, page, limit, random, makeCursorKey(board, tags, limit, random, if (random) seed else 0),
+                    avifPreviews = Build.VERSION.SDK_INT >= 31,
+                ) { closing || Thread.currentThread().isInterrupted }
+            }
+            return
         }
         background(result) {
             val api = when (board) {
@@ -709,7 +724,7 @@ class MainActivity : FlutterActivity() {
         private const val TAG_CACHE_LIMIT = 512
         private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
         private const val GELBOORU_REFERER = "https://gelbooru.com/"
-        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net")
+        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }

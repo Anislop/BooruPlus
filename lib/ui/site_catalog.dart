@@ -77,6 +77,12 @@ const _defaults = <Board, BoardAppearance>{
     accent: Color(0xFF9EAEE3),
     surface: Color(0xFF22283B),
   ),
+  Board.sankaku: BoardAppearance(
+    name: 'Sankaku Complex',
+    icon: Icons.local_fire_department_outlined,
+    accent: Color(0xFFF2A25C),
+    surface: Color(0xFF3A2616),
+  ),
 };
 
 final boardAppearances = <Board, BoardAppearance>{..._defaults};

@@ -158,11 +158,16 @@ class _HomeScreenState extends State<HomeScreen> {
       initialDate: DateTime.now(),
     );
     if (date == null || !mounted) return;
-    final value =
-        '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-    final dateTag = board == Board.danbooru
-        ? 'date:>=$value'
-        : 'created_at:>=$value';
+    String day(DateTime value) =>
+        '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+    final value = day(date);
+    final dateTag = switch (board) {
+      Board.danbooru => 'date:>=$value',
+      // Sankaku rejects open-ended dates; close the range after today.
+      Board.sankaku =>
+        'date:${value}T00:00..${day(DateTime.now().add(const Duration(days: 1)))}T00:00',
+      _ => 'created_at:>=$value',
+    };
     _search([
       ...widget.state.tags.where(
         (tag) => !tag.startsWith('created_at:') && !tag.startsWith('date:'),
@@ -240,6 +245,17 @@ class _HomeScreenState extends State<HomeScreen> {
         _ => null,
       };
     }
+    if (board == Board.sankaku) {
+      return switch (filter) {
+        'score' => 'order:popularity',
+        'quality' => 'order:quality',
+        'newest' => 'order:id_desc',
+        'oldest' => 'order:id_asc',
+        // Sankaku times out on favorite-count ordering.
+        'favorites' => 'order:popularity',
+        _ => null,
+      };
+    }
     return switch (filter) {
       'score' => 'order:score',
       'favorites' => 'order:favcount',
@@ -264,9 +280,9 @@ class _HomeScreenState extends State<HomeScreen> {
     int index,
     bool hidePostTags,
   ) {
-    final post = posts[index];
+    final post = state.displayPost(posts[index], board: board);
     return MediaTile(
-      key: ValueKey('${board.name}:${post.id}:${post.url}'),
+      key: ValueKey('${board.name}:${post.displayId}:${post.url}'),
       post: post,
       board: board,
       hidePostTags: hidePostTags,
@@ -823,7 +839,7 @@ class _MediaTileState extends State<MediaTile> {
         : media;
     return Semantics(
       label:
-          '${post.isVideo ? 'Video' : 'Image'} ${post.id}, rating ${post.rating}',
+          '${post.isVideo ? 'Video' : 'Image'} ${post.displayId}, rating ${post.rating}',
       button: true,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -1376,7 +1392,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
           color: Colors.white70,
         );
     final caption = post.description.isEmpty
-        ? 'Post #${post.id}'
+        ? 'Post #${post.displayId}'
         : post.description;
 
     // Size the card from the post's own aspect ratio so the preview hugs
@@ -1597,11 +1613,14 @@ class FilterBar extends StatelessWidget {
           (tag) => tag.startsWith('created_at:') || tag.startsWith('date:'),
         )
         .firstOrNull;
-    final gelbooruSyntax = board == Board.gelbooru || board == Board.rule34;
+    final noFavoriteOrder =
+        board == Board.gelbooru ||
+        board == Board.rule34 ||
+        board == Board.sankaku;
     final sortItems = <PopupMenuEntry<String>>[
       const PopupMenuItem(value: 'none', child: Text('Relevance / default')),
       const PopupMenuItem(value: 'score', child: Text('Popularity / score')),
-      if (!gelbooruSyntax)
+      if (!noFavoriteOrder)
         const PopupMenuItem(value: 'favorites', child: Text('Favorites')),
       const PopupMenuItem(value: 'quality', child: Text('Quality')),
       const PopupMenuItem(value: 'newest', child: Text('Newest')),
@@ -1625,7 +1644,12 @@ class FilterBar extends StatelessWidget {
             const SizedBox(width: 6),
             ActionChip(
               avatar: const Icon(Icons.calendar_today_outlined, size: 16),
-              label: Text(date == null ? 'Date' : date.split('>=').last),
+              label: Text(
+                date == null
+                    ? 'Date'
+                    : RegExp(r'\d{4}-\d{2}-\d{2}').firstMatch(date)?[0] ??
+                          date.split('>=').last,
+              ),
               onPressed: onDate,
             ),
             const SizedBox(width: 6),

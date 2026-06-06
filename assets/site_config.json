@@ -7,6 +7,7 @@
     "e926": { "name": "e926", "accent": "#8DB9DE", "surface": "#1E2B38", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e926.net" },
     "e621": { "name": "e621", "accent": "#E49A62", "surface": "#38271E", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e621.net" },
     "gelbooru": { "name": "Gelbooru", "accent": "#B59AE5", "surface": "#2B223A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=gelbooru.com" },
-    "rule34": { "name": "Rule34", "accent": "#9EAEE3", "surface": "#22283B", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=rule34.xxx" }
+    "rule34": { "name": "Rule34", "accent": "#9EAEE3", "surface": "#22283B", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=rule34.xxx" },
+    "sankaku": { "name": "Sankaku Complex", "accent": "#F2A25C", "surface": "#3A2616", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=sankakucomplex.com" }
   }
 }

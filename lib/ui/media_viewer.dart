@@ -83,9 +83,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
 
   MediaPost _postAt(int index) => widget.savedPosts.isNotEmpty
       ? widget.state.displayReady(widget.savedPosts[index]).post
-      : widget.posts.isEmpty
-      ? widget.post
-      : widget.posts[index];
+      : widget.state.displayPost(
+          widget.posts.isEmpty ? widget.post : widget.posts[index],
+          board: widget.board,
+        );
 
   Board get _currentBoard => _boardAt(_index);
 
@@ -313,7 +314,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           : 'jpg';
       await _downloads.download(
         url: url,
-        name: '${_currentBoard.name}_${_post.id}.$extension',
+        name: '${_currentBoard.name}_${_post.displayId}.$extension',
         directory: widget.state.settings.downloadDirectory,
       );
       messenger.showSnackBar(
@@ -398,7 +399,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                   ),
                 ),
                 Text(
-                  '#${post.id}',
+                  '#${post.displayId}',
                   style: const TextStyle(color: Colors.white38, fontSize: 11),
                 ),
               ],
@@ -925,10 +926,11 @@ String _postBrowserUrl(Board board, MediaPost post) {
       return provided;
     }
   }
-  if (post.id <= 0) return '';
+  if (!post.hasId) return '';
   return switch (board) {
     Board.danbooru => 'https://${board.host}/posts/${post.id}',
     Board.e621 || Board.e926 => 'https://${board.host}/posts/${post.id}',
+    Board.sankaku => 'https://${board.host}/posts/${post.displayId}',
     Board.konachan ||
     Board.yandere => 'https://${board.host}/post/show/${post.id}',
     _ => 'https://${board.host}/index.php?page=post&s=view&id=${post.id}',
