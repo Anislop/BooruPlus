@@ -39,6 +39,14 @@ class AppState extends ChangeNotifier {
   // incoming post instead of scanning every saved post.
   Set<String> _favoriteIds = const {};
   Set<String> _hiddenIds = const {};
+  // Sankaku signs media URLs with an expiry of about an hour. Saved and
+  // long-open posts are looked up again by ID; fresh copies are kept by
+  // identity, and attempts are throttled so a deleted post is not re-queried
+  // on every rebuild.
+  final Map<String, MediaPost> _refreshedMedia = {};
+  final Map<String, DateTime> _refreshAttempts = {};
+  final Map<String, SavedPost> _refreshQueue = {};
+  bool _refreshScheduled = false;
 
   AppSettings get settings => _settings;
   Board? get board => _board;
@@ -68,10 +76,34 @@ class AppState extends ChangeNotifier {
   bool isHidden(MediaPost post, {Board? board}) =>
       _hiddenIds.contains(_identity(post, board));
 
-  SavedPost displayReady(SavedPost post) =>
-      post.authorized(_credentialsByBoard[post.board]);
+  SavedPost displayReady(SavedPost post) {
+    final authorized = post.authorized(_credentialsByBoard[post.board]);
+    if (authorized.board != Board.sankaku || !authorized.post.hasId) {
+      return authorized;
+    }
+    final fresh = _refreshedMedia[authorized.identity];
+    if (fresh != null && !_mediaExpired(fresh)) {
+      return SavedPost(
+        board: authorized.board,
+        post: authorized.post.withUrls(
+          url: fresh.url,
+          previewUrl: fresh.previewUrl,
+        ),
+      );
+    }
+    if (_mediaExpired(authorized.post)) _queueMediaRefresh(authorized);
+    return authorized;
+  }
+
   MediaPost authorizedPost(MediaPost post, {Board? board}) =>
       displayReady(_saved(post, board)).post;
+
+  /// [post] with media URLs that are still valid for display. Only boards
+  /// with expiring media URLs are rewritten; other posts pass through.
+  MediaPost displayPost(MediaPost post, {required Board board}) =>
+      board == Board.sankaku
+      ? displayReady(SavedPost(board: board, post: post)).post
+      : post;
 
   Future<void> toggleFavorite(MediaPost post, {Board? board}) async {
     if (isFavorite(post, board: board)) {
@@ -584,9 +616,27 @@ class AppState extends ChangeNotifier {
   List<String> _queryTags() {
     final exclusions = [
       ..._settings.blacklist.map((tag) => '-$tag'),
-      if (_settings.excludeAi) '-ai_generated',
+      if (_settings.excludeAi) '-$_aiTag',
     ];
     final rating = _singleProviderRating;
+    // Anonymous Sankaku searches allow four counted tags: ordinary tags,
+    // negated or not, plus rating:q/rating:e (order:, rating:s and other
+    // metatags are free). Exclusions are rejected unless a positive tag is
+    // present, so the unfiltered feed relies on local filtering instead.
+    if (_board == Board.sankaku) {
+      final query = [
+        ..._tags,
+        if (rating != null) 'rating:${rating.shortQueryValue}',
+      ];
+      final hasPositive = _tags.any(
+        (tag) => _isOrdinaryTag(tag) && !tag.startsWith('-'),
+      );
+      final budget = (4 - query.where(_countsTowardSankakuLimit).length).clamp(
+        0,
+        4,
+      );
+      return [...query, if (hasPositive) ...exclusions.take(budget)];
+    }
     // Anonymous Danbooru searches accept only two ordinary tags. Keep the
     // user's search intact and let the local filter enforce any remaining
     // blacklist/no-AI exclusions instead of turning a valid query into a
@@ -621,9 +671,23 @@ class AppState extends ChangeNotifier {
     return tag.isNotEmpty && !tag.contains(':');
   }
 
+  bool _countsTowardSankakuLimit(String value) {
+    final tag = value.toLowerCase();
+    return _isOrdinaryTag(tag) ||
+        const {
+          'rating:q',
+          'rating:questionable',
+          'rating:e',
+          'rating:explicit',
+        }.contains(tag);
+  }
+
+  /// The provider's tag for AI-generated media.
+  String get _aiTag => _board == Board.sankaku ? 'ai-created' : 'ai_generated';
+
   bool _allowed(MediaPost post) =>
       !(_settings.excludeAi &&
-          post.tags.any((tag) => _normalize(tag) == 'ai_generated')) &&
+          post.tags.any((tag) => _normalize(tag) == _aiTag)) &&
       !_settings.blacklist.any(
         (blocked) =>
             post.tags.any((tag) => _normalize(tag) == _normalize(blocked)),
@@ -658,6 +722,78 @@ class AppState extends ChangeNotifier {
   void _setHidden(List<SavedPost> value) {
     _hiddenPosts = value;
     _hiddenIds = {for (final saved in value) saved.identity};
+  }
+
+  static bool _mediaExpired(MediaPost post) {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    for (final value in [post.url, post.previewUrl]) {
+      final query = Uri.tryParse(value)?.queryParameters ?? const {};
+      final expiry = int.tryParse(query['e'] ?? query['expires'] ?? '');
+      // Refresh slightly early so a URL does not expire mid-download.
+      if (expiry != null && now >= expiry - 120) return true;
+    }
+    return false;
+  }
+
+  void _queueMediaRefresh(SavedPost saved) {
+    final key = saved.identity;
+    final now = DateTime.now();
+    final last = _refreshAttempts[key];
+    if (last != null && now.difference(last) < const Duration(minutes: 5)) {
+      return;
+    }
+    _refreshAttempts[key] = now;
+    _refreshQueue[key] = saved;
+    if (_refreshScheduled) return;
+    _refreshScheduled = true;
+    // A separate task batches every post queued by the current build and
+    // keeps notifyListeners out of the build phase.
+    Future<void>(_refreshExpiredMedia);
+  }
+
+  Future<void> _refreshExpiredMedia() async {
+    _refreshScheduled = false;
+    final queued = _refreshQueue.values.toList(growable: false);
+    _refreshQueue.clear();
+    var changed = false;
+    for (final board in queued.map((saved) => saved.board).toSet()) {
+      final posts = queued.where((saved) => saved.board == board).toList();
+      for (var start = 0; start < posts.length; start += 40) {
+        final batch = posts.skip(start).take(40).toList(growable: false);
+        final wanted = {for (final saved in batch) saved.identity};
+        try {
+          final raw = await _repository.fetch(
+            board: board,
+            tags: [
+              'id:${batch.map((saved) => saved.post.displayId).join(',')}',
+            ],
+            limit: batch.length,
+            page: 0,
+            random: false,
+            credentials: _credentialsByBoard[board],
+          );
+          for (final fresh in raw.map(MediaPost.fromMap)) {
+            final identity = SavedPost(board: board, post: fresh).identity;
+            if (!wanted.contains(identity)) continue;
+            _refreshedMedia.remove(identity);
+            _refreshedMedia[identity] = fresh;
+            changed = true;
+          }
+        } catch (_) {
+          // Keep the stored URLs; the post is retried after the cooldown.
+        }
+      }
+    }
+    while (_refreshedMedia.length > 500) {
+      _refreshedMedia.remove(_refreshedMedia.keys.first);
+    }
+    if (_refreshAttempts.length > 1000) {
+      _refreshAttempts.removeWhere(
+        (_, time) =>
+            DateTime.now().difference(time) >= const Duration(minutes: 5),
+      );
+    }
+    if (changed) notifyListeners();
   }
 
   String _normalize(String value) =>

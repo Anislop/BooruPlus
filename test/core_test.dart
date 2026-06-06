@@ -64,6 +64,31 @@ class FakeRepo implements BoardRepository {
   }
 }
 
+/// Answers `id:` lookups with [fresh]; other fetches return no posts.
+class _RefreshRepo extends FakeRepo {
+  _RefreshRepo(this.fresh) : super(const [[]]);
+  final Map<String, dynamic> fresh;
+  final List<List<String>> refreshQueries = [];
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+  }) async {
+    if (board != Board.sankaku ||
+        tags.isEmpty ||
+        !tags.first.startsWith('id:')) {
+      return const [];
+    }
+    refreshQueries.add(tags);
+    return [fresh];
+  }
+}
+
 Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
   'id': id,
   'url': 'https://x/$id.jpg',
@@ -389,6 +414,111 @@ void main() {
       expect(repo.queries.last, ['artist_tag', 'character_tag']);
     },
   );
+
+  test('Sankaku fits exclusions into the anonymous four-tag budget', () async {
+    final repo = FakeRepo(const [[]]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.sankaku,
+    );
+    await state.initialize();
+    await state.updateSettings(
+      const AppSettings(blacklist: ['blocked', 'other']),
+    );
+    await state.setRatingFilters({Rating.explicit});
+    await state.search(['cat', 'dog']);
+    // rating:e counts toward the limit, leaving one slot for exclusions.
+    expect(repo.queries.last, ['cat', 'dog', 'rating:e', '-blocked']);
+    await state.updateSettings(const AppSettings(blacklist: ['blocked']));
+    // rating:s is free, so both exclusions fit.
+    await state.setRatingFilters({Rating.general});
+    expect(repo.queries.last, [
+      'cat',
+      'dog',
+      'rating:s',
+      '-blocked',
+      '-ai-created',
+    ]);
+  });
+
+  test(
+    'unfiltered Sankaku feed sends no exclusions and filters AI locally',
+    () async {
+      final repo = FakeRepo([
+        [
+          post(1, tags: ['ai-created']),
+          post(2),
+        ],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.sankaku,
+      );
+      await state.initialize();
+      expect(repo.queries.first, isEmpty);
+      expect(state.posts.map((value) => value.id), [2]);
+    },
+  );
+
+  test('alphanumeric provider IDs keep a stable identity and round-trip', () {
+    final restored = MediaPost.fromMap(
+      MediaPost.fromMap({
+        'id': 'PVaDxP30Lab',
+        'url': 'https://s.example/o/a.mp4?e=1',
+      }).toMap(),
+    );
+    expect(restored.id, 0);
+    expect(restored.providerId, 'PVaDxP30Lab');
+    expect(restored.displayId, 'PVaDxP30Lab');
+    expect(
+      SavedPost(board: Board.sankaku, post: restored).identity,
+      'sankaku:id:PVaDxP30Lab',
+    );
+    expect(
+      MediaPost.fromMap({'id': '0', 'url': 'https://x/a.jpg'}).hasId,
+      isFalse,
+    );
+    final numeric = MediaPost.fromMap({'id': '42', 'url': 'https://x/a.jpg'});
+    expect((numeric.id, numeric.providerId), (42, null));
+  });
+
+  test('expired Sankaku favorites are refreshed by ID', () async {
+    const stale = 'https://s.example/o/a.jpg?e=1&m=old';
+    const fresh = 'https://s.example/o/a.jpg?e=4102444800&m=new';
+    final repo = _RefreshRepo({
+      'id': 'abc123X',
+      'url': fresh,
+      'previewUrl': 'https://v.example/p/a.avif?e=4102444800',
+    });
+    final postStore = MemoryPostStore();
+    await postStore.saveFavorites([
+      SavedPost(
+        board: Board.sankaku,
+        post: MediaPost.fromMap({
+          'id': 'abc123X',
+          'url': stale,
+          'previewUrl': 'https://v.example/p/a.avif?e=1',
+        }),
+      ),
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+      postStore: postStore,
+    );
+    await state.initialize();
+    final saved = state.favoritePosts.single;
+    expect(state.displayReady(saved).post.url, stale);
+    await pumpEventQueue();
+    expect(repo.refreshQueries, [
+      ['id:abc123X'],
+    ]);
+    expect(state.displayReady(saved).post.url, fresh);
+    expect(
+      state.isFavorite(state.displayReady(saved).post, board: Board.sankaku),
+      isTrue,
+    );
+  });
 
   test('settings clamp and directory can be cleared', () {
     final settings = const AppSettings(

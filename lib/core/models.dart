@@ -9,6 +9,7 @@ enum Board {
   e621,
   gelbooru,
   rule34,
+  sankaku,
 }
 
 extension BoardInfo on Board {
@@ -21,6 +22,7 @@ extension BoardInfo on Board {
     Board.e621 => 'e621',
     Board.gelbooru => 'Gelbooru',
     Board.rule34 => 'Rule34',
+    Board.sankaku => 'Sankaku Complex',
   };
 
   String get host => switch (this) {
@@ -32,6 +34,7 @@ extension BoardInfo on Board {
     Board.e621 => 'e621.net',
     Board.gelbooru => 'gelbooru.com',
     Board.rule34 => 'rule34.xxx',
+    Board.sankaku => 'www.sankakucomplex.com',
   };
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
@@ -207,6 +210,7 @@ class Credentials {
 class MediaPost {
   const MediaPost({
     required this.id,
+    this.providerId,
     required this.url,
     required this.previewUrl,
     required this.tags,
@@ -265,8 +269,10 @@ class MediaPost {
               .where((variant) => variant.url.isNotEmpty && variant.url != url)
               .toList(growable: false)
         : const <VideoVariant>[];
+    final id = _int(map['id']);
     return MediaPost(
-      id: _int(map['id']),
+      id: id,
+      providerId: id > 0 ? null : _providerId(map['id']),
       url: url,
       previewUrl: '${map['previewUrl'] ?? map['preview_url'] ?? url}',
       tags: tags,
@@ -287,7 +293,12 @@ class MediaPost {
     );
   }
 
+  /// Numeric provider post ID, or 0 when the provider's ID is not numeric.
   final int id;
+
+  /// Opaque provider post ID (Sankaku uses alphanumeric IDs); null when [id]
+  /// holds the provider's ID.
+  final String? providerId;
   final String url,
       previewUrl,
       rating,
@@ -301,6 +312,11 @@ class MediaPost {
   final int width, height, score;
   final bool isVideo;
   final List<VideoVariant> videoVariants;
+
+  bool get hasId => id > 0 || providerId != null;
+
+  /// The provider's post ID as shown in links, file names, and labels.
+  String get displayId => providerId ?? '$id';
 
   /// Resolution tier of the original file (its short side).
   int get videoQuality => _tier(width, height);
@@ -324,6 +340,7 @@ class MediaPost {
   MediaPost withUrls({required String url, required String previewUrl}) =>
       MediaPost(
         id: id,
+        providerId: providerId,
         url: url,
         previewUrl: previewUrl,
         tags: tags,
@@ -342,7 +359,7 @@ class MediaPost {
       );
 
   Map<String, dynamic> toMap() => {
-    'id': id,
+    'id': providerId ?? id,
     'url': url,
     'previewUrl': previewUrl,
     'tags': tags,
@@ -367,6 +384,14 @@ class MediaPost {
       value is num ? value.toInt() : int.tryParse('$value') ?? 0;
   static int _tier(int width, int height) =>
       width > 0 && height > 0 ? (width < height ? width : height) : height;
+  static String? _providerId(dynamic value) {
+    // Digit-only strings are numeric IDs (or the "0" placeholder for none).
+    final text = value is String ? value.trim() : '';
+    return RegExp(r'^(?=.*[A-Za-z])[A-Za-z0-9]{1,32}$').hasMatch(text)
+        ? text
+        : null;
+  }
+
   static String? _stringOrNull(dynamic value) =>
       value is String && value.trim().isNotEmpty ? value : null;
   static bool _bool(dynamic value) =>
@@ -385,8 +410,8 @@ class SavedPost {
   final Board board;
   final MediaPost post;
 
-  String get identity => post.id > 0
-      ? '${board.name}:id:${post.id}'
+  String get identity => post.hasId
+      ? '${board.name}:id:${post.displayId}'
       : '${board.name}:url:${_withoutCredentials(post.url)}|preview:${_withoutCredentials(post.previewUrl)}|tags:${post.tags.join(' ')}|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
 
   SavedPost authorized(Credentials? credentials) {
