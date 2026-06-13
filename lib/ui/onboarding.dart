@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../core/app_state.dart';
 import '../core/models.dart';
+import '../core/services.dart';
 import 'theme.dart';
 import 'site_catalog.dart';
 
@@ -17,6 +18,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Board _selected = Board.safebooru;
   bool _busy = false;
   String? _error;
+  Future<void> _signInFirst() async {
+    final ok = await showAuthentication(context, widget.state, _selected);
+    if (ok && mounted) await _continue();
+  }
+
   Future<void> _continue() async {
     setState(() {
       _busy = true;
@@ -122,6 +128,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                   Text(
                                     board.requiresAuth
                                         ? 'API key required'
+                                        : board.supportsSignIn
+                                        ? '${board.host} · sign-in optional'
                                         : board.host,
                                     style: const TextStyle(
                                       fontSize: 12,
@@ -187,6 +195,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       )
                     : const Icon(Icons.arrow_forward),
               ),
+              if (_selected.supportsSignIn)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: TextButton.icon(
+                    onPressed: _busy ? null : _signInFirst,
+                    icon: const Icon(Icons.login, size: 18),
+                    label: Text('Sign in to ${_selected.label} (optional)'),
+                  ),
+                ),
               const SizedBox(height: 16),
             ],
           ),
@@ -234,9 +251,16 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
     super.dispose();
   }
 
+  bool get _signIn => widget.board.supportsSignIn;
+
   Future<void> _save() async {
-    if (_user.text.trim().isEmpty || _key.text.trim().isEmpty) {
-      setState(() => _error = 'Enter both your user ID and API key.');
+    if (_user.text.trim().isEmpty ||
+        (_signIn ? _key.text.isEmpty : _key.text.trim().isEmpty)) {
+      setState(
+        () => _error = _signIn
+            ? 'Enter your username and password.'
+            : 'Enter both your user ID and API key.',
+      );
       return;
     }
     setState(() {
@@ -244,15 +268,27 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
       _error = null;
     });
     try {
-      await widget.state.authenticate(
-        widget.board,
-        Credentials(userId: _user.text.trim(), apiKey: _key.text.trim()),
-      );
+      if (_signIn) {
+        await widget.state.signIn(widget.board, _user.text, _key.text);
+      } else {
+        await widget.state.authenticate(
+          widget.board,
+          Credentials(userId: _user.text.trim(), apiKey: _key.text.trim()),
+        );
+      }
       if (mounted) Navigator.pop(context, true);
+    } on SignInRejectedException {
+      if (mounted) {
+        setState(
+          () => _error = 'Sign-in failed. Check your username and password.',
+        );
+      }
     } catch (_) {
       if (mounted) {
         setState(
-          () => _error = 'Could not verify these credentials. Check your API key, user ID, and connection.',
+          () => _error = _signIn
+              ? 'Could not sign in to ${widget.board.label}. Check your connection and try again.'
+              : 'Could not verify these credentials. Check your API key, user ID, and connection.',
         );
       }
     } finally {
@@ -276,13 +312,17 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Connect to ${widget.board.label}',
+              _signIn
+                  ? 'Sign in to ${widget.board.label}'
+                  : 'Connect to ${widget.board.label}',
               style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 12),
-            const Text(
-              'Use the API credentials from your website account. They are encrypted on this device so you only need to connect once.',
-              style: TextStyle(color: Colors.white60, height: 1.5),
+            Text(
+              _signIn
+                  ? 'Optional: signed-in searches can use more tags and include posts hidden from anonymous visitors. Your password is only used to sign in; BooruPlus keeps just the sign-in token, encrypted on this device.'
+                  : 'Use the API credentials from your website account. They are encrypted on this device so you only need to connect once.',
+              style: const TextStyle(color: Colors.white60, height: 1.5),
             ),
             TextButton.icon(
               onPressed: () async {
@@ -292,14 +332,22 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
                 }
               },
               icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('Open account / API key settings'),
+              label: Text(
+                _signIn
+                    ? 'Open ${widget.board.label}'
+                    : 'Open account / API key settings',
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _user,
               enabled: !_busy,
               autocorrect: false,
-              decoration: const InputDecoration(labelText: 'User ID'),
+              keyboardType: _signIn ? TextInputType.emailAddress : null,
+              autofillHints: _signIn ? const [AutofillHints.username] : null,
+              decoration: InputDecoration(
+                labelText: _signIn ? 'Username or email' : 'User ID',
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -308,10 +356,14 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
               obscureText: _obscure,
               autocorrect: false,
               enableSuggestions: false,
+              autofillHints: _signIn ? const [AutofillHints.password] : null,
+              onSubmitted: _busy ? null : (_) => _save(),
               decoration: InputDecoration(
-                labelText: 'API key',
+                labelText: _signIn ? 'Password' : 'API key',
                 suffixIcon: IconButton(
-                  tooltip: 'Show or hide API key',
+                  tooltip: _signIn
+                      ? 'Show or hide password'
+                      : 'Show or hide API key',
                   icon: Icon(
                     _obscure
                         ? Icons.visibility_outlined
@@ -334,7 +386,11 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
               width: double.infinity,
               child: FilledButton(
                 onPressed: _busy ? null : _save,
-                child: Text(_busy ? 'Verifying…' : 'Verify & save connection'),
+                child: Text(
+                  _busy
+                      ? (_signIn ? 'Signing in…' : 'Verifying…')
+                      : (_signIn ? 'Sign in' : 'Verify & save connection'),
+                ),
               ),
             ),
           ],

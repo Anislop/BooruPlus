@@ -11,7 +11,9 @@ class AppState extends ChangeNotifier {
     BoardRepository? repository,
     SettingsStore? store,
     PostStore? postStore,
+    AccountRepository? accounts,
   }) : _repository = repository ?? PlatformBoardRepository(),
+       _accounts = accounts ?? PlatformAccountRepository(),
        _store = store ?? LocalSettingsStore(),
        _postStore =
            postStore ??
@@ -19,6 +21,7 @@ class AppState extends ChangeNotifier {
                ? LocalPostStore()
                : MemoryPostStore());
   final BoardRepository _repository;
+  final AccountRepository _accounts;
   final SettingsStore _store;
   final PostStore _postStore;
   AppSettings _settings = const AppSettings();
@@ -33,6 +36,13 @@ class AppState extends ChangeNotifier {
   int? _randomSeed;
   Credentials? _credentials;
   final Map<Board, Credentials?> _credentialsByBoard = {};
+  // One renewal per board at a time: concurrent requests share it, so a
+  // rotated refresh token is never spent twice.
+  final Map<Board, Future<Credentials?>> _sessionRenewals = {};
+  // Sankaku's signed-in tag limit is not documented. It is learned from the
+  // provider's tag-limit refusal; until then exclusions are not trimmed.
+  int? _sankakuSignedInTagLimit;
+  String? _notice;
   List<SavedPost> _favoritePosts = const [];
   List<SavedPost> _hiddenPosts = const [];
   // Identity indexes keep favorite/hidden checks O(1) per tile and per
@@ -56,6 +66,15 @@ class AppState extends ChangeNotifier {
   List<String> get tags => List.unmodifiable(_tags);
   bool get loading => _loading;
   String? get error => _error;
+
+  /// A one-time message for the user, such as an expired sign-in. Reading it
+  /// clears it.
+  String? takeNotice() {
+    final notice = _notice;
+    _notice = null;
+    return notice;
+  }
+
   bool get hasMore => _hasMore;
   bool get initialized => _initialized;
   List<List<String>> get savedQueries =>
@@ -167,11 +186,14 @@ class AppState extends ChangeNotifier {
       return const [];
     }
     try {
-      final response = await _repository.autocomplete(
-        board: board,
-        query: value,
-        limit: 20,
-        credentials: _credentials,
+      final response = await _withSession(
+        board,
+        (credentials) => _repository.autocomplete(
+          board: board,
+          query: value,
+          limit: 20,
+          credentials: credentials,
+        ),
       );
       if (generation != _autocompleteGeneration) return const [];
       return response
@@ -205,7 +227,7 @@ class AppState extends ChangeNotifier {
             .toList(growable: false),
       );
       for (final saved in [..._favoritePosts, ..._hiddenPosts]) {
-        if (saved.board.requiresAuth &&
+        if (saved.board.supportsAuth &&
             !_credentialsByBoard.containsKey(saved.board)) {
           _credentialsByBoard[saved.board] = await _store.loadCredentials(
             saved.board,
@@ -520,6 +542,7 @@ class AppState extends ChangeNotifier {
   Future<void> forgetCredentials(Board value) async {
     await _store.removeCredentials(value);
     _credentialsByBoard.remove(value);
+    if (value == Board.sankaku) _sankakuSignedInTagLimit = null;
     if (value == _board) {
       _invalidate();
       _credentials = null;
@@ -529,6 +552,28 @@ class AppState extends ChangeNotifier {
           : null;
     }
     notifyListeners();
+    // Optional sign-in: keep browsing anonymously.
+    if (value == _board && !value.requiresAuth) {
+      await _load(reset: true, generation: _generation);
+    }
+  }
+
+  /// Signs in to a [BoardInfo.supportsSignIn] board. Only the returned
+  /// session is stored; [password] is passed to the platform and dropped.
+  Future<void> signIn(Board value, String login, String password) async {
+    if (!value.supportsSignIn) {
+      throw ArgumentError('${value.label} does not support signing in.');
+    }
+    if (login.trim().isEmpty || password.isEmpty) {
+      throw ArgumentError('A username and password are required.');
+    }
+    final credentials = await _accounts.signIn(
+      board: value,
+      login: login.trim(),
+      password: password,
+    );
+    if (value == Board.sankaku) _sankakuSignedInTagLimit = null;
+    await _useCredentials(value, credentials);
   }
 
   Future<bool> authenticate(Board value, Credentials credentials) async {
@@ -543,6 +588,11 @@ class AppState extends ChangeNotifier {
       random: false,
       credentials: credentials,
     );
+    await _useCredentials(value, credentials);
+    return true;
+  }
+
+  Future<void> _useCredentials(Board value, Credentials credentials) async {
     await _store.saveCredentials(value, credentials);
     _credentialsByBoard[value] = credentials;
     if (value == _board) {
@@ -552,7 +602,68 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       await _load(reset: true, generation: _generation);
     }
-    return true;
+  }
+
+  /// Runs [request] with [board]'s stored credentials. A sign-in session is
+  /// renewed when it is about to expire or the provider refuses it; one that
+  /// can no longer be renewed is dropped so browsing continues anonymously.
+  Future<T> _withSession<T>(
+    Board board,
+    Future<T> Function(Credentials? credentials) request,
+  ) async {
+    var credentials = _credentialsByBoard[board];
+    if (!board.supportsSignIn || credentials == null) {
+      return request(credentials);
+    }
+    if (credentials.expiresSoon(DateTime.now())) {
+      try {
+        credentials = await _renewSession(board, credentials);
+      } catch (_) {
+        // A renewal that failed for another reason (such as the network)
+        // keeps the stored session; the request itself decides.
+      }
+    }
+    try {
+      return await request(credentials);
+    } on AuthExpiredException {
+      if (credentials == null) rethrow;
+      return request(await _renewSession(board, credentials));
+    }
+  }
+
+  Future<Credentials?> _renewSession(Board board, Credentials stale) =>
+      _sessionRenewals[board] ??= _replaceSession(board, stale).whenComplete(
+        // A block body: returning the removed future would await itself.
+        () {
+          _sessionRenewals.remove(board);
+        },
+      );
+
+  Future<Credentials?> _replaceSession(Board board, Credentials stale) async {
+    Credentials? fresh;
+    try {
+      if (stale.refreshToken.isNotEmpty) {
+        fresh = await _accounts.refreshSignIn(board: board, credentials: stale);
+      }
+    } on SignInRejectedException {
+      fresh = null;
+    }
+    // The user signed out or in again while the renewal was in flight.
+    if (!identical(_credentialsByBoard[board], stale)) {
+      return _credentialsByBoard[board];
+    }
+    _credentialsByBoard[board] = fresh;
+    if (board == _board) _credentials = fresh;
+    if (fresh == null) {
+      if (board == Board.sankaku) _sankakuSignedInTagLimit = null;
+      _notice =
+          'Your ${board.label} sign-in expired. Sign in again in Settings.';
+      notifyListeners();
+      await _store.removeCredentials(board);
+    } else {
+      await _store.saveCredentials(board, fresh);
+    }
+    return fresh;
   }
 
   Future<void> _load({required bool reset, required int generation}) async {
@@ -576,15 +687,7 @@ class AppState extends ChangeNotifier {
         attempt < 3 && accepted.length < _settings.batchSize;
         attempt++
       ) {
-        final raw = await _repository.fetch(
-          board: _board!,
-          tags: _queryTags(),
-          limit: _settings.batchSize,
-          page: currentPage,
-          random: _tags.isEmpty,
-          randomSeed: _randomSeed,
-          credentials: _credentials,
-        );
+        final raw = await _fetchFeedPage(_board!, currentPage);
         if (generation != _generation) return;
         lastFetchedPage = currentPage;
         if (raw.isEmpty) {
@@ -613,7 +716,38 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  List<String> _queryTags() {
+  Future<List<Map<String, dynamic>>> _fetchFeedPage(Board board, int page) {
+    Future<List<Map<String, dynamic>>> fetch() => _withSession(
+      board,
+      (credentials) => _repository.fetch(
+        board: board,
+        tags: _queryTags(signedIn: credentials != null),
+        limit: _settings.batchSize,
+        page: page,
+        random: _tags.isEmpty,
+        randomSeed: _randomSeed,
+        credentials: credentials,
+      ),
+    );
+    return fetch().catchError((Object error) {
+      // A signed-in Sankaku search hit the account's limit: remember it and
+      // retry once with the exclusions trimmed to fit.
+      final limit = (error as TagLimitException).limit;
+      final signedIn = _credentialsByBoard[board] != null;
+      final before = _queryTags(signedIn: signedIn);
+      if (board != Board.sankaku ||
+          !signedIn ||
+          limit == null ||
+          limit == _sankakuSignedInTagLimit) {
+        throw error;
+      }
+      _sankakuSignedInTagLimit = limit;
+      if (listEquals(before, _queryTags(signedIn: signedIn))) throw error;
+      return fetch();
+    }, test: (error) => error is TagLimitException);
+  }
+
+  List<String> _queryTags({bool signedIn = false}) {
     final exclusions = [
       ..._settings.blacklist.map((tag) => '-$tag'),
       if (_settings.excludeAi) '-$_aiTag',
@@ -623,6 +757,7 @@ class AppState extends ChangeNotifier {
     // negated or not, plus rating:q/rating:e (order:, rating:s and other
     // metatags are free). Exclusions are rejected unless a positive tag is
     // present, so the unfiltered feed relies on local filtering instead.
+    // Signed-in searches allow more; their limit is learned on refusal.
     if (_board == Board.sankaku) {
       final query = [
         ..._tags,
@@ -631,10 +766,13 @@ class AppState extends ChangeNotifier {
       final hasPositive = _tags.any(
         (tag) => _isOrdinaryTag(tag) && !tag.startsWith('-'),
       );
-      final budget = (4 - query.where(_countsTowardSankakuLimit).length).clamp(
-        0,
-        4,
-      );
+      final limit = signedIn ? _sankakuSignedInTagLimit : 4;
+      final budget = limit == null
+          ? exclusions.length
+          : (limit - query.where(_countsTowardSankakuLimit).length).clamp(
+              0,
+              limit,
+            );
       return [...query, if (hasPositive) ...exclusions.take(budget)];
     }
     // Anonymous Danbooru searches accept only two ordinary tags. Keep the
@@ -762,15 +900,18 @@ class AppState extends ChangeNotifier {
         final batch = posts.skip(start).take(40).toList(growable: false);
         final wanted = {for (final saved in batch) saved.identity};
         try {
-          final raw = await _repository.fetch(
-            board: board,
-            tags: [
-              'id:${batch.map((saved) => saved.post.displayId).join(',')}',
-            ],
-            limit: batch.length,
-            page: 0,
-            random: false,
-            credentials: _credentialsByBoard[board],
+          final raw = await _withSession(
+            board,
+            (credentials) => _repository.fetch(
+              board: board,
+              tags: [
+                'id:${batch.map((saved) => saved.post.displayId).join(',')}',
+              ],
+              limit: batch.length,
+              page: 0,
+              random: false,
+              credentials: credentials,
+            ),
           );
           for (final fresh in raw.map(MediaPost.fromMap)) {
             final identity = SavedPost(board: board, post: fresh).identity;
@@ -810,6 +951,17 @@ class AppState extends ChangeNotifier {
     _loading = false;
   }
 
-  String _friendly(Object error) =>
-      'Unable to load ${_board?.label ?? 'the selected board'}. Check your connection and search tag limits. If this website needs an API key, reconnect in Settings.';
+  String _friendly(Object error) {
+    final board = _board;
+    if (error is TagLimitException && board != null) {
+      final limit = error.limit == null
+          ? 'fewer tags'
+          : 'up to ${error.limit} tags';
+      final hint = board.supportsSignIn && _credentials == null
+          ? ' Sign in from Settings to search with more tags.'
+          : '';
+      return '${board.label} allows $limit per search, including rating and excluded tags.$hint';
+    }
+    return 'Unable to load ${board?.label ?? 'the selected board'}. Check your connection and search tag limits. If this website needs an API key, reconnect in Settings.';
+  }
 }

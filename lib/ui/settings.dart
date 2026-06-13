@@ -651,7 +651,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         style: TextStyle(color: Colors.white54, fontSize: 13),
                       ),
                       for (final board in Board.values.where(
-                        (b) => b.requiresAuth,
+                        (b) => b.supportsAuth,
                       ))
                         FutureBuilder<Credentials?>(
                           future: widget.state.credentialsFor(board),
@@ -665,16 +665,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                             title: Text(board.label),
                             subtitle: Text(
-                              snapshot.data == null
+                              board.supportsSignIn
+                                  ? snapshot.data == null
+                                        ? 'Not signed in (optional)'
+                                        : 'Signed in as ${snapshot.data!.userId}'
+                                  : snapshot.data == null
                                   ? 'Not connected'
                                   : 'Credentials saved securely',
                             ),
                             trailing: Wrap(
                               children: [
                                 IconButton(
-                                  tooltip: 'Connect ${board.label}',
-                                  icon: const Icon(
-                                    Icons.edit_outlined,
+                                  tooltip: board.supportsSignIn
+                                      ? 'Sign in to ${board.label}'
+                                      : 'Connect ${board.label}',
+                                  icon: Icon(
+                                    board.supportsSignIn
+                                        ? Icons.login
+                                        : Icons.edit_outlined,
                                     size: 20,
                                   ),
                                   onPressed: () async {
@@ -688,8 +696,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ),
                                 if (snapshot.data != null)
                                   IconButton(
-                                    tooltip:
-                                        'Forget ${board.label} credentials',
+                                    tooltip: board.supportsSignIn
+                                        ? 'Sign out of ${board.label}'
+                                        : 'Forget ${board.label} credentials',
                                     icon: const Icon(Icons.link_off, size: 20),
                                     onPressed: () async {
                                       try {

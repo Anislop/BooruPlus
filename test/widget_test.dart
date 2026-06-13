@@ -3,6 +3,7 @@ import 'package:booruplus/core/models.dart';
 import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_viewer.dart';
+import 'package:booruplus/ui/onboarding.dart';
 import 'package:booruplus/ui/search_guide.dart';
 import 'package:booruplus/ui/site_catalog.dart';
 import 'package:booruplus/ui/tag_input.dart';
@@ -11,9 +12,87 @@ import 'package:booruplus/ui/settings.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'core_test.dart' show MemoryStore, FakeRepo;
+import 'core_test.dart' show FakeAccounts, MemoryStore, FakeRepo;
 
 void main() {
+  testWidgets('Sankaku sign-in sheet reports a refused password', (
+    tester,
+  ) async {
+    final store = MemoryStore()..selected = Board.sankaku;
+    final accounts = FakeAccounts();
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: store,
+      accounts: accounts,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: AuthenticationSheet(state: state, board: Board.sankaku),
+        ),
+      ),
+    );
+    expect(find.text('Sign in to Sankaku Complex'), findsOneWidget);
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Username or email'),
+      'reader',
+    );
+    await tester.enterText(find.widgetWithText(TextField, 'Password'), 'bad');
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Sign-in failed. Check your username and password.'),
+      findsOneWidget,
+    );
+    expect(accounts.logins, [('reader', 'bad')]);
+    expect(store.credentials, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('Settings signs in to Sankaku and shows the account', (
+    tester,
+  ) async {
+    final store = MemoryStore()..selected = Board.safebooru;
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: store,
+      accounts: FakeAccounts(
+        signInResult: const Credentials(userId: 'reader', apiKey: 'token'),
+      ),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: SettingsScreen(state: state),
+      ),
+    );
+    final signIn = find.byTooltip('Sign in to Sankaku Complex');
+    await tester.scrollUntilVisible(
+      signIn,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Not signed in (optional)'), findsOneWidget);
+    await tester.tap(signIn);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Username or email'),
+      'reader',
+    );
+    await tester.enterText(find.widgetWithText(TextField, 'Password'), 'pw');
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign in'));
+    await tester.pumpAndSettle();
+    expect(store.credentials[Board.sankaku]?.apiKey, 'token');
+    expect(find.text('Signed in as reader'), findsOneWidget);
+    expect(find.byTooltip('Sign out of Sankaku Complex'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('Save commits an unfinished blacklist tag', (tester) async {
     final store = MemoryStore();
     final state = AppState(repository: FakeRepo(const [[]]), store: store);
@@ -30,11 +109,15 @@ void main() {
       scrollable: find.byType(Scrollable).first,
     );
     await tester.enterText(find.byType(TextField), 'blocked_tag');
+    // Finish the caret reveal first, or it scrolls back after the drag; then
+    // let the drag's fling settle, since a scrolling list ignores taps.
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('Save preferences'),
       250,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Save preferences'));
     await tester.pumpAndSettle();
     expect(store.settings.blacklist, contains('blocked_tag'));
