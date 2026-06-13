@@ -25,6 +25,54 @@ abstract interface class BoardRepository {
   });
 }
 
+/// Optional password sign-in for [BoardInfo.supportsSignIn] boards.
+abstract interface class AccountRepository {
+  /// Exchanges [password] for a session. Throws [SignInRejectedException]
+  /// for a refused login.
+  Future<Credentials> signIn({
+    required Board board,
+    required String login,
+    required String password,
+  });
+
+  /// Renews [credentials]. Throws [SignInRejectedException] when the session
+  /// can no longer be renewed.
+  Future<Credentials> refreshSignIn({
+    required Board board,
+    required Credentials credentials,
+  });
+}
+
+/// The provider refused a password or refresh token.
+class SignInRejectedException implements Exception {
+  const SignInRejectedException();
+}
+
+/// The provider refused the session's access token.
+class AuthExpiredException implements Exception {
+  const AuthExpiredException();
+}
+
+/// The search used more counted tags than the provider allows.
+class TagLimitException implements Exception {
+  const TagLimitException(this.limit);
+  final int? limit;
+}
+
+/// Maps the bridge's auth and tag-limit codes to typed exceptions.
+Object _platformError(Object error) {
+  if (error is! PlatformException) return error;
+  return switch (error.code) {
+    'AUTH_REJECTED' => const SignInRejectedException(),
+    'AUTH_EXPIRED' => const AuthExpiredException(),
+    'TAG_LIMIT' => TagLimitException(switch (error.details) {
+      {'limit': final num limit} => limit.toInt(),
+      _ => null,
+    }),
+    _ => error,
+  };
+}
+
 abstract interface class SettingsStore {
   Future<AppSettings> loadSettings();
   Future<void> saveSettings(AppSettings settings);
@@ -127,16 +175,21 @@ class PlatformBoardRepository implements BoardRepository {
     int? randomSeed,
     Credentials? credentials,
   }) async {
-    final response = await channel.invokeMethod<List<dynamic>>('fetch', {
-      'board': board.name,
-      'tags': tags,
-      'limit': limit,
-      'page': page,
-      'random': random,
-      'randomSeed': randomSeed,
-      'apiKey': credentials?.apiKey,
-      'userId': credentials?.userId,
-    });
+    final List<dynamic>? response;
+    try {
+      response = await channel.invokeMethod<List<dynamic>>('fetch', {
+        'board': board.name,
+        'tags': tags,
+        'limit': limit,
+        'page': page,
+        'random': random,
+        'randomSeed': randomSeed,
+        'apiKey': credentials?.apiKey,
+        'userId': credentials?.userId,
+      });
+    } catch (error) {
+      throw _platformError(error);
+    }
     return (response ?? const [])
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
@@ -150,17 +203,64 @@ class PlatformBoardRepository implements BoardRepository {
     required int limit,
     Credentials? credentials,
   }) async {
-    final response = await channel.invokeMethod<List<dynamic>>('autocomplete', {
-      'board': board.name,
-      'query': query,
-      'limit': limit,
-      'apiKey': credentials?.apiKey,
-      'userId': credentials?.userId,
-    });
+    final List<dynamic>? response;
+    try {
+      response = await channel.invokeMethod<List<dynamic>>('autocomplete', {
+        'board': board.name,
+        'query': query,
+        'limit': limit,
+        'apiKey': credentials?.apiKey,
+        'userId': credentials?.userId,
+      });
+    } catch (error) {
+      throw _platformError(error);
+    }
     return (response ?? const [])
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
+  }
+}
+
+class PlatformAccountRepository implements AccountRepository {
+  PlatformAccountRepository({MethodChannel? channel})
+    : channel = channel ?? const MethodChannel('booruplus/platform');
+  final MethodChannel channel;
+
+  @override
+  Future<Credentials> signIn({
+    required Board board,
+    required String login,
+    required String password,
+  }) => _session('signIn', {
+    'board': board.name,
+    'login': login,
+    'password': password,
+  });
+
+  @override
+  Future<Credentials> refreshSignIn({
+    required Board board,
+    required Credentials credentials,
+  }) => _session('refreshSignIn', {
+    'board': board.name,
+    'userId': credentials.userId,
+    'refreshToken': credentials.refreshToken,
+  });
+
+  Future<Credentials> _session(String method, Map<String, Object?> args) async {
+    final Map<dynamic, dynamic>? response;
+    try {
+      response = await channel.invokeMethod<Map<dynamic, dynamic>>(
+        method,
+        args,
+      );
+    } catch (error) {
+      throw _platformError(error);
+    }
+    final credentials = Credentials.fromMap(response ?? const {});
+    if (!credentials.isValid) throw const SignInRejectedException();
+    return credentials;
   }
 }
 
@@ -208,18 +308,12 @@ class LocalSettingsStore implements SettingsStore {
   Future<Credentials?> loadCredentials(Board board) async {
     final encoded = await _secure.read(key: _key(board));
     if (encoded == null) return null;
-    final value = jsonDecode(encoded) as Map;
-    return Credentials(
-      userId: '${value['userId'] ?? ''}',
-      apiKey: '${value['apiKey'] ?? ''}',
-    );
+    return Credentials.fromMap(jsonDecode(encoded) as Map);
   }
 
   @override
-  Future<void> saveCredentials(Board board, Credentials c) => _secure.write(
-    key: _key(board),
-    value: jsonEncode({'userId': c.userId, 'apiKey': c.apiKey}),
-  );
+  Future<void> saveCredentials(Board board, Credentials c) =>
+      _secure.write(key: _key(board), value: jsonEncode(c.toMap()));
   @override
   Future<void> removeCredentials(Board board) =>
       _secure.delete(key: _key(board));

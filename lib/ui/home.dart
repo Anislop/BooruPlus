@@ -34,12 +34,21 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.state.loadMore();
       }
     });
+    widget.state.addListener(_showNotice);
   }
 
   @override
   void dispose() {
+    widget.state.removeListener(_showNotice);
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _showNotice() {
+    if (!mounted) return;
+    final notice = widget.state.takeNotice();
+    if (notice == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(notice)));
   }
 
   void _search(List<String> tags) {

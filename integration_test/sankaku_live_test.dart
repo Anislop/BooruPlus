@@ -4,7 +4,6 @@ import 'dart:ui' as ui;
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -12,21 +11,31 @@ import 'package:integration_test/integration_test.dart';
 /// and access to sankakuapi.com. Sankaku's API changes without notice (post
 /// IDs switched from numbers to opaque strings), so this covers the parts
 /// Dart fakes cannot: paging tokens, parsing, previews, and ID lookups.
+///
+/// Sign-in checks that need an account run only when one is supplied:
+/// `--dart-define=SANKAKU_LOGIN=... --dart-define=SANKAKU_PASSWORD=...`.
+/// The values are compiled into the test build, so use a disposable account
+/// and never commit them.
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   final repository = PlatformBoardRepository();
+  final accounts = PlatformAccountRepository();
+  const login = String.fromEnvironment('SANKAKU_LOGIN');
+  const password = String.fromEnvironment('SANKAKU_PASSWORD');
 
   Future<List<MediaPost>> fetch(
     List<String> tags, {
     int page = 0,
     int limit = 30,
     bool random = false,
+    Credentials? credentials,
   }) async => (await repository.fetch(
     board: Board.sankaku,
     tags: tags,
     limit: limit,
     page: page,
     random: random,
+    credentials: credentials,
   )).map(MediaPost.fromMap).toList();
 
   String key(MediaPost post) =>
@@ -97,7 +106,75 @@ void main() {
 
     await expectLater(
       fetch(const ['blue_eyes', 'long_hair', 'smile', 'dress', 'bow']),
-      throwsA(isA<PlatformException>()),
+      throwsA(isA<TagLimitException>().having((e) => e.limit, 'limit', 4)),
     );
   });
+
+  testWidgets('Sankaku refuses bad sign-ins and stale tokens', (tester) async {
+    await expectLater(
+      accounts.signIn(
+        board: Board.sankaku,
+        login: 'booruplus-invalid-login-probe',
+        password: 'not-a-password',
+      ),
+      throwsA(isA<SignInRejectedException>()),
+    );
+    await expectLater(
+      accounts.refreshSignIn(
+        board: Board.sankaku,
+        credentials: const Credentials(
+          userId: 'probe',
+          apiKey: 'invalid',
+          refreshToken: 'invalid',
+        ),
+      ),
+      throwsA(isA<SignInRejectedException>()),
+    );
+    await expectLater(
+      fetch(const [
+        'blue_eyes',
+      ], credentials: const Credentials(userId: 'probe', apiKey: 'invalid')),
+      throwsA(isA<AuthExpiredException>()),
+    );
+  });
+
+  testWidgets('Sankaku sign-in lifts the tag limit and renews', (tester) async {
+    final session = await accounts.signIn(
+      board: Board.sankaku,
+      login: login,
+      password: password,
+    );
+    expect(session.isValid, isTrue);
+    expect(session.refreshToken, isNotEmpty);
+    final tags = [
+      'blue_eyes',
+      'long_hair',
+      'smile',
+      'dress',
+      'bow',
+      '-twintails',
+    ];
+    expect(await fetch(tags, credentials: session), isNotEmpty);
+
+    // Measure the signed-in limit with tags every post can satisfy.
+    int? limit;
+    final probe = ['blue_eyes'];
+    while (limit == null && probe.length < 40) {
+      probe.add('-booruplus_absent_tag_${probe.length}');
+      try {
+        await fetch(probe, limit: 1, credentials: session);
+      } on TagLimitException catch (error) {
+        limit = error.limit ?? probe.length - 1;
+      }
+    }
+    debugPrint('Sankaku signed-in tag limit: ${limit ?? '40 or more'}');
+    expect(limit ?? 40, greaterThan(4));
+
+    final renewed = await accounts.refreshSignIn(
+      board: Board.sankaku,
+      credentials: session,
+    );
+    expect(renewed.isValid, isTrue);
+    expect(await fetch(const ['blue_eyes'], credentials: renewed), isNotEmpty);
+  }, skip: login.isEmpty || password.isEmpty);
 }

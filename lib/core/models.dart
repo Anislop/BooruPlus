@@ -39,6 +39,13 @@ extension BoardInfo on Board {
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
 
+  /// Boards with an optional username/password sign-in. The password is
+  /// exchanged natively for a session token; only the token is stored.
+  bool get supportsSignIn => this == Board.sankaku;
+
+  /// Boards whose connection is managed in Settings.
+  bool get supportsAuth => requiresAuth || supportsSignIn;
+
   String get authUrl => switch (this) {
     Board.rule34 => 'https://rule34.xxx/index.php?page=account&s=options',
     Board.gelbooru => 'https://gelbooru.com/index.php?page=account&s=options',
@@ -200,11 +207,46 @@ class VideoVariant {
   }
 }
 
+/// API credentials, or for [BoardInfo.supportsSignIn] boards a session:
+/// [userId] is the account name, [apiKey] the access token, plus an optional
+/// [refreshToken] and access-token expiry.
 class Credentials {
-  const Credentials({required this.userId, required this.apiKey});
+  const Credentials({
+    required this.userId,
+    required this.apiKey,
+    this.refreshToken = '',
+    this.expiresAt,
+  });
   final String userId;
   final String apiKey;
+  final String refreshToken;
+  final DateTime? expiresAt;
   bool get isValid => userId.trim().isNotEmpty && apiKey.trim().isNotEmpty;
+
+  /// Whether the access token should be renewed before use. Unknown expiry
+  /// is treated as valid; a rejected request triggers renewal instead.
+  bool expiresSoon(DateTime now) =>
+      expiresAt != null &&
+      !now.isBefore(expiresAt!.subtract(const Duration(minutes: 5)));
+
+  Map<String, dynamic> toMap() => {
+    'userId': userId,
+    'apiKey': apiKey,
+    if (refreshToken.isNotEmpty) 'refreshToken': refreshToken,
+    if (expiresAt != null) 'expiresAt': expiresAt!.millisecondsSinceEpoch,
+  };
+
+  factory Credentials.fromMap(Map<dynamic, dynamic> map) {
+    final expiresAt = map['expiresAt'];
+    return Credentials(
+      userId: '${map['userId'] ?? ''}',
+      apiKey: '${map['apiKey'] ?? map['accessToken'] ?? ''}',
+      refreshToken: '${map['refreshToken'] ?? ''}',
+      expiresAt: expiresAt is num
+          ? DateTime.fromMillisecondsSinceEpoch(expiresAt.toInt())
+          : null,
+    );
+  }
 }
 
 class MediaPost {

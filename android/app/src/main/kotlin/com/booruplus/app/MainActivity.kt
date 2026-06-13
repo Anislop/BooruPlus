@@ -81,6 +81,8 @@ class MainActivity : FlutterActivity() {
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
             "setKeepScreenOn" -> setKeepScreenOn(call, result)
+            "signIn" -> signIn(call, result)
+            "refreshSignIn" -> refreshSignIn(call, result)
             else -> result.notImplemented()
         }
     }
@@ -108,7 +110,8 @@ class MainActivity : FlutterActivity() {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
         }
         if (board in setOf("konachan", "yandere")) { result.success(emptyList<Map<String, Any?>>()); return }
-        if (board == "sankaku") { background(result) { sankaku.autocomplete(query, limit) }; return }
+        // Sankaku sends its optional session's access token as apiKey.
+        if (board == "sankaku") { background(result) { sankaku.autocomplete(query, limit, key) }; return }
         background(result) {
             val api = when (board) {
                 "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
@@ -170,14 +173,36 @@ class MainActivity : FlutterActivity() {
                 val code = when (error) {
                     is SecurityException -> "DIRECTORY_ACCESS"
                     is IllegalArgumentException -> "INVALID_REQUEST"
+                    is SankakuAuthException -> if (error.expired) "AUTH_EXPIRED" else "AUTH_REJECTED"
+                    is SankakuTagLimitException -> "TAG_LIMIT"
                     else -> "REQUEST_FAILED"
                 }
-                // Never expose exception messages: upstream errors may contain authenticated URLs.
-                runOnUiThread { if (pending.remove(result)) result.error(code, "Request failed. Check the connection, credentials, or folder access.", null) }
+                // Only the provider's numeric tag limit is passed on as details.
+                val details = (error as? SankakuTagLimitException)?.limit?.let { mapOf("limit" to it) }
+                // Never expose exception messages: upstream errors may contain authenticated URLs or tokens.
+                runOnUiThread { if (pending.remove(result)) result.error(code, "Request failed. Check the connection, credentials, or folder access.", details) }
             } catch (_: LinkageError) {
                 runOnUiThread { if (pending.remove(result)) result.error("COMPATIBILITY", "The API library is not compatible with this Android runtime.", null) }
             }
         }
+    }
+
+    /** Sankaku-only password sign-in; returns the session map from [sankakuSession]. */
+    private fun signIn(call: MethodCall, result: MethodChannel.Result) {
+        if (call.argument<String>("board") != "sankaku") { result.error("INVALID_BOARD", "Sign-in is not supported for this imageboard", null); return }
+        val login = call.argument<String>("login")?.trim()
+        val password = call.argument<String>("password")
+        if (login.isNullOrEmpty() || password.isNullOrEmpty()) {
+            result.error("INVALID_REQUEST", "A username and password are required", null); return
+        }
+        background(result) { sankaku.signIn(login, password) }
+    }
+
+    private fun refreshSignIn(call: MethodCall, result: MethodChannel.Result) {
+        if (call.argument<String>("board") != "sankaku") { result.error("INVALID_BOARD", "Sign-in is not supported for this imageboard", null); return }
+        val refreshToken = call.argument<String>("refreshToken")
+        if (refreshToken.isNullOrBlank()) { result.error("AUTH_REJECTED", "Sign in again", null); return }
+        background(result) { sankaku.refreshSignIn(refreshToken, call.argument<String>("userId") ?: "") }
     }
 
     private fun fetch(call: MethodCall, result: MethodChannel.Result) {
@@ -204,6 +229,7 @@ class MainActivity : FlutterActivity() {
                 sankaku.fetch(
                     tags, page, limit, random, makeCursorKey(board, tags, limit, random, if (random) seed else 0),
                     avifPreviews = Build.VERSION.SDK_INT >= 31,
+                    accessToken = key,
                 ) { closing || Thread.currentThread().isInterrupted }
             }
             return

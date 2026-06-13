@@ -1,17 +1,27 @@
 package com.booruplus.app
 
 import okhttp3.HttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 
+/** Sankaku refused a password or refresh token, or a bearer token expired. */
+internal class SankakuAuthException(val expired: Boolean) : IOException("Sankaku sign-in rejected")
+
+/** The search used more counted tags than the account allows; [limit] is Sankaku's reported maximum. */
+internal class SankakuTagLimitException(val limit: Int?) : IOException("Sankaku tag limit")
+
 /**
- * Anonymous client for the Sankaku Complex API at sankakuapi.com (the
+ * Client for the Sankaku Complex API at sankakuapi.com (the
  * capi-v2.sankakucomplex.com host used by older wrappers now refuses requests).
+ * Requests are anonymous unless Dart passes an access token.
  *
  * Provider behavior this relies on:
  * - `/posts/keyset` returns `{meta: {next}, data: [...]}` with full typed tags.
@@ -22,6 +32,13 @@ import java.util.concurrent.ConcurrentHashMap
  *   saved posts by looking them up again with an `id:` search.
  * - Pages can be shorter than requested because the server filters posts; a
  *   null `next` token is the only end marker.
+ * - `POST /auth/token` with `{login, password}` returns `access_token`,
+ *   `refresh_token`, and their lifetimes in `access_token_ttl` /
+ *   `refresh_token_ttl` seconds (the access token is also a JWT with `exp`).
+ *   Posting `{refresh_token}` to the same endpoint renews the session. A bad
+ *   password is HTTP 403; a bad or expired bearer token is HTTP 401.
+ * - Tag-limit refusals are HTTP 429 with a code ending in `tags-limit` and the
+ *   allowed count in `param`.
  */
 internal class SankakuApi(private val client: OkHttpClient, private val userAgent: String) {
     // "$cursorKey\u0003$page" -> keyset token for that Flutter page. An empty
@@ -35,6 +52,7 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         random: Boolean,
         cursorKey: String,
         avifPreviews: Boolean,
+        accessToken: String?,
         cancelled: () -> Boolean,
     ): List<Map<String, Any?>> {
         if (page == 0) cursors.keys.filter { it.startsWith("$cursorKey\u0003") }.forEach { cursors.remove(it) }
@@ -47,7 +65,7 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
             // Offset paging still serves the first 50 pages anonymously.
             val batch = request(endpoint("posts").addQueryParameter("page", (page + 1).toString())
                 .addQueryParameter("limit", minOf(limit, PAGE_SIZE).toString())
-                .addQueryParameter("tags", query).build())
+                .addQueryParameter("tags", query).build(), accessToken)
             val array = batch as? JSONArray ?: (batch as JSONObject).optJSONArray("data") ?: JSONArray()
             return posts(array, avifPreviews, limit)
         }
@@ -63,7 +81,7 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
             val url = endpoint("posts/keyset").addQueryParameter("limit", size.toString())
                 .addQueryParameter("tags", query)
             if (!token.isNullOrEmpty()) url.addQueryParameter("next", token)
-            val body = request(url.build()) as? JSONObject ?: throw IOException("Unexpected response")
+            val body = request(url.build(), accessToken) as? JSONObject ?: throw IOException("Unexpected response")
             result.addAll(posts(body.optJSONArray("data") ?: JSONArray(), avifPreviews, limit - result.size))
             token = jsonString(body.optJSONObject("meta"), "next") ?: ""
             if (token.isEmpty()) break
@@ -72,11 +90,42 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         return result
     }
 
-    fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
+    fun autocomplete(query: String, limit: Int, accessToken: String?): List<Map<String, Any?>> {
         val value = query.trim().trimStart('-', '~').trim()
         if (value.isEmpty()) return emptyList()
-        val body = request(endpoint("tags/autosuggestCreating").addQueryParameter("tag", value).build())
+        val body = request(endpoint("tags/autosuggestCreating").addQueryParameter("tag", value).build(), accessToken)
         return parseSankakuSuggestions(body as? JSONArray ?: JSONArray(), limit)
+    }
+
+    /** Exchanges a password for a session map; the password is not kept. */
+    fun signIn(login: String, password: String): Map<String, Any?> {
+        val body = JSONObject().put("login", login).put("password", password)
+        return sankakuSession(authenticate(body), fallbackUser = login, fallbackRefresh = null)
+    }
+
+    /** Renews a session. Keeps [refreshToken] if the response does not rotate it. */
+    fun refreshSignIn(refreshToken: String, userId: String): Map<String, Any?> {
+        val body = JSONObject().put("refresh_token", refreshToken)
+        return sankakuSession(authenticate(body), fallbackUser = userId, fallbackRefresh = refreshToken)
+    }
+
+    private fun authenticate(body: JSONObject): JSONObject {
+        val request = Request.Builder().url(endpoint("auth/token").build())
+            .header("User-Agent", userAgent)
+            .header("Accept", "application/json")
+            .post(body.toString().toRequestBody(JSON))
+            .build()
+        client.newCall(request).execute().use { response ->
+            // A bad password is 403 and a bad refresh token 401. Any other
+            // client error is also a refusal, so a changed endpoint signs out
+            // instead of failing every request; server and network failures
+            // stay generic and keep the session.
+            if (response.code in 400..499 && response.code != 429) throw SankakuAuthException(expired = false)
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            val parsed = JSONObject(response.body?.string()?.trim() ?: throw IOException("Empty response"))
+            if (!parsed.optBoolean("success", true)) throw SankakuAuthException(expired = false)
+            return parsed
+        }
     }
 
     private fun posts(array: JSONArray, avifPreviews: Boolean, limit: Int): List<Map<String, Any?>> {
@@ -93,15 +142,15 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         .scheme("https").host(API_HOST).addPathSegments(path)
         .addQueryParameter("lang", "en")
 
-    private fun request(url: HttpUrl): Any {
-        val request = Request.Builder().url(url)
+    private fun request(url: HttpUrl, accessToken: String?): Any {
+        val builder = Request.Builder().url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json")
-            .build()
-        client.newCall(request).execute().use { response ->
-            // Error bodies carry codes such as anonymous tag limits; the caller
-            // reports a generic message and never the request URL.
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+        if (!accessToken.isNullOrBlank()) builder.header("Authorization", "Bearer $accessToken")
+        client.newCall(builder.build()).execute().use { response ->
+            // Error bodies carry codes such as tag limits; the caller reports
+            // a generic message and never the request URL or token.
+            if (!response.isSuccessful) throw requestError(response, !accessToken.isNullOrBlank())
             val text = response.body?.string()?.trim() ?: throw IOException("Empty response")
             val parsed = if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
             if (parsed is JSONObject && parsed.has("success") && !parsed.optBoolean("success", true)) {
@@ -111,9 +160,24 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         }
     }
 
+    private fun requestError(response: Response, authenticated: Boolean): IOException {
+        if (response.code == 401 && authenticated) return SankakuAuthException(expired = true)
+        if (response.code == 429) {
+            val error = try {
+                JSONObject(response.peekBody(MAX_ERROR_BYTES).string())
+            } catch (_: Exception) { null }
+            if (jsonString(error, "code")?.endsWith("tags-limit") == true) {
+                return SankakuTagLimitException(jsonString(error, "param")?.toIntOrNull())
+            }
+        }
+        return IOException("HTTP ${response.code}")
+    }
+
     companion object {
         const val API_HOST = "sankakuapi.com"
         const val SITE_HOST = "www.sankakucomplex.com"
+        private val JSON = "application/json; charset=utf-8".toMediaType()
+        private const val MAX_ERROR_BYTES = 16L * 1024
         private const val PAGE_SIZE = 100
         private const val MAX_REQUESTS = 8
         private const val MAX_CURSORS = 256
@@ -126,6 +190,30 @@ internal fun sankakuQuery(tags: List<String>, random: Boolean): String {
     val ordered = clean.any { it.lowercase().startsWith("order:") }
     return (if (random && !ordered) clean + "order:random" else clean).joinToString(" ")
 }
+
+/**
+ * The session map returned to Dart: `userId` (display name), `accessToken`,
+ * `refreshToken`, and `expiresAt` (epoch milliseconds, or null if unknown).
+ */
+internal fun sankakuSession(body: JSONObject, fallbackUser: String, fallbackRefresh: String?): Map<String, Any?> {
+    val access = jsonString(body, "access_token") ?: throw IOException("Missing access token")
+    val user = body.optJSONObject("current_user")
+    val ttl = body.optLong("access_token_ttl", 0L)
+    val expiresAt = if (ttl > 0) System.currentTimeMillis() + ttl * 1000 else jwtExpiry(access)
+    return mapOf(
+        "userId" to (jsonString(user, "name") ?: fallbackUser),
+        "accessToken" to access,
+        "refreshToken" to (jsonString(body, "refresh_token") ?: fallbackRefresh ?: ""),
+        "expiresAt" to expiresAt,
+    )
+}
+
+/** Reads the `exp` claim (seconds) of a JWT without verifying it. */
+internal fun jwtExpiry(token: String): Long? = try {
+    val payload = token.split('.').getOrNull(1) ?: throw IllegalArgumentException()
+    val json = JSONObject(String(java.util.Base64.getUrlDecoder().decode(payload.trimEnd('='))))
+    json.optLong("exp", 0L).takeIf { it > 0 }?.times(1000)
+} catch (_: Exception) { null }
 
 /**
  * Sankaku tag types are provider-local: 0 general, 1 artist, 2 studio,

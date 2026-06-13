@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
@@ -86,6 +87,86 @@ class _RefreshRepo extends FakeRepo {
     }
     refreshQueries.add(tags);
     return [fresh];
+  }
+}
+
+/// Records the credentials of every request; [fail] can reject a request.
+class _SessionRepo extends FakeRepo {
+  _SessionRepo(this.fail, [super.pages = const [[]]]);
+  final Object? Function(List<String> tags, Credentials? credentials) fail;
+  final List<Credentials?> autocompleteCredentials = [];
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+  }) async {
+    final error = fail(tags, credentials);
+    if (error != null) {
+      lastCredentials = credentials;
+      queries.add(tags);
+      throw error;
+    }
+    return super.fetch(
+      board: board,
+      tags: tags,
+      limit: limit,
+      page: page,
+      random: random,
+      randomSeed: randomSeed,
+      credentials: credentials,
+    );
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) {
+    autocompleteCredentials.add(credentials);
+    return super.autocomplete(
+      board: board,
+      query: query,
+      limit: limit,
+      credentials: credentials,
+    );
+  }
+}
+
+class FakeAccounts implements AccountRepository {
+  FakeAccounts({this.signInResult, this.refreshResult, this.refreshError});
+  final Credentials? signInResult;
+  final Credentials? refreshResult;
+  final Object? refreshError;
+  Completer<void>? refreshGate;
+  final List<(String, String)> logins = [];
+  int refreshes = 0;
+
+  @override
+  Future<Credentials> signIn({
+    required Board board,
+    required String login,
+    required String password,
+  }) async {
+    logins.add((login, password));
+    return signInResult ?? (throw const SignInRejectedException());
+  }
+
+  @override
+  Future<Credentials> refreshSignIn({
+    required Board board,
+    required Credentials credentials,
+  }) async {
+    refreshes++;
+    await refreshGate?.future;
+    if (refreshError != null) throw refreshError!;
+    return refreshResult ?? (throw const SignInRejectedException());
   }
 }
 
@@ -459,6 +540,277 @@ void main() {
       expect(state.posts.map((value) => value.id), [2]);
     },
   );
+
+  group('Sankaku sign-in', () {
+    const session = Credentials(
+      userId: 'reader',
+      apiKey: 'access-1',
+      refreshToken: 'refresh-1',
+    );
+    const renewed = Credentials(
+      userId: 'reader',
+      apiKey: 'access-2',
+      refreshToken: 'refresh-2',
+    );
+    MemoryStore signedIn(Credentials credentials) => MemoryStore()
+      ..selected = Board.sankaku
+      ..credentials[Board.sankaku] = credentials;
+
+    test('session credentials round-trip and legacy entries still load', () {
+      final expiry = DateTime.fromMillisecondsSinceEpoch(4102444800000);
+      final restored = Credentials.fromMap(
+        Credentials(
+          userId: 'reader',
+          apiKey: 'access-1',
+          refreshToken: 'refresh-1',
+          expiresAt: expiry,
+        ).toMap(),
+      );
+      expect(
+        (
+          restored.userId,
+          restored.apiKey,
+          restored.refreshToken,
+          restored.expiresAt,
+        ),
+        ('reader', 'access-1', 'refresh-1', expiry),
+      );
+      final legacy = Credentials.fromMap({'userId': '1', 'apiKey': 'key'});
+      expect(legacy.toMap(), {'userId': '1', 'apiKey': 'key'});
+      expect(legacy.expiresSoon(DateTime.now()), isFalse);
+      expect(
+        Credentials(
+          userId: 'a',
+          apiKey: 'b',
+          expiresAt: DateTime.now().add(const Duration(minutes: 2)),
+        ).expiresSoon(DateTime.now()),
+        isTrue,
+      );
+    });
+
+    test('signing in stores the session and lifts the tag budget', () async {
+      final repo = FakeRepo(const [[]]);
+      final store = MemoryStore()..selected = Board.sankaku;
+      final accounts = FakeAccounts(signInResult: session);
+      final state = AppState(
+        repository: repo,
+        store: store,
+        accounts: accounts,
+      );
+      await state.initialize();
+      await state.updateSettings(
+        const AppSettings(blacklist: ['blocked', 'other']),
+      );
+      await state.setRatingFilters({Rating.explicit});
+      await state.search(['cat', 'dog', 'fox']);
+      expect(repo.queries.last, ['cat', 'dog', 'fox', 'rating:e']);
+
+      await state.signIn(Board.sankaku, ' reader ', 'secret pass');
+      expect(accounts.logins, [('reader', 'secret pass')]);
+      expect(store.credentials[Board.sankaku]!.toMap(), session.toMap());
+      expect(repo.lastCredentials?.apiKey, 'access-1');
+      expect(repo.queries.last, [
+        'cat',
+        'dog',
+        'fox',
+        'rating:e',
+        '-blocked',
+        '-other',
+        '-ai-created',
+      ]);
+    });
+
+    test('a refused signed-in search learns the limit and trims', () async {
+      final repo = _SessionRepo(
+        (tags, _) => tags.length > 5 ? const TagLimitException(5) : null,
+      );
+      final state = AppState(
+        repository: repo,
+        store: signedIn(session),
+        accounts: FakeAccounts(),
+      );
+      await state.initialize();
+      await state.updateSettings(
+        const AppSettings(blacklist: ['blocked', 'other']),
+      );
+      await state.search(['cat', 'dog', 'fox']);
+      expect(state.error, isNull);
+      expect(repo.queries.last, ['cat', 'dog', 'fox', '-blocked', '-other']);
+    });
+
+    test('an over-limit anonymous search explains the limit', () async {
+      final repo = _SessionRepo(
+        (tags, _) => tags.length > 4 ? const TagLimitException(4) : null,
+      );
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.sankaku,
+        accounts: FakeAccounts(),
+      );
+      await state.initialize();
+      await state.search(['a', 'b', 'c', 'd', 'e']);
+      expect(state.error, contains('up to 4 tags'));
+      expect(state.error, contains('Sign in'));
+    });
+
+    test('an expired session is renewed and saved', () async {
+      final repo = _SessionRepo(
+        (_, credentials) => credentials?.apiKey == 'access-1'
+            ? const AuthExpiredException()
+            : null,
+        [
+          [post(1)],
+        ],
+      );
+      final store = signedIn(session);
+      final accounts = FakeAccounts(refreshResult: renewed);
+      final state = AppState(
+        repository: repo,
+        store: store,
+        accounts: accounts,
+      );
+      await state.initialize();
+      expect(state.error, isNull);
+      expect(state.posts.map((value) => value.id), [1]);
+      expect(accounts.refreshes, 1);
+      expect(repo.lastCredentials?.apiKey, 'access-2');
+      expect(store.credentials[Board.sankaku]?.refreshToken, 'refresh-2');
+    });
+
+    test('concurrent requests share one renewal of a stale session', () async {
+      final repo = _SessionRepo((_, _) => null);
+      final accounts = FakeAccounts(refreshResult: renewed)
+        ..refreshGate = Completer<void>();
+      final state = AppState(
+        repository: repo,
+        store: signedIn(
+          Credentials(
+            userId: 'reader',
+            apiKey: 'access-1',
+            refreshToken: 'refresh-1',
+            expiresAt: DateTime.now().subtract(const Duration(minutes: 1)),
+          ),
+        ),
+        accounts: accounts,
+      );
+      final loading = state.initialize();
+      await pumpEventQueue();
+      final suggestions = state.autocomplete('cat');
+      await pumpEventQueue();
+      accounts.refreshGate!.complete();
+      await loading;
+      await suggestions;
+      expect(accounts.refreshes, 1);
+      expect(repo.lastCredentials?.apiKey, 'access-2');
+      expect(repo.autocompleteCredentials.single?.apiKey, 'access-2');
+    });
+
+    test('a session that cannot be renewed falls back to anonymous', () async {
+      final repo = _SessionRepo(
+        (_, credentials) =>
+            credentials == null ? null : const AuthExpiredException(),
+        [
+          [post(1)],
+        ],
+      );
+      final store = signedIn(session);
+      final state = AppState(
+        repository: repo,
+        store: store,
+        accounts: FakeAccounts(),
+      );
+      await state.initialize();
+      expect(state.error, isNull);
+      expect(state.posts.map((value) => value.id), [1]);
+      expect(repo.lastCredentials, isNull);
+      expect(store.credentials, isNot(contains(Board.sankaku)));
+      expect(state.takeNotice(), contains('sign-in expired'));
+      expect(state.takeNotice(), isNull);
+    });
+
+    test('a failed renewal for other reasons keeps the session', () async {
+      final repo = _SessionRepo(
+        (_, credentials) =>
+            credentials == null ? null : const AuthExpiredException(),
+      );
+      final store = signedIn(session);
+      final state = AppState(
+        repository: repo,
+        store: store,
+        accounts: FakeAccounts(refreshError: StateError('offline')),
+      );
+      await state.initialize();
+      expect(state.error, isNotNull);
+      expect(store.credentials[Board.sankaku], same(session));
+      expect(state.takeNotice(), isNull);
+    });
+
+    test('signing out reloads the feed anonymously', () async {
+      final repo = FakeRepo([
+        [post(1)],
+      ]);
+      final store = signedIn(session);
+      final state = AppState(repository: repo, store: store);
+      await state.initialize();
+      expect(repo.lastCredentials?.apiKey, 'access-1');
+      await state.forgetCredentials(Board.sankaku);
+      expect(store.credentials, isNot(contains(Board.sankaku)));
+      expect(repo.lastCredentials, isNull);
+      expect(state.error, isNull);
+      expect(state.posts.map((value) => value.id), [1]);
+    });
+
+    test('bridge auth and tag-limit errors are typed', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      const channel = MethodChannel('booruplus/test-sankaku');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final codes = ['AUTH_EXPIRED', 'TAG_LIMIT', 'AUTH_REJECTED'];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'refreshSignIn') {
+          expect(call.arguments, containsPair('refreshToken', 'refresh-1'));
+          return {
+            'userId': 'reader',
+            'accessToken': 'access-2',
+            'refreshToken': 'refresh-2',
+            'expiresAt': 4102444800000,
+          };
+        }
+        final code = codes.removeAt(0);
+        throw PlatformException(
+          code: code,
+          details: code == 'TAG_LIMIT' ? {'limit': 8} : null,
+        );
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final repository = PlatformBoardRepository(channel: channel);
+      final accounts = PlatformAccountRepository(channel: channel);
+      Future<void> fetch() => repository.fetch(
+        board: Board.sankaku,
+        tags: const ['cat'],
+        limit: 1,
+        page: 0,
+        random: false,
+        credentials: session,
+      );
+      await expectLater(fetch(), throwsA(isA<AuthExpiredException>()));
+      await expectLater(
+        fetch(),
+        throwsA(isA<TagLimitException>().having((e) => e.limit, 'limit', 8)),
+      );
+      await expectLater(
+        accounts.signIn(board: Board.sankaku, login: 'a', password: 'b'),
+        throwsA(isA<SignInRejectedException>()),
+      );
+      final fresh = await accounts.refreshSignIn(
+        board: Board.sankaku,
+        credentials: session,
+      );
+      expect(fresh.apiKey, 'access-2');
+      expect(fresh.refreshToken, 'refresh-2');
+      expect(fresh.expiresAt?.millisecondsSinceEpoch, 4102444800000);
+    });
+  });
 
   test('alphanumeric provider IDs keep a stable identity and round-trip', () {
     final restored = MediaPost.fromMap(
