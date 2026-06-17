@@ -59,7 +59,14 @@ class TagLimitException implements Exception {
   final int? limit;
 }
 
-/// Maps the bridge's auth and tag-limit codes to typed exceptions.
+/// The provider kept refusing requests as too frequent (HTTP 429/503) after
+/// the native backoff. [retryAfter] is its suggested wait, when known.
+class RateLimitedException implements Exception {
+  const RateLimitedException([this.retryAfter]);
+  final Duration? retryAfter;
+}
+
+/// Maps the bridge's auth, tag-limit, and rate-limit codes to typed exceptions.
 Object _platformError(Object error) {
   if (error is! PlatformException) return error;
   return switch (error.code) {
@@ -67,6 +74,10 @@ Object _platformError(Object error) {
     'AUTH_EXPIRED' => const AuthExpiredException(),
     'TAG_LIMIT' => TagLimitException(switch (error.details) {
       {'limit': final num limit} => limit.toInt(),
+      _ => null,
+    }),
+    'RATE_LIMITED' => RateLimitedException(switch (error.details) {
+      {'retryAfter': final num seconds} => Duration(seconds: seconds.toInt()),
       _ => null,
     }),
     _ => error,
@@ -343,7 +354,59 @@ class MediaService {
     : channel = channel ?? const MethodChannel('booruplus/platform');
   final MethodChannel channel;
 
+  // Shared by every tile: rebuilding or scrolling back over a grid reuses
+  // in-flight and recent bytes instead of re-requesting the provider, which
+  // would otherwise throttle the account. Settled responses are kept within
+  // a small byte budget; failures are dropped so they can be retried.
+  static final _recent = <String, Future<Uint8List>>{};
+  static final _recentBytes = <String, int>{};
+  static const _maxRecentEntries = 200;
+  static const _maxRecentBytes = 24 << 20;
+  static const _maxEntryBytes = 2 << 20;
+
   Future<Uint8List> fetchMedia({
+    required Board board,
+    required String url,
+    Credentials? credentials,
+  }) {
+    final key = '${channel.name}\u0000${board.name}\u0000$url';
+    final cached = _recent.remove(key);
+    if (cached != null) return _recent[key] = cached;
+    final future = _fetchMedia(
+      board: board,
+      url: url,
+      credentials: credentials,
+    );
+    _recent[key] = future;
+    future.then(
+      (bytes) {
+        if (!identical(_recent[key], future)) return;
+        if (bytes.length > _maxEntryBytes) {
+          _recent.remove(key);
+        } else {
+          _recentBytes[key] = bytes.length;
+        }
+        _trimRecent();
+      },
+      onError: (Object _) {
+        if (identical(_recent[key], future)) _recent.remove(key);
+      },
+    );
+    _trimRecent();
+    return future;
+  }
+
+  static void _trimRecent() {
+    _recentBytes.removeWhere((key, _) => !_recent.containsKey(key));
+    var total = _recentBytes.values.fold(0, (sum, size) => sum + size);
+    while (_recent.length > _maxRecentEntries || total > _maxRecentBytes) {
+      final oldest = _recent.keys.first;
+      _recent.remove(oldest);
+      total -= _recentBytes.remove(oldest) ?? 0;
+    }
+  }
+
+  Future<Uint8List> _fetchMedia({
     required Board board,
     required String url,
     Credentials? credentials,

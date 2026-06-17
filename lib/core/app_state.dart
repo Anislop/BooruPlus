@@ -962,6 +962,11 @@ class AppState extends ChangeNotifier {
           : '';
       return '${board.label} allows $limit per search, including rating and excluded tags.$hint';
     }
+    if (error is RateLimitedException) {
+      final seconds = error.retryAfter?.inSeconds ?? 0;
+      final wait = seconds > 1 ? 'about $seconds seconds' : 'a moment';
+      return '${board?.label ?? 'This website'} is busy or limiting requests. Wait $wait, then try again.';
+    }
     return 'Unable to load ${board?.label ?? 'the selected board'}. Check your connection and search tag limits. If this website needs an API key, reconnect in Settings.';
   }
 }
