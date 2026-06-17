@@ -760,12 +760,17 @@ void main() {
       expect(state.posts.map((value) => value.id), [1]);
     });
 
-    test('bridge auth and tag-limit errors are typed', () async {
+    test('bridge auth, tag-limit, and rate-limit errors are typed', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
       const channel = MethodChannel('booruplus/test-sankaku');
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      final codes = ['AUTH_EXPIRED', 'TAG_LIMIT', 'AUTH_REJECTED'];
+      final codes = [
+        'AUTH_EXPIRED',
+        'TAG_LIMIT',
+        'RATE_LIMITED',
+        'AUTH_REJECTED',
+      ];
       messenger.setMockMethodCallHandler(channel, (call) async {
         if (call.method == 'refreshSignIn') {
           expect(call.arguments, containsPair('refreshToken', 'refresh-1'));
@@ -779,7 +784,11 @@ void main() {
         final code = codes.removeAt(0);
         throw PlatformException(
           code: code,
-          details: code == 'TAG_LIMIT' ? {'limit': 8} : null,
+          details: switch (code) {
+            'TAG_LIMIT' => {'limit': 8},
+            'RATE_LIMITED' => {'retryAfter': 3},
+            _ => null,
+          },
         );
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
@@ -797,6 +806,16 @@ void main() {
       await expectLater(
         fetch(),
         throwsA(isA<TagLimitException>().having((e) => e.limit, 'limit', 8)),
+      );
+      await expectLater(
+        fetch(),
+        throwsA(
+          isA<RateLimitedException>().having(
+            (e) => e.retryAfter,
+            'retryAfter',
+            const Duration(seconds: 3),
+          ),
+        ),
       );
       await expectLater(
         accounts.signIn(board: Board.sankaku, login: 'a', password: 'b'),
@@ -1215,6 +1234,56 @@ void main() {
     expect(state.posts.map((p) => p.id), [4]);
   });
 
+  test('a rate-limited board switch explains the wait and retries', () async {
+    final repo = _FailOnceRepo(
+      const RateLimitedException(Duration(seconds: 4)),
+    );
+    final state = AppState(repository: repo, store: MemoryStore());
+    await state.initialize();
+    await state.chooseBoard(Board.danbooru);
+    expect(state.error, contains('Danbooru is busy or limiting requests'));
+    expect(state.error, contains('about 4 seconds'));
+    await state.loadMore();
+    expect(state.error, isNull);
+    expect(state.posts.map((p) => p.id), [4]);
+  });
+
+  test('media fetches share in-flight bytes and retry failures', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    const channel = MethodChannel('booruplus/test-media');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final requested = <String>[];
+    var fail = true;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      final url = (call.arguments as Map)['url'] as String;
+      requested.add(url);
+      if (url.endsWith('b.jpg') && fail) {
+        fail = false;
+        throw PlatformException(code: 'REQUEST_FAILED');
+      }
+      return Uint8List.fromList([1, 2, 3]);
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final media = MediaService(channel: channel);
+    const a = 'https://img.gelbooru.com/a.jpg';
+    const b = 'https://img.gelbooru.com/b.jpg';
+    final first = media.fetchMedia(board: Board.gelbooru, url: a);
+    final again = MediaService(
+      channel: channel,
+    ).fetchMedia(board: Board.gelbooru, url: a);
+    expect(await first, [1, 2, 3]);
+    expect(await again, [1, 2, 3]);
+    await media.fetchMedia(board: Board.gelbooru, url: a);
+    expect(requested, [a]);
+    await expectLater(
+      media.fetchMedia(board: Board.gelbooru, url: b),
+      throwsA(isA<PlatformException>()),
+    );
+    expect(await media.fetchMedia(board: Board.gelbooru, url: b), [1, 2, 3]);
+    expect(requested, [a, b, b]);
+  });
+
   test('failed later load retries the same later page', () async {
     final repo = _FailLaterRepo();
     final store = MemoryStore()..selected = Board.safebooru;
@@ -1382,6 +1451,8 @@ class _DelayedSettingsStore extends MemoryStore {
 }
 
 class _FailOnceRepo implements BoardRepository {
+  _FailOnceRepo([this.error = const _TemporaryFailure()]);
+  final Object error;
   final List<int> pages = [];
   @override
   Future<List<Map<String, dynamic>>> fetch({
@@ -1394,9 +1465,7 @@ class _FailOnceRepo implements BoardRepository {
     Credentials? credentials,
   }) {
     pages.add(page);
-    return pages.length == 1
-        ? Future.error(StateError('temporary'))
-        : Future.value([post(4)]);
+    return pages.length == 1 ? Future.error(error) : Future.value([post(4)]);
   }
 
   @override
@@ -1406,6 +1475,10 @@ class _FailOnceRepo implements BoardRepository {
     required int limit,
     Credentials? credentials,
   }) => Future.value(const []);
+}
+
+class _TemporaryFailure implements Exception {
+  const _TemporaryFailure();
 }
 
 class _FailLaterRepo implements BoardRepository {

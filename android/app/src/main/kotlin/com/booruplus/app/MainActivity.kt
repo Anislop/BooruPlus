@@ -37,9 +37,14 @@ import java.util.LinkedHashMap
 import kotlin.random.Random
 
 class MainActivity : FlutterActivity() {
-    private val executor = Executors.newFixedThreadPool(3)
+    // Feed, autocomplete, and sign-in requests never queue behind media
+    // bytes or downloads: a grid of authenticated thumbnails would otherwise
+    // hold every thread and stall a newly selected board's first page.
+    private val executor = Executors.newFixedThreadPool(4)
+    private val mediaExecutor = Executors.newFixedThreadPool(4)
     private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
+        .addInterceptor(RateLimitInterceptor())
         .followSslRedirects(false).build()
     private val mediaClient = client.newBuilder()
         .followRedirects(false)
@@ -162,10 +167,14 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun background(result: MethodChannel.Result, operation: () -> Any?) {
+    private fun background(
+        result: MethodChannel.Result,
+        pool: java.util.concurrent.Executor = executor,
+        operation: () -> Any?
+    ) {
         if (closing) { result.error("CANCELLED", "Activity closed", null); return }
         pending.add(result)
-        executor.execute {
+        pool.execute {
             try {
                 val value = operation()
                 runOnUiThread { if (pending.remove(result)) result.success(value) }
@@ -175,10 +184,11 @@ class MainActivity : FlutterActivity() {
                     is IllegalArgumentException -> "INVALID_REQUEST"
                     is SankakuAuthException -> if (error.expired) "AUTH_EXPIRED" else "AUTH_REJECTED"
                     is SankakuTagLimitException -> "TAG_LIMIT"
-                    else -> "REQUEST_FAILED"
+                    else -> if (rateLimit(error) != null) "RATE_LIMITED" else "REQUEST_FAILED"
                 }
-                // Only the provider's numeric tag limit is passed on as details.
+                // Only the provider's numeric tag limit or retry delay is passed on as details.
                 val details = (error as? SankakuTagLimitException)?.limit?.let { mapOf("limit" to it) }
+                    ?: rateLimit(error)?.retryAfterSeconds?.let { mapOf("retryAfter" to it) }
                 // Never expose exception messages: upstream errors may contain authenticated URLs or tokens.
                 runOnUiThread { if (pending.remove(result)) result.error(code, "Request failed. Check the connection, credentials, or folder access.", details) }
             } catch (_: LinkageError) {
@@ -544,7 +554,7 @@ class MainActivity : FlutterActivity() {
             result.error("INVALID_URL", "Unsupported media URL", null)
             return
         }
-        background(result) { readGelbooruMedia(value) }
+        background(result, mediaExecutor) { readGelbooruMedia(value) }
     }
 
     private fun readGelbooruMedia(value: String): ByteArray {
@@ -642,7 +652,7 @@ class MainActivity : FlutterActivity() {
             result.error("INVALID_NAME", "Invalid download name", null); return
         }
         if (Build.VERSION.SDK_INT < 29 && directory == null) { result.error("DIRECTORY_REQUIRED", "Choose a download folder in Settings", null); return }
-        background(result) {
+        background(result, mediaExecutor) {
             var uri: Uri? = null
             try {
                 // Open the network first; an HTTP failure must not leave a target stream open.
@@ -736,6 +746,7 @@ class MainActivity : FlutterActivity() {
         pending.toList().forEach { if (pending.remove(it)) it.error("CANCELLED", "Activity closed", null) }
         client.dispatcher.cancelAll()
         executor.shutdownNow()
+        mediaExecutor.shutdownNow()
         super.onDestroy()
     }
 
