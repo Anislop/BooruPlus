@@ -19,9 +19,12 @@ import net.kodehawa.lib.imageboards.boards.KonachanBoard
 import net.kodehawa.lib.imageboards.entities.BoardImage
 import net.kodehawa.lib.imageboards.entities.impl.KonachanImage
 import net.kodehawa.lib.imageboards.entities.impl.autocomplete.IAutoComplete
+import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.FilterInputStream
@@ -42,8 +45,14 @@ class MainActivity : FlutterActivity() {
     // hold every thread and stall a newly selected board's first page.
     private val executor = Executors.newFixedThreadPool(4)
     private val mediaExecutor = Executors.newFixedThreadPool(4)
+    // The feed fetch running on this thread, if any. Set only while a feed
+    // task runs, so other requests on the same client are never cancelled.
+    private val currentFeed = ThreadLocal<FeedTask?>()
+    // The latest feed fetch; touched only on the UI thread.
+    private var feedTask: FeedTask? = null
     private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
+        .addInterceptor(Interceptor(::trackFeedCall))
         .addInterceptor(RateLimitInterceptor())
         .followSslRedirects(false).build()
     private val mediaClient = client.newBuilder()
@@ -70,6 +79,22 @@ class MainActivity : FlutterActivity() {
     @Volatile private var closing = false
 
     private data class ProviderCursor(val page: Int, val offset: Int)
+
+    /**
+     * A `fetch` sent with `feed: true`. A newer feed fetch supersedes it: its
+     * window loop stops and its in-flight HTTP call is cancelled, so a board
+     * switch, search, or refresh does not leave the previous feed holding an
+     * API thread for up to [MAX_WINDOW_REQUESTS] calls.
+     */
+    private class FeedTask(val result: MethodChannel.Result) {
+        @Volatile var cancelled = false
+        @Volatile var call: Call? = null
+
+        fun cancel() {
+            cancelled = true
+            call?.cancel()
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -170,11 +195,15 @@ class MainActivity : FlutterActivity() {
     private fun background(
         result: MethodChannel.Result,
         pool: java.util.concurrent.Executor = executor,
+        feed: FeedTask? = null,
         operation: () -> Any?
     ) {
         if (closing) { result.error("CANCELLED", "Activity closed", null); return }
         pending.add(result)
         pool.execute {
+            // A feed superseded before it started was already answered.
+            if (feed?.cancelled == true) return@execute
+            currentFeed.set(feed)
             try {
                 val value = operation()
                 runOnUiThread { if (pending.remove(result)) result.success(value) }
@@ -193,9 +222,37 @@ class MainActivity : FlutterActivity() {
                 runOnUiThread { if (pending.remove(result)) result.error(code, "Request failed. Check the connection, credentials, or folder access.", details) }
             } catch (_: LinkageError) {
                 runOnUiThread { if (pending.remove(result)) result.error("COMPATIBILITY", "The API library is not compatible with this Android runtime.", null) }
+            } finally {
+                currentFeed.remove()
             }
         }
     }
+
+    /**
+     * Cancels the previous feed fetch and answers it with `CANCELLED` (Dart
+     * already ignores it), then makes [result] the current feed fetch.
+     * `id:` lookups and credential checks never send `feed`, so they run on.
+     */
+    private fun startFeed(result: MethodChannel.Result): FeedTask {
+        feedTask?.let { old ->
+            old.cancel()
+            if (pending.remove(old.result)) old.result.error("CANCELLED", "Superseded by a newer feed request", null)
+        }
+        return FeedTask(result).also { feedTask = it }
+    }
+
+    /** Records a feed task's current call so [FeedTask.cancel] can stop it. */
+    private fun trackFeedCall(chain: Interceptor.Chain): Response {
+        currentFeed.get()?.let { task ->
+            task.call = chain.call()
+            // Paired with cancel(): one side always sees the other's write.
+            if (task.cancelled) throw IOException("Cancelled")
+        }
+        return chain.proceed(chain.request())
+    }
+
+    private fun cancelled(): Boolean =
+        closing || Thread.currentThread().isInterrupted || currentFeed.get()?.cancelled == true
 
     /** Sankaku-only password sign-in; returns the session map from [sankakuSession]. */
     private fun signIn(call: MethodCall, result: MethodChannel.Result) {
@@ -230,8 +287,9 @@ class MainActivity : FlutterActivity() {
         if (board in setOf("rule34", "gelbooru") && (key.isNullOrBlank() || user.isNullOrBlank())) {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
         }
+        val feed = if (call.argument<Boolean>("feed") == true) startFeed(result) else null
         if (board == "sankaku") {
-            background(result) {
+            background(result, feed = feed) {
                 // Sankaku pages by keyset token and orders discovery with
                 // order:random, so it bypasses the windowed library path.
                 // Only random feeds key their token chain by seed: callers
@@ -240,11 +298,11 @@ class MainActivity : FlutterActivity() {
                     tags, page, limit, random, makeCursorKey(board, tags, limit, random, if (random) seed else 0),
                     avifPreviews = Build.VERSION.SDK_INT >= 31,
                     accessToken = key,
-                ) { closing || Thread.currentThread().isInterrupted }
+                ) { cancelled() }
             }
             return
         }
-        background(result) {
+        background(result, feed = feed) {
             val api = when (board) {
                 "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
                 "gelbooru" -> ImageBoards.createGelbooru(key!!, user!!, client)
@@ -272,6 +330,7 @@ class MainActivity : FlutterActivity() {
             }
             if (discoveryWindows.size > 128) discoveryWindows.keys.filter { it != seed }.take(64).forEach { discoveryWindows.remove(it) }
             if (providerCursors.size > 256) providerCursors.keys.take(128).forEach { providerCursors.remove(it) }
+            if (cancelled()) throw IOException("Cancelled")
             val ordered = if (random) images.shuffled(Random(seed xor page)) else images
             enrichProviderTags(board, ordered, key, user)
             ordered.map { mapImage(it, board, key, user) }
@@ -360,7 +419,7 @@ class MainActivity : FlutterActivity() {
         val result = ArrayList<BoardImage>()
         var requests = 0
         while (result.size < limit && requests++ < MAX_WINDOW_REQUESTS) {
-            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+            if (cancelled()) throw IOException("Cancelled")
             // pid-based boards are zero based; page-based boards are one based.
             val number = providerPage + if (board in setOf("rule34", "gelbooru", "safebooru")) 0 else 1
             val batch = if (tags.isEmpty()) {

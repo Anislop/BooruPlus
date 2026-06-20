@@ -7,6 +7,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
 
 abstract interface class BoardRepository {
+  /// A [feed] request is the visible feed's page: a newer feed request
+  /// cancels it natively, failing it with [RequestCancelledException].
   Future<List<Map<String, dynamic>>> fetch({
     required Board board,
     required List<String> tags,
@@ -15,6 +17,7 @@ abstract interface class BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   });
 
   Future<List<Map<String, dynamic>>> autocomplete({
@@ -66,10 +69,18 @@ class RateLimitedException implements Exception {
   final Duration? retryAfter;
 }
 
-/// Maps the bridge's auth, tag-limit, and rate-limit codes to typed exceptions.
+/// The request was cancelled natively, because a newer feed request
+/// superseded it or the activity closed. Nothing waits on its result.
+class RequestCancelledException implements Exception {
+  const RequestCancelledException();
+}
+
+/// Maps the bridge's auth, tag-limit, rate-limit, and cancellation codes to
+/// typed exceptions.
 Object _platformError(Object error) {
   if (error is! PlatformException) return error;
   return switch (error.code) {
+    'CANCELLED' => const RequestCancelledException(),
     'AUTH_REJECTED' => const SignInRejectedException(),
     'AUTH_EXPIRED' => const AuthExpiredException(),
     'TAG_LIMIT' => TagLimitException(switch (error.details) {
@@ -185,6 +196,7 @@ class PlatformBoardRepository implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) async {
     final List<dynamic>? response;
     try {
@@ -197,6 +209,7 @@ class PlatformBoardRepository implements BoardRepository {
         'randomSeed': randomSeed,
         'apiKey': credentials?.apiKey,
         'userId': credentials?.userId,
+        if (feed) 'feed': true,
       });
     } catch (error) {
       throw _platformError(error);
