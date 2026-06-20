@@ -45,6 +45,7 @@ class FakeRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) async {
     calls++;
     queries.add(tags);
@@ -70,6 +71,7 @@ class _RefreshRepo extends FakeRepo {
   _RefreshRepo(this.fresh) : super(const [[]]);
   final Map<String, dynamic> fresh;
   final List<List<String>> refreshQueries = [];
+  final List<bool> refreshFeedFlags = [];
   @override
   Future<List<Map<String, dynamic>>> fetch({
     required Board board,
@@ -79,6 +81,7 @@ class _RefreshRepo extends FakeRepo {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) async {
     if (board != Board.sankaku ||
         tags.isEmpty ||
@@ -86,6 +89,7 @@ class _RefreshRepo extends FakeRepo {
       return const [];
     }
     refreshQueries.add(tags);
+    refreshFeedFlags.add(feed);
     return [fresh];
   }
 }
@@ -104,6 +108,7 @@ class _SessionRepo extends FakeRepo {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) async {
     final error = fail(tags, credentials);
     if (error != null) {
@@ -119,6 +124,7 @@ class _SessionRepo extends FakeRepo {
       random: random,
       randomSeed: randomSeed,
       credentials: credentials,
+      feed: feed,
     );
   }
 
@@ -884,6 +890,8 @@ void main() {
     expect(repo.refreshQueries, [
       ['id:abc123X'],
     ]);
+    // ID lookups must not cancel, or be cancelled by, the visible feed.
+    expect(repo.refreshFeedFlags, [false]);
     expect(state.displayReady(saved).post.url, fresh);
     expect(
       state.isFavorite(state.displayReady(saved).post, board: Board.sankaku),
@@ -1208,6 +1216,30 @@ void main() {
     expect(state.posts.map((p) => p.id), [2]);
   });
 
+  test('a superseded feed fetch is cancelled without an error', () async {
+    final repo = _CancellingRepo();
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    final errors = <String>[];
+    state.addListener(() {
+      if (state.error != null) errors.add(state.error!);
+    });
+    final initial = state.initialize();
+    await pumpEventQueue();
+    expect(repo.feeds, hasLength(1));
+    await state.chooseBoard(Board.danbooru);
+    await initial;
+    expect(repo.cancelled, 1);
+    expect(errors, isEmpty);
+    expect(state.error, isNull);
+    expect(state.loading, isFalse);
+    expect(state.board, Board.danbooru);
+    expect(state.posts.map((p) => p.id), [2]);
+    expect(repo.feedFlags, everyElement(isTrue));
+  });
+
   test(
     'settings persistence failure leaves in-memory settings unchanged',
     () async {
@@ -1333,6 +1365,7 @@ class _DelayedRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) {
     calls++;
     return calls == 1
@@ -1361,6 +1394,7 @@ class _FailingRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) => Future.error(StateError('probe failed'));
 
   @override
@@ -1385,6 +1419,7 @@ class _SuggestionRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) => Future.value(const []);
 
   @override
@@ -1415,10 +1450,51 @@ class _BoardSwitchRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) {
     if (board == Board.safebooru && safeCalls++ > 0) return oldRequest.future;
     if (board == Board.danbooru) return Future.value([post(2)]);
     return Future.value(const []);
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) => Future.value(const []);
+}
+
+/// Mimics the bridge: a new feed fetch fails the pending one as cancelled.
+/// Only the first feed fetch stays pending; Danbooru then answers one post.
+class _CancellingRepo implements BoardRepository {
+  final List<Completer<List<Map<String, dynamic>>>> feeds = [];
+  final List<bool> feedFlags = [];
+  int cancelled = 0;
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) {
+    feedFlags.add(feed);
+    if (!feed) return Future.value(const []);
+    if (feeds.isNotEmpty && !feeds.last.isCompleted) {
+      cancelled++;
+      feeds.last.completeError(const RequestCancelledException());
+    }
+    final next = Completer<List<Map<String, dynamic>>>();
+    if (feeds.isNotEmpty) {
+      next.complete(board == Board.danbooru && page == 0 ? [post(2)] : []);
+    }
+    feeds.add(next);
+    return next.future;
   }
 
   @override
@@ -1463,6 +1539,7 @@ class _FailOnceRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) {
     pages.add(page);
     return pages.length == 1 ? Future.error(error) : Future.value([post(4)]);
@@ -1492,6 +1569,7 @@ class _FailLaterRepo implements BoardRepository {
     required bool random,
     int? randomSeed,
     Credentials? credentials,
+    bool feed = false,
   }) {
     pages.add(page);
     if (page == 0) {

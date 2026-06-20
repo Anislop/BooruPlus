@@ -678,6 +678,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     final page = reset ? 0 : _page + 1;
     if (reset && _tags.isEmpty) _randomSeed = Random().nextInt(1 << 31);
+    var superseded = false;
     try {
       var accepted = <MediaPost>[];
       var currentPage = page;
@@ -687,7 +688,7 @@ class AppState extends ChangeNotifier {
         attempt < 3 && accepted.length < _settings.batchSize;
         attempt++
       ) {
-        final raw = await _fetchFeedPage(_board!, currentPage);
+        final raw = await _fetchFeedPage(_board!, currentPage, generation);
         if (generation != _generation) return;
         lastFetchedPage = currentPage;
         if (raw.isEmpty) {
@@ -706,29 +707,43 @@ class AppState extends ChangeNotifier {
       _page = lastFetchedPage;
       if (accepted.length >= _settings.batchSize) _hasMore = true;
       _posts = [...(reset ? const <MediaPost>[] : _posts), ...accepted];
+    } on RequestCancelledException {
+      // A newer feed request superseded this one natively. A newer
+      // generation discards it anyway; within this generation the newer
+      // load owns the loading state.
+      superseded = true;
     } catch (error) {
       if (generation == _generation) _error = _friendly(error);
     } finally {
-      if (generation == _generation) {
+      if (generation == _generation && !superseded) {
         _loading = false;
         notifyListeners();
       }
     }
   }
 
-  Future<List<Map<String, dynamic>>> _fetchFeedPage(Board board, int page) {
-    Future<List<Map<String, dynamic>>> fetch() => _withSession(
-      board,
-      (credentials) => _repository.fetch(
-        board: board,
-        tags: _queryTags(signedIn: credentials != null),
-        limit: _settings.batchSize,
-        page: page,
-        random: _tags.isEmpty,
-        randomSeed: _randomSeed,
-        credentials: credentials,
-      ),
-    );
+  /// Fetches a feed page as a `feed` request, which cancels the previous
+  /// feed request natively. A stale [generation] (for example after a
+  /// session renewal) sends nothing, so it cannot cancel a newer feed.
+  Future<List<Map<String, dynamic>>> _fetchFeedPage(
+    Board board,
+    int page,
+    int generation,
+  ) {
+    Future<List<Map<String, dynamic>>> fetch() =>
+        _withSession(board, (credentials) async {
+          if (generation != _generation) return const [];
+          return _repository.fetch(
+            board: board,
+            tags: _queryTags(signedIn: credentials != null),
+            limit: _settings.batchSize,
+            page: page,
+            random: _tags.isEmpty,
+            randomSeed: _randomSeed,
+            credentials: credentials,
+            feed: true,
+          );
+        });
     return fetch().catchError((Object error) {
       // A signed-in Sankaku search hit the account's limit: remember it and
       // retry once with the exclusions trimmed to fit.
@@ -847,10 +862,8 @@ class AppState extends ChangeNotifier {
     post: post,
   ).sanitized();
   // identity already strips credentials, so it needs no sanitized copy.
-  String _identity(MediaPost post, Board? board) => SavedPost(
-    board: board ?? _board ?? Board.safebooru,
-    post: post,
-  ).identity;
+  String _identity(MediaPost post, Board? board) =>
+      SavedPost(board: board ?? _board ?? Board.safebooru, post: post).identity;
   String _postKey(MediaPost post) => _identity(post, _board);
   void _setFavorites(List<SavedPost> value) {
     _favoritePosts = value;
