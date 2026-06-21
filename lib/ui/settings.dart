@@ -286,7 +286,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: [
                       const SectionLabel('BooruPlus Preferences'),
                       const Text(
-                        'See media grids, discovery posts and more.',
+                        'Check your settings and preferences!',
                         style: TextStyle(
                           fontSize: 24,
                           fontWeight: FontWeight.w700,
