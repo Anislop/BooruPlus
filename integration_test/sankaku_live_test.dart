@@ -1,11 +1,18 @@
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
-import 'package:flutter/foundation.dart';
+import 'package:booruplus/ui/home.dart';
+import 'package:booruplus/ui/media_viewer.dart';
+import 'package:booruplus/ui/theme.dart';
+import 'package:flutter/foundation.dart' show consolidateHttpClientResponseBytes;
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+
+import '../test/core_test.dart' show MemoryStore;
 
 /// Opt-in live check of the native Sankaku client: needs an Android device
 /// and access to sankakuapi.com. Sankaku's API changes without notice (post
@@ -40,6 +47,81 @@ void main() {
 
   String key(MediaPost post) =>
       SavedPost(board: Board.sankaku, post: post).identity;
+
+  testWidgets('Sankaku feed and viewer remain interactive during live loads', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: repository,
+      store: MemoryStore()
+        ..settings = const AppSettings(selectedRatings: [Rating.general]),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(board: Board.sankaku),
+        home: HomeScreen(state: state),
+      ),
+    );
+    final loading = state.chooseBoard(Board.sankaku);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(state.board, Board.sankaku);
+
+    // Opening and closing navigation must work while the real native fetch
+    // is in flight, and again while thumbnails/originals are decoding.
+    Future<void> pumpUntil(bool Function() ready) async {
+      // Wait only for the interaction: pumpAndSettle would also wait for
+      // network loading spinners, and drawer springs can outlast 350ms.
+      for (var frame = 0; frame < 40; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+        if (ready()) return;
+      }
+      expect(ready(), isTrue, reason: 'UI interaction did not finish within 2s');
+    }
+
+    Future<void> navigationResponds() async {
+      final menu = find.byTooltip('Open navigation menu').hitTestable();
+      await pumpUntil(() => menu.evaluate().length == 1);
+      await tester.tap(menu);
+      final scaffold = tester.state<ScaffoldState>(find.byType(Scaffold).first);
+      await pumpUntil(() => scaffold.isDrawerOpen);
+      scaffold.closeDrawer();
+      await pumpUntil(() => menu.evaluate().length == 1);
+      expect(scaffold.isDrawerOpen, isFalse);
+    }
+
+    await navigationResponds();
+    await loading.timeout(const Duration(seconds: 60));
+    expect(state.error, isNull);
+    await state.search(['landscape']).timeout(const Duration(seconds: 60));
+    expect(state.error, isNull);
+    expect(state.posts, isNotEmpty);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await navigationResponds();
+
+    final earlier = state.posts.map(key).toSet();
+    final more = state.loadMore();
+    await navigationResponds();
+    await more.timeout(const Duration(seconds: 60));
+    expect(state.error, isNull);
+    expect(state.posts.length, greaterThan(earlier.length));
+    expect(state.posts.map(key).toSet().length, state.posts.length);
+    await tester.pump();
+
+    await tester.tap(find.byType(MediaTile).first);
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.byType(MediaViewer), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    final viewerContext = tester.element(find.byType(MediaViewer));
+    Navigator.of(viewerContext).pop();
+    await pumpUntil(() => find.byType(MediaViewer).evaluate().isEmpty);
+    expect(find.byType(MediaViewer), findsNothing);
+    await navigationResponds();
+    await tester.pumpWidget(const SizedBox.shrink());
+    state.dispose();
+  });
 
   testWidgets('Sankaku pages, parses, and looks up posts by ID', (
     tester,

@@ -547,6 +547,88 @@ void main() {
     },
   );
 
+  test(
+    'Sankaku displays short pages immediately and keeps loading more',
+    () async {
+      final repo = FakeRepo([
+        [post(1)],
+        [post(2)],
+        const [],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.sankaku,
+      );
+      await state.initialize();
+      expect(repo.calls, 1);
+      expect(state.posts.map((value) => value.id), [1]);
+      expect(state.loading, isFalse);
+      expect(state.hasMore, isTrue);
+      await state.loadMore();
+      expect(repo.calls, 2);
+      expect(state.posts.map((value) => value.id), [1, 2]);
+      expect(state.hasMore, isTrue);
+      await state.loadMore();
+      expect(repo.calls, 3);
+      expect(state.hasMore, isFalse);
+    },
+  );
+
+  test('Sankaku short page is not lost to a later request failure', () async {
+    var calls = 0;
+    final repo = _SessionRepo(
+      (_, _) => ++calls == 2 ? const RateLimitedException() : null,
+      [
+        [post(1)],
+        [post(2)],
+      ],
+    );
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.sankaku,
+    );
+    await state.initialize();
+    expect(calls, 1);
+    expect(state.error, isNull);
+    expect(state.posts.map((value) => value.id), [1]);
+    await state.loadMore();
+    expect(state.error, isNotNull);
+    expect(state.loading, isFalse);
+    expect(state.posts.map((value) => value.id), [1]);
+    await state.loadMore();
+    expect(state.error, isNull);
+    expect(state.posts.map((value) => value.id), [1, 2]);
+  });
+
+  test(
+    'Sankaku still skips locally filtered pages before displaying posts',
+    () async {
+      final repo = FakeRepo([
+        [
+          post(1, tags: ['ai-created']),
+        ],
+        [
+          post(2, tags: ['blocked']),
+        ],
+        [post(3)],
+        [post(4)],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()
+          ..selected = Board.sankaku
+          ..settings = const AppSettings(blacklist: ['blocked']),
+      );
+      await state.initialize();
+      expect(repo.calls, 3);
+      expect(state.posts.map((value) => value.id), [3]);
+      expect(state.hasMore, isTrue);
+      await state.loadMore();
+      expect(repo.calls, 4);
+      expect(state.posts.map((value) => value.id), [3, 4]);
+    },
+  );
+
   group('Sankaku sign-in', () {
     const session = Credentials(
       userId: 'reader',

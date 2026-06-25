@@ -9,8 +9,10 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /** Sankaku refused a password or refresh token, or a bearer token expired. */
 internal class SankakuAuthException(val expired: Boolean) : IOException("Sankaku sign-in rejected")
@@ -55,6 +57,12 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         accessToken: String?,
         cancelled: () -> Boolean,
     ): List<Map<String, Any?>> {
+        if (cancelled()) throw IOException("Cancelled")
+        // The timeout covers this entire page search, not each successive
+        // keyset request. Unavailable media must not multiply a 45s timeout
+        // by MAX_REQUESTS while the UI waits for its first usable posts.
+        val timeoutMillis = client.callTimeoutMillis.takeIf { it > 0 }?.toLong() ?: 45_000L
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         if (page == 0) cursors.keys.filter { it.startsWith("$cursorKey\u0003") }.forEach { cursors.remove(it) }
         if (cursors.size > MAX_CURSORS) cursors.keys.take(MAX_CURSORS / 2).forEach { cursors.remove(it) }
         val query = sankakuQuery(tags, random)
@@ -65,7 +73,7 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
             // Offset paging still serves the first 50 pages anonymously.
             val batch = request(endpoint("posts").addQueryParameter("page", (page + 1).toString())
                 .addQueryParameter("limit", minOf(limit, PAGE_SIZE).toString())
-                .addQueryParameter("tags", query).build(), accessToken)
+                .addQueryParameter("tags", query).build(), accessToken, deadline)
             val array = batch as? JSONArray ?: (batch as JSONObject).optJSONArray("data") ?: JSONArray()
             return posts(array, avifPreviews, limit)
         }
@@ -73,19 +81,27 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         val result = ArrayList<Map<String, Any?>>()
         var token = stored
         var requests = 0
-        while (result.size < limit && requests++ < MAX_REQUESTS) {
+        val visited = HashSet<String>()
+        if (!token.isNullOrEmpty()) visited.add(token)
+        while (result.isEmpty() && requests++ < MAX_REQUESTS) {
             if (cancelled()) throw IOException("Cancelled")
-            // Request exactly what is still needed: a keyset token skips past
-            // every returned row, so surplus rows could not be served later.
-            val size = minOf(limit - result.size, PAGE_SIZE)
+            // Return the first usable batch, even if filtering made it short.
+            // Filling it with more HTTP requests delays already usable posts
+            // and loses them altogether if a later request fails.
+            val size = minOf(limit, PAGE_SIZE)
             val url = endpoint("posts/keyset").addQueryParameter("limit", size.toString())
                 .addQueryParameter("tags", query)
             if (!token.isNullOrEmpty()) url.addQueryParameter("next", token)
-            val body = request(url.build(), accessToken) as? JSONObject ?: throw IOException("Unexpected response")
+            val body = request(url.build(), accessToken, deadline) as? JSONObject ?: throw IOException("Unexpected response")
             result.addAll(posts(body.optJSONArray("data") ?: JSONArray(), avifPreviews, limit - result.size))
             token = jsonString(body.optJSONObject("meta"), "next") ?: ""
             if (token.isEmpty()) break
+            if (!visited.add(token)) throw IOException("Repeated pagination token")
         }
+        if (cancelled()) throw IOException("Cancelled")
+        // Empty means exhausted to Dart. Hitting a search bound with a live
+        // cursor is a retryable failure, not the end of the provider's feed.
+        if (result.isEmpty() && !token.isNullOrEmpty()) throw IOException("No accessible posts in page window")
         cursors["$cursorKey\u0003${page + 1}"] = token ?: ""
         return result
     }
@@ -142,12 +158,17 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         .scheme("https").host(API_HOST).addPathSegments(path)
         .addQueryParameter("lang", "en")
 
-    private fun request(url: HttpUrl, accessToken: String?): Any {
+    private fun request(url: HttpUrl, accessToken: String?, deadline: Long? = null): Any {
         val builder = Request.Builder().url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json")
         if (!accessToken.isNullOrBlank()) builder.header("Authorization", "Bearer $accessToken")
-        client.newCall(builder.build()).execute().use { response ->
+        val call = client.newCall(builder.build())
+        if (deadline != null) {
+            if (System.nanoTime() >= deadline) throw InterruptedIOException("Page timed out")
+            call.timeout().deadlineNanoTime(deadline)
+        }
+        call.execute().use { response ->
             // Error bodies carry codes such as tag limits; the caller reports
             // a generic message and never the request URL or token.
             if (!response.isSuccessful) throw requestError(response, !accessToken.isNullOrBlank())
