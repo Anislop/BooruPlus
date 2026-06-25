@@ -702,6 +702,10 @@ class AppState extends ChangeNotifier {
         };
         accepted.addAll(incoming.where((post) => seen.add(_postKey(post))));
         currentPage++;
+        // Sankaku deliberately returns short batches when some records have
+        // no accessible media. Show usable posts now instead of multiplying
+        // the native page search to fill the configured batch size.
+        if (_board == Board.sankaku && accepted.isNotEmpty) break;
       }
       if (generation != _generation) return;
       _page = lastFetchedPage;
