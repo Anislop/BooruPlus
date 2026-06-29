@@ -17,6 +17,7 @@ class MediaImage extends StatefulWidget {
     this.errorMessage = 'The original image is unavailable.',
     this.mediaService,
     this.errorWidget,
+    this.loadingWidget,
   });
 
   final String url;
@@ -31,6 +32,29 @@ class MediaImage extends StatefulWidget {
   final String errorMessage;
   final MediaService? mediaService;
   final Widget? errorWidget;
+  final Widget? loadingWidget;
+
+  /// Whether [url] is fetched and prepared natively rather than handed to
+  /// [NetworkImage]: authenticated Gelbooru media, and Sankaku AVIF previews.
+  /// Flutter decodes AVIF through Android's ImageDecoder while blocking the
+  /// UI thread for the whole decode, so a grid of them freezes the app; the
+  /// native side converts them on a background thread instead.
+  static bool fetchesNatively(Board board, String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null || uri.scheme != 'https') return false;
+    final host = uri.host.toLowerCase();
+    return switch (board) {
+      Board.gelbooru =>
+        (host == 'gelbooru.com' || host.endsWith('.gelbooru.com')) &&
+            uri.queryParameters['api_key']?.isNotEmpty == true &&
+            uri.queryParameters['user_id']?.isNotEmpty == true,
+      Board.sankaku =>
+        (host == 'sankakucomplex.com' ||
+                host.endsWith('.sankakucomplex.com')) &&
+            uri.path.toLowerCase().endsWith('.avif'),
+      _ => false,
+    };
+  }
 
   @override
   State<MediaImage> createState() => _MediaImageState();
@@ -40,16 +64,8 @@ class _MediaImageState extends State<MediaImage> {
   Future<Uint8List>? _mediaFuture;
 
   bool get _hasUrl => widget.url.trim().isNotEmpty;
-  bool get _useNativeFetch {
-    if (widget.board != Board.gelbooru || !_hasUrl) return false;
-    final uri = Uri.tryParse(widget.url);
-    final host = uri?.host.toLowerCase() ?? '';
-    final parameters = uri?.queryParameters;
-    return uri?.scheme == 'https' &&
-        (host == 'gelbooru.com' || host.endsWith('.gelbooru.com')) &&
-        parameters?['api_key']?.isNotEmpty == true &&
-        parameters?['user_id']?.isNotEmpty == true;
-  }
+  bool get _useNativeFetch =>
+      _hasUrl && MediaImage.fetchesNatively(widget.board, widget.url);
 
   @override
   void initState() {
@@ -98,6 +114,9 @@ class _MediaImageState extends State<MediaImage> {
         child: Text(widget.errorMessage, textAlign: TextAlign.center),
       );
 
+  Widget _loading() =>
+      widget.loadingWidget ?? const Center(child: CircularProgressIndicator());
+
   @override
   Widget build(BuildContext context) {
     if (!_hasUrl) return _error();
@@ -105,9 +124,8 @@ class _MediaImageState extends State<MediaImage> {
       return Image(
         image: _bounded(NetworkImage(widget.url)),
         fit: widget.fit,
-        loadingBuilder: (_, child, progress) => progress == null
-            ? child
-            : const Center(child: CircularProgressIndicator()),
+        loadingBuilder: (_, child, progress) =>
+            progress == null ? child : _loading(),
         errorBuilder: (_, _, _) => _error(),
       );
     }
@@ -117,7 +135,7 @@ class _MediaImageState extends State<MediaImage> {
       builder: (_, snapshot) {
         if (snapshot.hasError || !snapshot.hasData) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return _loading();
           }
           return _error();
         }

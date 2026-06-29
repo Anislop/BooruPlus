@@ -270,8 +270,10 @@ internal fun parseSankakuPost(post: JSONObject, avifPreviews: Boolean): Map<Stri
     if (!SANKAKU_ID.matches(id)) return null
     val url = sankakuMediaUrl(jsonString(post, "file_url")) ?: return null
     val preview = sankakuMediaUrl(jsonString(post, "preview_url"))
-    // AVIF decoding is available to Flutter through Android's ImageDecoder
-    // from API 31. Older devices get the WebP/JPEG sample instead.
+    // The 600px AVIF preview is a fraction of the 2200-3000px sample's size,
+    // and Android's ImageDecoder reads AVIF from API 31. Flutter must not
+    // decode it itself (see MediaImage); fetchMedia converts it natively.
+    // Older devices get the WebP/JPEG sample instead.
     val sample = sankakuMediaUrl(jsonString(post, "sample_url"))
         ?.takeIf { extension(it) in IMAGE_EXTENSIONS }
     val previewUrl = if (avifPreviews) preview ?: sample else sample ?: preview
@@ -350,6 +352,18 @@ internal fun sankakuMediaUrl(value: String?): String? {
         val uri = URI(url)
         if (uri.scheme != "https" || uri.host.isNullOrBlank() || uri.userInfo != null) null else url
     } catch (_: Exception) { null }
+}
+
+/** Hosts that serve Sankaku's signed media (`v.`, `s.` and similar). */
+internal fun isSankakuMediaHost(host: String): Boolean =
+    host == "sankakucomplex.com" || host.endsWith(".sankakucomplex.com")
+
+/** True for an ISO-BMFF file whose `ftyp` brand is AVIF (still or sequence). */
+internal fun isAvif(bytes: ByteArray): Boolean {
+    if (bytes.size < 12) return false
+    if (String(bytes, 4, 4, Charsets.US_ASCII) != "ftyp") return false
+    val brand = String(bytes, 8, 4, Charsets.US_ASCII)
+    return brand == "avif" || brand == "avis"
 }
 
 private fun extension(url: String): String =

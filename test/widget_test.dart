@@ -2,6 +2,7 @@ import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
+import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
 import 'package:booruplus/ui/onboarding.dart';
 import 'package:booruplus/ui/search_guide.dart';
@@ -10,6 +11,7 @@ import 'package:booruplus/ui/tag_input.dart';
 import 'package:booruplus/ui/theme.dart';
 import 'package:booruplus/ui/settings.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'core_test.dart' show FakeAccounts, MemoryStore, FakeRepo;
@@ -416,6 +418,65 @@ void main() {
     );
     final tag = tester.widget<Text>(find.text('artist_name'));
     expect(tag.style?.color, const Color(0xFFE8A0FF));
+  });
+
+  testWidgets('Sankaku AVIF previews are fetched natively, not by the engine', (
+    tester,
+  ) async {
+    // The engine decodes AVIF on the UI thread, freezing the grid.
+    const avif = 'https://v.sankakucomplex.com/data/preview/a.avif?e=1&t=x';
+    const webp = 'https://v.sankakucomplex.com/data/sample/a.webp?e=1&t=x';
+    expect(MediaImage.fetchesNatively(Board.sankaku, avif), isTrue);
+    expect(MediaImage.fetchesNatively(Board.sankaku, webp), isFalse);
+    expect(
+      MediaImage.fetchesNatively(
+        Board.sankaku,
+        avif.replaceAll('https', 'http'),
+      ),
+      isFalse,
+    );
+    expect(
+      MediaImage.fetchesNatively(Board.sankaku, 'https://evil.example/a.avif'),
+      isFalse,
+    );
+    expect(MediaImage.fetchesNatively(Board.danbooru, avif), isFalse);
+
+    const channel = MethodChannel('booruplus/platform');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final requests = <Map<Object?, Object?>>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'fetchMedia') {
+        requests.add(call.arguments as Map<Object?, Object?>);
+      }
+      return Uint8List.fromList([0]);
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    final value = MediaPost.fromMap({
+      ...post(13),
+      'id': 'abc13',
+      'url': 'https://v.sankakucomplex.com/data/a.jpg?e=1&t=x',
+      'previewUrl': avif,
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: SizedBox(
+            width: 240,
+            height: 180,
+            child: MediaTile(post: value, board: Board.sankaku, onTap: () {}),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(requests, [
+      {'board': 'sankaku', 'url': avif, 'apiKey': null, 'userId': null},
+    ]);
+    expect(find.byType(MediaImage), findsOneWidget);
+    expect(networkImageUrls(tester), isNot(contains(avif)));
   });
 
   testWidgets('home hides post tags and switches between grid layouts', (

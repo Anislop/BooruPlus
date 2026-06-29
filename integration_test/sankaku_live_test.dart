@@ -1,13 +1,16 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
 import 'package:booruplus/ui/home.dart';
+import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
 import 'package:booruplus/ui/theme.dart';
-import 'package:flutter/foundation.dart' show consolidateHttpClientResponseBytes;
+import 'package:flutter/foundation.dart'
+    show consolidateHttpClientResponseBytes;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -77,7 +80,11 @@ void main() {
         await tester.pump(const Duration(milliseconds: 50));
         if (ready()) return;
       }
-      expect(ready(), isTrue, reason: 'UI interaction did not finish within 2s');
+      expect(
+        ready(),
+        isTrue,
+        reason: 'UI interaction did not finish within 2s',
+      );
     }
 
     Future<void> navigationResponds() async {
@@ -159,20 +166,32 @@ void main() {
 
     expect(await fetch(const [], random: true), isNotEmpty);
 
-    // The engine must decode the preview format chosen for this API level
-    // (AVIF from API 31, a WebP/JPEG sample below).
-    final client = HttpClient();
-    try {
-      final request = await client.getUrl(Uri.parse(first.first.previewUrl));
-      final response = await request.close();
-      expect(response.statusCode, 200);
-      final bytes = await consolidateHttpClientResponseBytes(response);
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      expect(frame.image.width, greaterThan(0));
-    } finally {
-      client.close();
+    // The preview chosen for this API level (AVIF from API 31, a WebP/JPEG
+    // sample below) must decode the way MediaImage loads it. AVIF goes
+    // through fetchMedia, which must hand back a format the engine decodes
+    // off the UI thread rather than AVIF itself.
+    final previewUrl = first.first.previewUrl;
+    late final Uint8List bytes;
+    if (MediaImage.fetchesNatively(Board.sankaku, previewUrl)) {
+      bytes = await MediaService().fetchMedia(
+        board: Board.sankaku,
+        url: previewUrl,
+      );
+      expect(String.fromCharCodes(bytes.sublist(8, 12)), 'WEBP');
+    } else {
+      final client = HttpClient();
+      try {
+        final request = await client.getUrl(Uri.parse(previewUrl));
+        final response = await request.close();
+        expect(response.statusCode, 200);
+        bytes = await consolidateHttpClientResponseBytes(response);
+      } finally {
+        client.close();
+      }
     }
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    expect(frame.image.width, greaterThan(0));
   });
 
   testWidgets('Sankaku autocomplete and anonymous tag limit', (tester) async {
