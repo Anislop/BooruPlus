@@ -3,6 +3,8 @@ package com.booruplus.app
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -32,6 +34,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -608,29 +611,72 @@ class MainActivity : FlutterActivity() {
     private fun fetchMedia(call: MethodCall, result: MethodChannel.Result) {
         val value = call.argument<String>("url")
         val parsed = value?.toHttpUrlOrNull()
+        if (call.argument<String>("board") == "sankaku" && parsed != null &&
+            parsed.scheme == "https" && isSankakuMediaHost(parsed.host)) {
+            background(result, mediaExecutor) {
+                decodableMedia(readMedia(value, ::isSankakuMediaHost, null))
+            }
+            return
+        }
         if (parsed == null || !isGelbooruHost(parsed.host) || parsed.scheme != "https" ||
             parsed.queryParameter("api_key").isNullOrBlank() || parsed.queryParameter("user_id").isNullOrBlank()) {
             result.error("INVALID_URL", "Unsupported media URL", null)
             return
         }
-        background(result, mediaExecutor) { readGelbooruMedia(value) }
+        background(result, mediaExecutor) { readMedia(value, ::isGelbooruHost, GELBOORU_REFERER) }
     }
 
-    private fun readGelbooruMedia(value: String): ByteArray {
+    /**
+     * Flutter decodes formats Skia lacks, such as AVIF, through Android's
+     * ImageDecoder while blocking its UI thread until the whole image is
+     * decoded, so a grid of AVIF previews froze the app as they arrived.
+     * They are decoded here on a media thread instead and returned as WebP,
+     * which Flutter decodes off the UI thread. Other formats pass unchanged.
+     */
+    private fun decodableMedia(bytes: ByteArray): ByteArray {
+        if (!isAvif(bytes)) return bytes
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) throw IOException("Unsupported image format")
+        val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+        val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val longest = maxOf(info.size.width, info.size.height)
+            if (longest > MAX_DECODED_SIDE) {
+                val scale = MAX_DECODED_SIDE.toDouble() / longest
+                decoder.setTargetSize(
+                    maxOf(1, (info.size.width * scale).toInt()),
+                    maxOf(1, (info.size.height * scale).toInt())
+                )
+            }
+        }
+        try {
+            val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else {
+                @Suppress("DEPRECATION") Bitmap.CompressFormat.WEBP
+            }
+            val output = ByteArrayOutputStream(maxOf(bytes.size, 65536))
+            if (!bitmap.compress(format, DECODED_QUALITY, output)) throw IOException("Encoding failed")
+            return output.toByteArray()
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun readMedia(value: String, allowedHost: (String) -> Boolean, referer: String?): ByteArray {
         var current = value.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid URL")
         repeat(MAX_MEDIA_REDIRECTS + 1) {
-            if (current.scheme != "https" || !isGelbooruHost(current.host) ||
+            if (current.scheme != "https" || !allowedHost(current.host) ||
                 current.username.isNotEmpty() || current.password.isNotEmpty()) {
                 throw IOException("Invalid media redirect")
             }
             val request = okhttp3.Request.Builder().url(current)
-                .header("Referer", GELBOORU_REFERER)
+                .apply { if (referer != null) header("Referer", referer) }
                 .header("User-Agent", USER_AGENT).build()
             mediaClient.newCall(request).execute().use { response ->
                 if (response.isRedirect) {
                     val location = response.header("Location") ?: throw IOException("Invalid redirect")
                     val next = current.resolve(location) ?: throw IOException("Invalid redirect")
-                    if (next.scheme != "https" || !isGelbooruHost(next.host) ||
+                    if (next.scheme != "https" || !allowedHost(next.host) ||
                         next.username.isNotEmpty() || next.password.isNotEmpty()) {
                         throw IOException("Invalid media redirect")
                     }
@@ -814,6 +860,9 @@ class MainActivity : FlutterActivity() {
         private const val MAX_WINDOW_REQUESTS = 32
         private const val MAX_MEDIA_REDIRECTS = 5
         private const val MAX_MEDIA_BYTES = 50L * 1024L * 1024L
+        // Matches the viewer's decode bound; Sankaku previews are 600px.
+        private const val MAX_DECODED_SIDE = 4096
+        private const val DECODED_QUALITY = 90
         private const val TAG_LOOKUP_BATCH_SIZE = 40
         private const val TAG_LOOKUP_MAX_BATCHES = 4
         private const val TAG_LOOKUP_TIMEOUT_SECONDS = 8L

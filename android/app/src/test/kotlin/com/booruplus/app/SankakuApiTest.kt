@@ -146,4 +146,19 @@ class SankakuApiTest {
         }.build()
         assertThrows(IOException::class.java) { fetch(SankakuApi(client, "test"), cancelled = { true }) }
     }
+
+    @Test
+    fun recognizesAvifPreviewsAndMediaHosts() {
+        fun header(brand: String) = byteArrayOf(0, 0, 0, 32) + "ftyp$brand".toByteArray() + ByteArray(8)
+        assertTrue(isAvif(header("avif")))
+        assertTrue(isAvif(header("avis")))
+        assertFalse(isAvif(header("heic")))
+        assertFalse(isAvif(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())))
+        assertFalse(isAvif("RIFF\u0000\u0000\u0000\u0000WEBPVP8 ".toByteArray()))
+
+        assertTrue(isSankakuMediaHost("v.sankakucomplex.com"))
+        assertTrue(isSankakuMediaHost("s.sankakucomplex.com"))
+        assertFalse(isSankakuMediaHost("sankakucomplex.com.evil.example"))
+        assertFalse(isSankakuMediaHost("evilsankakucomplex.com"))
+    }
 }

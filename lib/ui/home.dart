@@ -816,7 +816,7 @@ class _MediaTileState extends State<MediaTile> {
               color: Colors.white24,
             ),
           )
-        : board == Board.gelbooru
+        : board == Board.gelbooru || MediaImage.fetchesNatively(board, url)
         ? MediaImage(
             url: url,
             board: board,
@@ -825,6 +825,11 @@ class _MediaTileState extends State<MediaTile> {
             errorWidget: const Center(
               child: Icon(Icons.broken_image_outlined, color: Colors.white24),
             ),
+            loadingWidget: board == Board.gelbooru
+                ? null
+                : const Center(
+                    child: Icon(Icons.image_outlined, color: Colors.white12),
+                  ),
           )
         : Image.network(
             url,
@@ -1350,21 +1355,36 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
             widget.board != Board.gelbooru &&
             post.previewUrl.isNotEmpty &&
             post.previewUrl != mediaUrl
-        ? Image.network(
-            post.previewUrl,
-            fit: BoxFit.contain,
-            cacheWidth: 480,
-            errorBuilder: (_, _, _) => const SizedBox.shrink(),
-          )
+        ? MediaImage.fetchesNatively(widget.board, post.previewUrl)
+              ? MediaImage(
+                  url: post.previewUrl,
+                  board: widget.board,
+                  fit: BoxFit.contain,
+                  cacheWidth: 480,
+                  errorWidget: const SizedBox.shrink(),
+                  loadingWidget: const SizedBox.shrink(),
+                )
+              : Image.network(
+                  post.previewUrl,
+                  fit: BoxFit.contain,
+                  cacheWidth: 480,
+                  errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                )
         : null;
     final Widget media = mediaUrl.isEmpty
         ? const Center(child: Icon(Icons.image_not_supported_outlined))
-        : widget.board == Board.gelbooru
+        : widget.board == Board.gelbooru ||
+              MediaImage.fetchesNatively(widget.board, mediaUrl)
         ? MediaImage(
             url: mediaUrl,
             board: widget.board,
             fit: BoxFit.contain,
             cacheWidth: cacheWidth,
+            errorWidget: widget.board == Board.gelbooru
+                ? null
+                : placeholder == null
+                ? broken
+                : const SizedBox.shrink(),
           )
         : Image.network(
             mediaUrl,
