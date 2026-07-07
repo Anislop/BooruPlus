@@ -18,6 +18,7 @@ class MediaImage extends StatefulWidget {
     this.mediaService,
     this.errorWidget,
     this.loadingWidget,
+    this.showProgress = false,
   });
 
   final String url;
@@ -34,6 +35,10 @@ class MediaImage extends StatefulWidget {
   final Widget? errorWidget;
   final Widget? loadingWidget;
 
+  /// Shows a progress bar while loading instead of [loadingWidget]; it fills
+  /// as bytes arrive when the size is known (network images).
+  final bool showProgress;
+
   /// Whether [url] is fetched and prepared natively rather than handed to
   /// [NetworkImage]: authenticated Gelbooru media, and Sankaku AVIF previews.
   /// Flutter decodes AVIF through Android's ImageDecoder while blocking the
@@ -48,7 +53,7 @@ class MediaImage extends StatefulWidget {
         (host == 'gelbooru.com' || host.endsWith('.gelbooru.com')) &&
             uri.queryParameters['api_key']?.isNotEmpty == true &&
             uri.queryParameters['user_id']?.isNotEmpty == true,
-      Board.sankaku =>
+      Board.sankaku || Board.idolcomplex =>
         (host == 'sankakucomplex.com' ||
                 host.endsWith('.sankakucomplex.com')) &&
             uri.path.toLowerCase().endsWith('.avif'),
@@ -114,8 +119,27 @@ class _MediaImageState extends State<MediaImage> {
         child: Text(widget.errorMessage, textAlign: TextAlign.center),
       );
 
-  Widget _loading() =>
-      widget.loadingWidget ?? const Center(child: CircularProgressIndicator());
+  Widget _loading([ImageChunkEvent? progress]) {
+    if (!widget.showProgress) {
+      return widget.loadingWidget ??
+          const Center(child: CircularProgressIndicator());
+    }
+    final total = progress?.expectedTotalBytes;
+    final value = total == null || total <= 0
+        ? null
+        : (progress!.cumulativeBytesLoaded / total).clamp(0.0, 1.0);
+    return Center(
+      child: SizedBox(
+        width: 200,
+        child: LinearProgressIndicator(
+          key: const ValueKey('media_progress'),
+          value: value,
+          minHeight: 4,
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -125,7 +149,7 @@ class _MediaImageState extends State<MediaImage> {
         image: _bounded(NetworkImage(widget.url)),
         fit: widget.fit,
         loadingBuilder: (_, child, progress) =>
-            progress == null ? child : _loading(),
+            progress == null ? child : _loading(progress),
         errorBuilder: (_, _, _) => _error(),
       );
     }

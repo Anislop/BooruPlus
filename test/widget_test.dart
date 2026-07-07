@@ -95,7 +95,7 @@ void main() {
     state.dispose();
   });
 
-  testWidgets('Save commits an unfinished blacklist tag', (tester) async {
+  testWidgets('Leaving blocked tags keeps an unfinished tag', (tester) async {
     final store = MemoryStore();
     final state = AppState(repository: FakeRepo(const [[]]), store: store);
     await state.initialize();
@@ -106,13 +106,17 @@ void main() {
       ),
     );
     await tester.scrollUntilVisible(
-      find.byType(TextField),
+      find.text('No blocked tags yet.'),
       250,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.enterText(find.byType(TextField), 'blocked_tag');
-    // Finish the caret reveal first, or it scrolls back after the drag; then
-    // let the drag's fling settle, since a scrolling list ignores taps.
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('No blocked tags yet.'));
+    await tester.pumpAndSettle();
+    // The first field blocks tags on every website.
+    await tester.enterText(find.byType(TextField).first, 'blocked_tag');
+    await tester.pumpAndSettle();
+    await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('Save preferences'),

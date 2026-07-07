@@ -41,6 +41,7 @@ class AppState extends ChangeNotifier {
   final Map<Board, Future<Credentials?>> _sessionRenewals = {};
   // Sankaku's signed-in tag limit is not documented. It is learned from the
   // provider's tag-limit refusal; until then exclusions are not trimmed.
+  // Only Sankaku Complex has sign-in, so the limit is not per board.
   int? _sankakuSignedInTagLimit;
   String? _notice;
   List<SavedPost> _favoritePosts = const [];
@@ -77,11 +78,15 @@ class AppState extends ChangeNotifier {
 
   bool get hasMore => _hasMore;
   bool get initialized => _initialized;
+
+  /// The bookmarked searches of the current website, or the shared ones
+  /// when [AppSettings.globalSavedQueries] is on.
   List<List<String>> get savedQueries =>
-      List.unmodifiable(_settings.savedQueries);
+      List.unmodifiable(_settings.savedQueriesFor(_board));
   List<List<String>> get recentSearches =>
       List.unmodifiable(_settings.recentSearches);
-  List<Rating> get selectedRatings => List.unmodifiable(_settings.selectedRatings);
+  List<Rating> get selectedRatings =>
+      List.unmodifiable(_settings.selectedRatings);
   Map<String, int> get searchedTagCounts =>
       Map.unmodifiable(_settings.searchedTagCounts);
   Map<String, int> get browsedTagCounts =>
@@ -97,7 +102,7 @@ class AppState extends ChangeNotifier {
 
   SavedPost displayReady(SavedPost post) {
     final authorized = post.authorized(_credentialsByBoard[post.board]);
-    if (authorized.board != Board.sankaku || !authorized.post.hasId) {
+    if (!authorized.board.isSankakuFamily || !authorized.post.hasId) {
       return authorized;
     }
     final fresh = _refreshedMedia[authorized.identity];
@@ -120,7 +125,7 @@ class AppState extends ChangeNotifier {
   /// [post] with media URLs that are still valid for display. Only boards
   /// with expiring media URLs are rewritten; other posts pass through.
   MediaPost displayPost(MediaPost post, {required Board board}) =>
-      board == Board.sankaku
+      board.isSankakuFamily
       ? displayReady(SavedPost(board: board, post: post)).post
       : post;
 
@@ -343,6 +348,24 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       });
 
+  /// Persists the drawer's website order and hidden set without reloading
+  /// the feed.
+  Future<void> setBoardLayout(List<Board> order, Iterable<Board> hidden) =>
+      _enqueueSettingsUpdate(() async {
+        final next = _settings.copyWith(
+          boardOrder: order,
+          hiddenBoards: hidden.toList(),
+        );
+        if (next == _settings) return;
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+        notifyListeners();
+      });
+
   Future<void> _recordRecentSearch(List<String> value) {
     final query = value
         .map(_normalize)
@@ -400,27 +423,25 @@ class AppState extends ChangeNotifier {
     });
   }
 
-  Set<String> _usageTags(
-    Iterable<String> values, {
-    required bool searched,
-  }) => values
-        .map(_normalize)
-        .map(
-          (tag) => tag.startsWith('-') || tag.startsWith('~')
-              ? tag.substring(1)
-              : tag,
-        )
-        .where((tag) => tag.isNotEmpty && (!searched || _isOrdinaryTag(tag)))
-        .toSet();
+  Set<String> _usageTags(Iterable<String> values, {required bool searched}) =>
+      values
+          .map(_normalize)
+          .map(
+            (tag) => tag.startsWith('-') || tag.startsWith('~')
+                ? tag.substring(1)
+                : tag,
+          )
+          .where((tag) => tag.isNotEmpty && (!searched || _isOrdinaryTag(tag)))
+          .toSet();
 
-  List<String> _topTags(Map<String, int> counts) => (counts.entries.toList()
-        ..sort((a, b) {
-          final byCount = b.value.compareTo(a.value);
-          return byCount == 0 ? a.key.compareTo(b.key) : byCount;
-        }))
-      .take(10)
-      .map((entry) => entry.key)
-      .toList(growable: false);
+  List<String> _topTags(Map<String, int> counts) =>
+      (counts.entries.toList()..sort((a, b) {
+            final byCount = b.value.compareTo(a.value);
+            return byCount == 0 ? a.key.compareTo(b.key) : byCount;
+          }))
+          .take(10)
+          .map((entry) => entry.key)
+          .toList(growable: false);
 
   Future<void> removeRecentSearch(List<String> value) async {
     final key = value
@@ -467,14 +488,24 @@ class AppState extends ChangeNotifier {
         .toSet()
         .toList();
     if (query.isEmpty) return;
+    final board = _board;
     await _enqueueSettingsUpdate(() async {
-      final next = [query, ..._settings.savedQueries];
-      final normalized = _settings.copyWith(savedQueries: next);
+      final next = [query, ..._settings.savedQueriesFor(board)];
+      final normalized = _withSavedQueries(board, next);
       await _store.saveSettings(normalized);
       _settings = normalized;
       notifyListeners();
     });
   }
+
+  /// [_settings] with [queries] as [board]'s bookmarks, or as the shared
+  /// bookmarks when they are global.
+  AppSettings _withSavedQueries(Board? board, List<List<String>> queries) =>
+      _settings.globalSavedQueries || board == null
+      ? _settings.copyWith(savedQueries: queries)
+      : _settings.copyWith(
+          boardSavedQueries: {..._settings.boardSavedQueries, board: queries},
+        );
 
   Future<void> removeSavedQuery(List<String> value) async {
     final key = value
@@ -482,11 +513,13 @@ class AppState extends ChangeNotifier {
         .where((e) => e.isNotEmpty)
         .toSet()
         .join('\u0000');
+    final board = _board;
     await _enqueueSettingsUpdate(() async {
-      final next = _settings.savedQueries
+      final next = _settings
+          .savedQueriesFor(board)
           .where((query) => query.map(_normalize).toSet().join('\u0000') != key)
           .toList();
-      final normalized = _settings.copyWith(savedQueries: next);
+      final normalized = _withSavedQueries(board, next);
       await _store.saveSettings(normalized);
       _settings = normalized;
       notifyListeners();
@@ -511,10 +544,13 @@ class AppState extends ChangeNotifier {
       final normalized = value
           .copyWith(
             savedQueries: _settings.savedQueries,
+            boardSavedQueries: _settings.boardSavedQueries,
             recentSearches: _settings.recentSearches,
             selectedRatings: _settings.selectedRatings,
             searchedTagCounts: _settings.searchedTagCounts,
             browsedTagCounts: _settings.browsedTagCounts,
+            boardOrder: _settings.boardOrder,
+            hiddenBoards: _settings.hiddenBoards,
           )
           .normalized();
       await _store.saveSettings(normalized);
@@ -705,7 +741,7 @@ class AppState extends ChangeNotifier {
         // Sankaku deliberately returns short batches when some records have
         // no accessible media. Show usable posts now instead of multiplying
         // the native page search to fill the configured batch size.
-        if (_board == Board.sankaku && accepted.isNotEmpty) break;
+        if (_board!.isSankakuFamily && accepted.isNotEmpty) break;
       }
       if (generation != _generation) return;
       _page = lastFetchedPage;
@@ -768,7 +804,7 @@ class AppState extends ChangeNotifier {
 
   List<String> _queryTags({bool signedIn = false}) {
     final exclusions = [
-      ..._settings.blacklist.map((tag) => '-$tag'),
+      ..._settings.blacklistFor(_board).map((tag) => '-$tag'),
       if (_settings.excludeAi) '-$_aiTag',
     ];
     final rating = _singleProviderRating;
@@ -777,7 +813,8 @@ class AppState extends ChangeNotifier {
     // metatags are free). Exclusions are rejected unless a positive tag is
     // present, so the unfiltered feed relies on local filtering instead.
     // Signed-in searches allow more; their limit is learned on refusal.
-    if (_board == Board.sankaku) {
+    // Idol Complex uses the same API and is treated the same way.
+    if (_board?.isSankakuFamily == true) {
       final query = [
         ..._tags,
         if (rating != null) 'rating:${rating.shortQueryValue}',
@@ -840,17 +877,21 @@ class AppState extends ChangeNotifier {
   }
 
   /// The provider's tag for AI-generated media.
-  String get _aiTag => _board == Board.sankaku ? 'ai-created' : 'ai_generated';
+  String get _aiTag =>
+      _board?.isSankakuFamily == true ? 'ai-created' : 'ai_generated';
 
-  bool _allowed(MediaPost post) =>
-      !(_settings.excludeAi &&
-          post.tags.any((tag) => _normalize(tag) == _aiTag)) &&
-      !_settings.blacklist.any(
-        (blocked) =>
-            post.tags.any((tag) => _normalize(tag) == _normalize(blocked)),
-      ) &&
-      _ratingAllowed(post) &&
-      !_isHidden(post);
+  bool _allowed(MediaPost post) {
+    if (_settings.excludeAi &&
+        post.tags.any((tag) => _normalize(tag) == _aiTag)) {
+      return false;
+    }
+    final blocked = _settings.blacklistFor(_board);
+    if (blocked.isNotEmpty) {
+      final tags = post.tags.map(_normalize).toSet();
+      if (blocked.any((tag) => tags.contains(_normalize(tag)))) return false;
+    }
+    return _ratingAllowed(post) && !_isHidden(post);
+  }
 
   Rating? _postRating(MediaPost post) => RatingInfo.parse(post.rating);
   bool _ratingAllowed(MediaPost post) {

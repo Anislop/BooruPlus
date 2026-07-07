@@ -16,6 +16,7 @@ class TagInput extends StatefulWidget {
     this.onSubmit,
     this.onDraftChanged,
     this.autocomplete,
+    this.searchStyle = true,
   });
   final List<String> tags;
   final ValueChanged<List<String>> onChanged;
@@ -24,12 +25,17 @@ class TagInput extends StatefulWidget {
   final Future<List<TagSuggestion>> Function(String query)? autocomplete;
   final String hint;
   final bool enabled;
+
+  /// Shows the search icon and the submit arrow; off for tag lists that
+  /// are not searches, such as blocked tags.
+  final bool searchStyle;
   @override
   TagInputState createState() => TagInputState();
 }
 
 class TagInputState extends State<TagInput> {
   final _controller = TextEditingController();
+  final _focus = FocusNode();
   Timer? _debounce;
   List<TagSuggestion> _suggestions = const [];
 
@@ -39,6 +45,12 @@ class TagInputState extends State<TagInput> {
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    _focus.addListener(_onFocusChanged);
+  }
+
+  // Redraws the field's focused outline.
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onTextChanged() {
@@ -100,60 +112,87 @@ class TagInputState extends State<TagInput> {
     _debounce?.cancel();
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
+    _focus.removeListener(_onFocusChanged);
+    _focus.dispose();
     super.dispose();
   }
+
+  void _submit() {
+    _commit(all: true);
+    widget.onSubmit?.call();
+  }
+
+  // Committed tags sit inside the field as chips, ahead of the text being
+  // typed; the text field wraps onto a new line when the row is full.
+  Widget _field(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.translucent,
+    onTap: widget.enabled ? _focus.requestFocus : null,
+    child: InputDecorator(
+      isFocused: _focus.hasFocus,
+      isEmpty: false,
+      decoration: InputDecoration(
+        enabled: widget.enabled,
+        prefixIcon: widget.searchStyle
+            ? const Icon(Icons.search_rounded, size: 22)
+            : null,
+        suffixIcon: widget.searchStyle
+            ? IconButton(
+                tooltip: 'Search',
+                icon: const Icon(Icons.arrow_forward_rounded),
+                onPressed: widget.enabled ? _submit : null,
+              )
+            : null,
+        contentPadding: EdgeInsets.symmetric(
+          horizontal: widget.searchStyle ? 0 : 16,
+          vertical: 8,
+        ),
+      ),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final tag in widget.tags)
+            InputChip(
+              label: Text(tag),
+              deleteIcon: const Icon(Icons.close, size: 16),
+              onDeleted: widget.enabled
+                  ? () => widget.onChanged(
+                      widget.tags.where((t) => t != tag).toList(),
+                    )
+                  : null,
+              backgroundColor: panel,
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 96),
+            child: IntrinsicWidth(
+              child: TextField(
+                controller: _controller,
+                focusNode: _focus,
+                enabled: widget.enabled,
+                autocorrect: false,
+                enableSuggestions: false,
+                textInputAction: TextInputAction.search,
+                decoration: InputDecoration.collapsed(
+                  hintText: widget.tags.isEmpty ? widget.hint : 'Add tag',
+                ),
+                onChanged: (_) => _commit(),
+                onSubmitted: (_) => _submit(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      if (widget.tags.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 4,
-            children: [
-              for (final tag in widget.tags)
-                InputChip(
-                  label: Text(tag),
-                  deleteIcon: const Icon(Icons.close, size: 16),
-                  onDeleted: widget.enabled
-                      ? () => widget.onChanged(
-                          widget.tags.where((t) => t != tag).toList(),
-                        )
-                      : null,
-                  backgroundColor: panel,
-                ),
-            ],
-          ),
-        ),
-      TextField(
-        controller: _controller,
-        enabled: widget.enabled,
-        autocorrect: false,
-        enableSuggestions: false,
-        textInputAction: TextInputAction.search,
-        decoration: InputDecoration(
-          hintText: widget.hint,
-          prefixIcon: const Icon(Icons.search_rounded, size: 22),
-          suffixIcon: IconButton(
-            tooltip: 'Search',
-            icon: const Icon(Icons.arrow_forward_rounded),
-            onPressed: widget.enabled
-                ? () {
-                    _commit(all: true);
-                    widget.onSubmit?.call();
-                  }
-                : null,
-          ),
-        ),
-        onChanged: (_) => _commit(),
-        onSubmitted: (_) {
-          _commit(all: true);
-          widget.onSubmit?.call();
-        },
-      ),
+      _field(context),
       if (_suggestions.isNotEmpty)
         Container(
           constraints: const BoxConstraints(maxHeight: 190),

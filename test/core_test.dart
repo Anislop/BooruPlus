@@ -241,10 +241,7 @@ void main() {
 
   test('search and browse usage are counted independently', () async {
     final store = MemoryStore()..selected = Board.konachan;
-    final state = AppState(
-      repository: FakeRepo(const [[]]),
-      store: store,
-    );
+    final state = AppState(repository: FakeRepo(const [[]]), store: store);
     await state.initialize();
 
     await state.search([' Cat ', '-dog', 'order:score', 'cat']);
@@ -258,27 +255,30 @@ void main() {
     expect(store.settings.browsedTagCounts, state.browsedTagCounts);
   });
 
-  test('Konachan rating filters query and locally filter returned posts', () async {
-    final general = post(101)..['rating'] = 'safe';
-    final explicit = post(102)..['rating'] = 'explicit';
-    final repo = FakeRepo([
-      [general, explicit],
-    ]);
-    final state = AppState(
-      repository: repo,
-      store: MemoryStore()
-        ..selected = Board.konachan
-        ..settings = const AppSettings(selectedRatings: [Rating.general]),
-    );
-    await state.initialize();
+  test(
+    'Konachan rating filters query and locally filter returned posts',
+    () async {
+      final general = post(101)..['rating'] = 'safe';
+      final explicit = post(102)..['rating'] = 'explicit';
+      final repo = FakeRepo([
+        [general, explicit],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()
+          ..selected = Board.konachan
+          ..settings = const AppSettings(selectedRatings: [Rating.general]),
+      );
+      await state.initialize();
 
-    expect(repo.queries.first, contains('rating:s'));
-    expect(state.posts.map((value) => value.id), [101]);
+      expect(repo.queries.first, contains('rating:s'));
+      expect(state.posts.map((value) => value.id), [101]);
 
-    await state.setRatingFilters([Rating.explicit]);
-    expect(repo.queries.last, contains('rating:e'));
-    expect(state.posts.map((value) => value.id), [102]);
-  });
+      await state.setRatingFilters([Rating.explicit]);
+      expect(repo.queries.last, contains('rating:e'));
+      expect(state.posts.map((value) => value.id), [102]);
+    },
+  );
 
   test(
     'typed tags preserve categories while raw tags fall back to general',
@@ -327,6 +327,81 @@ void main() {
     expect(repo.calls, 1);
     await state.removeSavedQuery(['CAT']);
     expect(state.savedQueries, isEmpty);
+  });
+
+  test('saved queries are per website unless shared globally', () async {
+    final store = MemoryStore()..selected = Board.safebooru;
+    final state = AppState(repository: FakeRepo(const [[]]), store: store);
+    await state.initialize();
+    await state.addSavedQuery(['cat']);
+    await state.chooseBoard(Board.danbooru);
+    expect(state.savedQueries, isEmpty);
+    await state.addSavedQuery(['dog']);
+    expect(store.settings.boardSavedQueries[Board.safebooru], [
+      ['cat'],
+    ]);
+    expect(store.settings.savedQueries, isEmpty);
+
+    await state.updateSettings(
+      state.settings.copyWith(globalSavedQueries: true),
+    );
+    expect(state.savedQueries, isEmpty);
+    await state.addSavedQuery(['bird']);
+    await state.chooseBoard(Board.safebooru);
+    expect(state.savedQueries, [
+      ['bird'],
+    ]);
+    // Per-website searches survive the shared mode.
+    expect(store.settings.boardSavedQueries[Board.danbooru], [
+      ['dog'],
+    ]);
+  });
+
+  test('per-website blocked tags round-trip and apply to their site', () async {
+    final settings = AppSettings(
+      blacklist: const ['shared'],
+      boardBlacklists: const {
+        Board.safebooru: [' Only_Here ', 'shared'],
+        Board.danbooru: [],
+      },
+      boardSavedQueries: const {
+        Board.e621: [
+          ['wolf'],
+        ],
+      },
+      globalSavedQueries: true,
+    ).normalized();
+    final restored = AppSettings.decode(settings.encode());
+    expect(restored, settings);
+    expect(restored.boardBlacklists.keys, [Board.safebooru]);
+    expect(restored.blacklistFor(Board.safebooru), ['shared', 'only_here']);
+    expect(restored.blacklistFor(Board.danbooru), ['shared']);
+    expect(restored.savedQueriesFor(Board.e621), isEmpty);
+    expect(
+      restored.copyWith(globalSavedQueries: false).savedQueriesFor(Board.e621),
+      [
+        ['wolf'],
+      ],
+    );
+    final legacy = AppSettings.decode('{"blacklist": ["a"]}');
+    expect(legacy.boardBlacklists, isEmpty);
+    expect(legacy.globalSavedQueries, isFalse);
+
+    final repo = FakeRepo([
+      [
+        {'id': 1, 'url': 'https://x/1.jpg', 'tags': 'only_here'},
+        {'id': 2, 'url': 'https://x/2.jpg', 'tags': 'cat'},
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    await state.updateSettings(settings.copyWith(excludeAi: false));
+    await state.search(['cat']);
+    expect(repo.queries.last, ['cat', '-shared', '-only_here']);
+    expect(state.posts.map((post) => post.id), [2]);
   });
 
   test(
@@ -1138,10 +1213,7 @@ void main() {
     expect(state.settings.videoQuality, 720);
     expect(store.settings.videoQuality, 720);
     expect(repo.calls, calls);
-    expect(
-      AppSettings.decode(store.settings.encode()).videoQuality,
-      720,
-    );
+    expect(AppSettings.decode(store.settings.encode()).videoQuality, 720);
     expect(AppSettings.decode('{}').videoQuality, 0);
   });
 
@@ -1383,9 +1455,8 @@ void main() {
     const a = 'https://img.gelbooru.com/a.jpg';
     const b = 'https://img.gelbooru.com/b.jpg';
     final first = media.fetchMedia(board: Board.gelbooru, url: a);
-    final again = MediaService(
-      channel: channel,
-    ).fetchMedia(board: Board.gelbooru, url: a);
+    final again = MediaService(channel: channel)
+        .fetchMedia(board: Board.gelbooru, url: a);
     expect(await first, [1, 2, 3]);
     expect(await again, [1, 2, 3]);
     await media.fetchMedia(board: Board.gelbooru, url: a);
