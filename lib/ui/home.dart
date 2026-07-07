@@ -22,9 +22,23 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+/// The post a tag was opened from, so back can return to it.
+class _ViewerSnapshot {
+  const _ViewerSnapshot(this.posts, this.board, this.index);
+  final List<MediaPost> posts;
+  final Board board;
+  final int index;
+}
+
+class _HistoryEntry {
+  const _HistoryEntry(this.tags, this.viewer);
+  final List<String> tags;
+  final _ViewerSnapshot? viewer;
+}
+
 class _HomeScreenState extends State<HomeScreen> {
   final _scroll = ScrollController();
-  final _searchHistory = <List<String>>[];
+  final _searchHistory = <_HistoryEntry>[];
   bool _drawerOpen = false;
   @override
   void initState() {
@@ -51,15 +65,50 @@ class _HomeScreenState extends State<HomeScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(notice)));
   }
 
-  void _search(List<String> tags) {
+  void _search(List<String> tags, {_ViewerSnapshot? viewer}) {
     final next = List<String>.unmodifiable(tags);
-    if (!_sameQuery(widget.state.tags, next) &&
-        (_searchHistory.isEmpty ||
-            !_sameQuery(_searchHistory.last, widget.state.tags))) {
-      _searchHistory.add(List<String>.unmodifiable(widget.state.tags));
+    final current = widget.state.tags;
+    final changed = !_sameQuery(current, next);
+    // A tag opened from a post always gets its own entry so back returns
+    // to that post, even when the feed already shows that query.
+    if (viewer != null ||
+        (changed &&
+            (_searchHistory.isEmpty ||
+                !_sameQuery(_searchHistory.last.tags, current)))) {
+      setState(
+        () => _searchHistory.add(
+          _HistoryEntry(List<String>.unmodifiable(current), viewer),
+        ),
+      );
     }
+    if (!changed) return;
     if (_scroll.hasClients) _scroll.jumpTo(0);
     widget.state.search(next);
+  }
+
+  Future<void> _openViewer(
+    List<MediaPost> posts,
+    Board board,
+    int index,
+  ) async {
+    final state = widget.state;
+    final result = await Navigator.push<ViewerTagBrowse>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MediaViewer(
+          post: state.displayPost(posts[index], board: board),
+          board: board,
+          posts: posts,
+          initialIndex: index,
+          state: state,
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    // The board may have changed while the viewer was open; its posts and
+    // index then no longer belong to the feed.
+    if (state.board != board) return;
+    _search([result.tag], viewer: _ViewerSnapshot(posts, board, result.index));
   }
 
   bool _sameQuery(List<String> a, List<String> b) {
@@ -72,9 +121,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _handleBack() {
     if (_searchHistory.isEmpty) return;
-    final previous = _searchHistory.removeLast();
-    if (_scroll.hasClients) _scroll.jumpTo(0);
-    widget.state.search(previous);
+    final previous = _searchHistory.last;
+    setState(() => _searchHistory.removeLast());
+    if (!_sameQuery(widget.state.tags, previous.tags)) {
+      if (_scroll.hasClients) _scroll.jumpTo(0);
+      widget.state.search(previous.tags);
+    }
+    final viewer = previous.viewer;
+    if (viewer != null && widget.state.board == viewer.board) {
+      _openViewer(viewer.posts, viewer.board, viewer.index);
+    }
   }
 
   Future<void> _saveAndShowQueries() async {
@@ -173,7 +229,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final dateTag = switch (board) {
       Board.danbooru => 'date:>=$value',
       // Sankaku rejects open-ended dates; close the range after today.
-      Board.sankaku =>
+      Board.sankaku || Board.idolcomplex =>
         'date:${value}T00:00..${day(DateTime.now().add(const Duration(days: 1)))}T00:00',
       _ => 'created_at:>=$value',
     };
@@ -194,6 +250,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final sort = _sortTag(board, filter);
     _search(sort == null ? tags : [...tags, sort]);
   }
+
+  Future<void> _editBoardLayout() => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    builder: (_) => _BoardLayoutSheet(state: widget.state),
+  );
 
   Future<void> _chooseRatings() async {
     var selected = widget.state.selectedRatings.toSet();
@@ -254,7 +316,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _ => null,
       };
     }
-    if (board == Board.sankaku) {
+    if (board.isSankakuFamily) {
       return switch (filter) {
         'score' => 'order:popularity',
         'quality' => 'order:quality',
@@ -295,21 +357,7 @@ class _HomeScreenState extends State<HomeScreen> {
       post: post,
       board: board,
       hidePostTags: hidePostTags,
-      onTap: () async {
-        final tag = await Navigator.push<String>(
-          context,
-          MaterialPageRoute(
-            builder: (_) => MediaViewer(
-              post: post,
-              board: board,
-              posts: posts,
-              initialIndex: index,
-              state: state,
-            ),
-          ),
-        );
-        if (tag != null && mounted) _search([tag]);
-      },
+      onTap: () => _openViewer(posts, board, index),
       isFavorite: state.isFavorite(post, board: board),
       blur: _shouldBlur(state, post),
       onLongPress: null,
@@ -511,34 +559,51 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   },
                 ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(24, 16, 24, 4),
-                  child: Text(
-                    'Websites',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontWeight: FontWeight.w600,
-                    ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Websites',
+                          style: TextStyle(
+                            color: Colors.white54,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Reorder or hide websites',
+                        visualDensity: VisualDensity.compact,
+                        color: Colors.white54,
+                        icon: const Icon(Icons.tune_rounded, size: 20),
+                        onPressed: _editBoardLayout,
+                      ),
+                    ],
                   ),
                 ),
                 Expanded(
                   child: ListView(
                     padding: EdgeInsets.zero,
                     children: [
-                      for (final option in Board.values)
-                        ListTile(
-                          dense: true,
-                          selected: option == board,
-                          leading: SiteLogo(option, size: 32),
-                          title: Text(appearanceFor(option).name),
-                          onTap: option == board
-                              ? null
-                              : () async {
-                                  Navigator.pop(context);
-                                  _searchHistory.clear();
-                                  await state.chooseBoard(option);
-                                },
-                        ),
+                      // The current website stays listed even when hidden
+                      // so the drawer always shows where you are.
+                      for (final option in state.settings.boardOrder)
+                        if (option == board ||
+                            !state.settings.hiddenBoards.contains(option))
+                          ListTile(
+                            dense: true,
+                            selected: option == board,
+                            leading: SiteLogo(option, size: 32),
+                            title: Text(appearanceFor(option).name),
+                            onTap: option == board
+                                ? null
+                                : () async {
+                                    Navigator.pop(context);
+                                    _searchHistory.clear();
+                                    await state.chooseBoard(option);
+                                  },
+                          ),
                     ],
                   ),
                 ),
@@ -601,13 +666,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-              FilterBar(
-                board: board,
-                tags: state.tags,
-                selectedRatings: state.selectedRatings,
-                onFilter: _chooseFilter,
-                onDate: _pickDate,
-                onRatings: _chooseRatings,
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilterBar(
+                  board: board,
+                  tags: state.tags,
+                  selectedRatings: state.selectedRatings,
+                  onFilter: _chooseFilter,
+                  onDate: _pickDate,
+                  onRatings: _chooseRatings,
+                ),
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
@@ -644,6 +712,17 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
+              ),
+              SizedBox(
+                height: 3,
+                child: state.loading
+                    ? LinearProgressIndicator(
+                        key: const ValueKey('feed_progress'),
+                        minHeight: 3,
+                        color: site.accent,
+                        backgroundColor: site.accent.withValues(alpha: .15),
+                      )
+                    : null,
               ),
               Expanded(
                 child: LayoutBuilder(
@@ -756,6 +835,114 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Reorders and hides drawer websites; every change is saved immediately.
+class _BoardLayoutSheet extends StatefulWidget {
+  const _BoardLayoutSheet({required this.state});
+  final AppState state;
+  @override
+  State<_BoardLayoutSheet> createState() => _BoardLayoutSheetState();
+}
+
+class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
+  late final List<Board> _order = [...widget.state.settings.boardOrder];
+  late final Set<Board> _hidden = {...widget.state.settings.hiddenBoards};
+
+  void _save() => widget.state.setBoardLayout(_order, _hidden);
+
+  void _move(int from, int to) {
+    setState(() => _order.insert(to, _order.removeAt(from)));
+    _save();
+  }
+
+  void _toggle(Board board, bool visible) {
+    setState(() => visible ? _hidden.remove(board) : _hidden.add(board));
+    _save();
+  }
+
+  void _reset() {
+    setState(() {
+      _order
+        ..clear()
+        ..addAll(Board.values);
+      _hidden.clear();
+    });
+    _save();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleCount = _order.length - _hidden.length;
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * .8,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.tune_rounded),
+              title: const Text('Websites'),
+              subtitle: const Text('Drag to reorder. Switch off to hide.'),
+              trailing: TextButton(
+                onPressed: _reset,
+                child: const Text('Reset'),
+              ),
+            ),
+            Flexible(
+              child: ReorderableListView.builder(
+                shrinkWrap: true,
+                buildDefaultDragHandles: false,
+                itemCount: _order.length,
+                onReorderItem: _move,
+                itemBuilder: (context, index) {
+                  final board = _order[index];
+                  final visible = !_hidden.contains(board);
+                  return ListTile(
+                    key: ValueKey(board),
+                    leading: ReorderableDragStartListener(
+                      index: index,
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(Icons.drag_handle_rounded),
+                      ),
+                    ),
+                    title: Row(
+                      children: [
+                        Opacity(
+                          opacity: visible ? 1 : .4,
+                          child: SiteLogo(board, size: 28),
+                        ),
+                        const SizedBox(width: 12),
+                        Flexible(
+                          child: Text(
+                            appearanceFor(board).name,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: visible ? null : Colors.white38,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    trailing: Switch(
+                      value: visible,
+                      // The last visible website cannot be hidden.
+                      onChanged: visible && visibleCount <= 1
+                          ? null
+                          : (value) => _toggle(board, value),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1645,7 +1832,7 @@ class FilterBar extends StatelessWidget {
     final noFavoriteOrder =
         board == Board.gelbooru ||
         board == Board.rule34 ||
-        board == Board.sankaku;
+        board.isSankakuFamily;
     final sortItems = <PopupMenuEntry<String>>[
       const PopupMenuItem(value: 'none', child: Text('Relevance / default')),
       const PopupMenuItem(value: 'score', child: Text('Popularity / score')),

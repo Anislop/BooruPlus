@@ -10,6 +10,7 @@ enum Board {
   gelbooru,
   rule34,
   sankaku,
+  idolcomplex,
 }
 
 extension BoardInfo on Board {
@@ -23,6 +24,7 @@ extension BoardInfo on Board {
     Board.gelbooru => 'Gelbooru',
     Board.rule34 => 'Rule34',
     Board.sankaku => 'Sankaku Complex',
+    Board.idolcomplex => 'Idol Complex',
   };
 
   String get host => switch (this) {
@@ -35,9 +37,15 @@ extension BoardInfo on Board {
     Board.gelbooru => 'gelbooru.com',
     Board.rule34 => 'rule34.xxx',
     Board.sankaku => 'www.sankakucomplex.com',
+    Board.idolcomplex => 'www.idolcomplex.com',
   };
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
+
+  /// Boards served by Sankaku's API (Sankaku Complex and Idol Complex): the
+  /// same search syntax, tag limits, keyset paging, and signed media URLs.
+  bool get isSankakuFamily =>
+      this == Board.sankaku || this == Board.idolcomplex;
 
   /// Boards with an optional username/password sign-in. The password is
   /// exchanged natively for a session token; only the token is stored.
@@ -547,6 +555,11 @@ class AppSettings {
     this.searchedTagCounts = const {},
     this.browsedTagCounts = const {},
     this.videoQuality = 0,
+    this.boardOrder = Board.values,
+    this.hiddenBoards = const [],
+    this.boardBlacklists = const {},
+    this.boardSavedQueries = const {},
+    this.globalSavedQueries = false,
   });
   final int columns, rows, batchSize;
 
@@ -567,6 +580,38 @@ class AppSettings {
   final Map<String, int> searchedTagCounts;
   final Map<String, int> browsedTagCounts;
 
+  /// Drawer order for websites; always a full permutation once normalized.
+  final List<Board> boardOrder;
+
+  /// Websites left out of the drawer. At least one always stays visible.
+  final List<Board> hiddenBoards;
+
+  /// Websites shown in the drawer, in the user's order.
+  List<Board> get visibleBoards =>
+      boardOrder.where((board) => !hiddenBoards.contains(board)).toList();
+
+  /// Blocked tags that apply to one website only; [blacklist] applies to
+  /// every website.
+  final Map<Board, List<String>> boardBlacklists;
+
+  /// Bookmarked searches per website, used unless [globalSavedQueries] is
+  /// on. [savedQueries] holds the searches shared by every website.
+  final Map<Board, List<List<String>>> boardSavedQueries;
+  final bool globalSavedQueries;
+
+  /// Every tag blocked on [board]: the shared list, then its own.
+  List<String> blacklistFor(Board? board) {
+    final own = board == null ? null : boardBlacklists[board];
+    if (own == null || own.isEmpty) return blacklist;
+    return _normalizedTags([...blacklist, ...own]);
+  }
+
+  /// The bookmarked searches shown on [board].
+  List<List<String>> savedQueriesFor(Board? board) =>
+      globalSavedQueries || board == null
+      ? savedQueries
+      : boardSavedQueries[board] ?? const [];
+
   AppSettings normalized() => AppSettings(
     columns: columns.clamp(1, 6),
     rows: rows.clamp(2, 8),
@@ -585,6 +630,11 @@ class AppSettings {
     searchedTagCounts: _normalizedCounts(searchedTagCounts),
     browsedTagCounts: _normalizedCounts(browsedTagCounts),
     videoQuality: videoQuality < 0 ? 0 : videoQuality,
+    boardOrder: _normalizedBoardOrder(boardOrder),
+    hiddenBoards: _normalizedHiddenBoards(hiddenBoards),
+    boardBlacklists: _normalizedBoardTags(boardBlacklists),
+    boardSavedQueries: _normalizedBoardQueries(boardSavedQueries),
+    globalSavedQueries: globalSavedQueries,
   );
 
   AppSettings copyWith({
@@ -605,6 +655,11 @@ class AppSettings {
     Map<String, int>? searchedTagCounts,
     Map<String, int>? browsedTagCounts,
     int? videoQuality,
+    List<Board>? boardOrder,
+    List<Board>? hiddenBoards,
+    Map<Board, List<String>>? boardBlacklists,
+    Map<Board, List<List<String>>>? boardSavedQueries,
+    bool? globalSavedQueries,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -625,6 +680,11 @@ class AppSettings {
     searchedTagCounts: searchedTagCounts ?? this.searchedTagCounts,
     browsedTagCounts: browsedTagCounts ?? this.browsedTagCounts,
     videoQuality: videoQuality ?? this.videoQuality,
+    boardOrder: boardOrder ?? this.boardOrder,
+    hiddenBoards: hiddenBoards ?? this.hiddenBoards,
+    boardBlacklists: boardBlacklists ?? this.boardBlacklists,
+    boardSavedQueries: boardSavedQueries ?? this.boardSavedQueries,
+    globalSavedQueries: globalSavedQueries ?? this.globalSavedQueries,
   ).normalized();
   static const _unset = Object();
 
@@ -646,6 +706,16 @@ class AppSettings {
     'searchedTagCounts': searchedTagCounts,
     'browsedTagCounts': browsedTagCounts,
     'videoQuality': videoQuality,
+    'boardOrder': boardOrder.map((board) => board.name).toList(),
+    'hiddenBoards': hiddenBoards.map((board) => board.name).toList(),
+    'boardBlacklists': {
+      for (final entry in boardBlacklists.entries) entry.key.name: entry.value,
+    },
+    'boardSavedQueries': {
+      for (final entry in boardSavedQueries.entries)
+        entry.key.name: entry.value,
+    },
+    'globalSavedQueries': globalSavedQueries,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -667,6 +737,17 @@ class AppSettings {
     searchedTagCounts: _countsFromMap(map['searchedTagCounts']),
     browsedTagCounts: _countsFromMap(map['browsedTagCounts']),
     videoQuality: _asInt(map['videoQuality'], 0),
+    boardOrder: _boardsFromMap(map['boardOrder']),
+    hiddenBoards: _boardsFromMap(map['hiddenBoards']),
+    boardBlacklists: _boardMapFrom(
+      map['boardBlacklists'],
+      (value) => value is List ? value.map((tag) => '$tag').toList() : null,
+    ),
+    boardSavedQueries: _boardMapFrom(
+      map['boardSavedQueries'],
+      (value) => value is List ? _queriesFromMap(value) : null,
+    ),
+    globalSavedQueries: _asBool(map['globalSavedQueries'], false),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -720,9 +801,64 @@ class AppSettings {
       ? value.map(RatingInfo.parse).whereType<Rating>().toList()
       : Rating.values;
 
-  static List<Rating> _normalizedRatings(Iterable<Rating> values) => List.unmodifiable(
-    Rating.values.where(values.toSet().contains),
-  );
+  static Map<Board, T> _boardMapFrom<T>(
+    dynamic value,
+    T? Function(dynamic) parse,
+  ) {
+    if (value is! Map) return const {};
+    final byName = Board.values.asNameMap();
+    final result = <Board, T>{};
+    for (final entry in value.entries) {
+      final board = byName['${entry.key}'];
+      final parsed = parse(entry.value);
+      if (board != null && parsed != null) result[board] = parsed;
+    }
+    return result;
+  }
+
+  static Map<Board, List<String>> _normalizedBoardTags(
+    Map<Board, List<String>> values,
+  ) {
+    final result = <Board, List<String>>{};
+    for (final board in Board.values) {
+      final tags = _normalizedTags(values[board] ?? const []);
+      if (tags.isNotEmpty) result[board] = tags;
+    }
+    return Map.unmodifiable(result);
+  }
+
+  static Map<Board, List<List<String>>> _normalizedBoardQueries(
+    Map<Board, List<List<String>>> values,
+  ) {
+    final result = <Board, List<List<String>>>{};
+    for (final board in Board.values) {
+      final queries = _normalizedQueries(values[board] ?? const []);
+      if (queries.isNotEmpty) result[board] = queries;
+    }
+    return Map.unmodifiable(result);
+  }
+
+  static List<Board> _boardsFromMap(dynamic value) {
+    if (value is! List) return const [];
+    final byName = Board.values.asNameMap();
+    return value.map((name) => byName['$name']).whereType<Board>().toList();
+  }
+
+  // Unknown or missing boards (e.g. ones added in a later version) are
+  // appended in their default position order.
+  static List<Board> _normalizedBoardOrder(Iterable<Board> values) {
+    final result = <Board>{...values, ...Board.values};
+    return List.unmodifiable(result);
+  }
+
+  static List<Board> _normalizedHiddenBoards(Iterable<Board> values) {
+    final hidden = values.toSet();
+    if (hidden.length >= Board.values.length) return const [];
+    return List.unmodifiable(Board.values.where(hidden.contains));
+  }
+
+  static List<Rating> _normalizedRatings(Iterable<Rating> values) =>
+      List.unmodifiable(Rating.values.where(values.toSet().contains));
 
   static Map<String, int> _countsFromMap(dynamic value) => value is Map
       ? value.map((key, count) => MapEntry('$key', _asInt(count, 0)))
@@ -759,6 +895,11 @@ class AppSettings {
         other.blurExplicit != blurExplicit ||
         other.blurQuestionable != blurQuestionable ||
         other.videoQuality != videoQuality ||
+        !_sameBoards(other.boardOrder, boardOrder) ||
+        !_sameBoards(other.hiddenBoards, hiddenBoards) ||
+        other.globalSavedQueries != globalSavedQueries ||
+        !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
+        !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
         other.savedQueries.length != savedQueries.length ||
         other.recentSearches.length != recentSearches.length) {
@@ -775,27 +916,48 @@ class AppSettings {
     for (var i = 0; i < blacklist.length; i++) {
       if (blacklist[i] != other.blacklist[i]) return false;
     }
-    for (var i = 0; i < savedQueries.length; i++) {
-      final a = savedQueries[i];
-      final b = other.savedQueries[i];
-      if (a.length != b.length) return false;
-      for (var j = 0; j < a.length; j++) {
-        if (a[j] != b[j]) return false;
-      }
-    }
-    for (var i = 0; i < recentSearches.length; i++) {
-      final a = recentSearches[i];
-      final b = other.recentSearches[i];
-      if (a.length != b.length) return false;
-      for (var j = 0; j < a.length; j++) {
-        if (a[j] != b[j]) return false;
-      }
+    return _sameQueries(savedQueries, other.savedQueries) &&
+        _sameQueries(recentSearches, other.recentSearches);
+  }
+
+  static bool _sameTags(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
     }
     return true;
   }
 
+  static bool _sameQueries(List<List<String>> a, List<List<String>> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!_sameTags(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  static bool _sameBoardTags(
+    Map<Board, List<String>> a,
+    Map<Board, List<String>> b,
+  ) =>
+      a.length == b.length &&
+      a.entries.every((entry) {
+        final other = b[entry.key];
+        return other != null && _sameTags(entry.value, other);
+      });
+
+  static bool _sameBoardQueries(
+    Map<Board, List<List<String>>> a,
+    Map<Board, List<List<String>>> b,
+  ) =>
+      a.length == b.length &&
+      a.entries.every((entry) {
+        final other = b[entry.key];
+        return other != null && _sameQueries(entry.value, other);
+      });
+
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     columns,
     rows,
     batchSize,
@@ -813,7 +975,31 @@ class AppSettings {
     _countsHash(searchedTagCounts),
     _countsHash(browsedTagCounts),
     videoQuality,
-  );
+    Object.hashAll(boardOrder),
+    Object.hashAll(hiddenBoards),
+    globalSavedQueries,
+    Object.hashAll(
+      boardBlacklists.entries.map(
+        (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),
+      ),
+    ),
+    Object.hashAll(
+      boardSavedQueries.entries.map(
+        (entry) => Object.hash(
+          entry.key,
+          Object.hashAll(entry.value.map(Object.hashAll)),
+        ),
+      ),
+    ),
+  ]);
+
+  static bool _sameBoards(List<Board> a, List<Board> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 
   static bool _sameRatings(List<Rating> a, List<Rating> b) {
     if (a.length != b.length) return false;

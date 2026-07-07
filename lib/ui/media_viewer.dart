@@ -13,6 +13,14 @@ import 'media_image.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
 
+/// Returned when a tag is tapped, so the caller can search it and later
+/// reopen the viewer on the post the user left from.
+class ViewerTagBrowse {
+  const ViewerTagBrowse(this.tag, this.index);
+  final String tag;
+  final int index;
+}
+
 class MediaViewer extends StatefulWidget {
   const MediaViewer({
     super.key,
@@ -240,6 +248,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         showControlsOnInitialize: false,
         showPlayButton: false,
         pauseOnBackgroundTap: true,
+        customControls: const MaterialControls(),
+        routePageBuilder: (context, _, _, provider) => Scaffold(
+          resizeToAvoidBottomInset: false,
+          body: Container(
+            alignment: Alignment.center,
+            color: Colors.black,
+            child: _undimmedPlayer(context, provider),
+          ),
+        ),
         playbackSpeeds: const [.25, .5, .75, 1, 1.25, 1.5, 2],
         errorBuilder: (_, _) => const Center(
           child: Text('This video could not be played. Try reopening it.'),
@@ -734,7 +751,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
 
   void _browseTag(String tag) {
     widget.state.recordBrowsedTags([tag]);
-    Navigator.pop(context, tag);
+    Navigator.pop(context, ViewerTagBrowse(tag, _index));
   }
 
   Widget _buildPage(BuildContext context, int index) {
@@ -769,6 +786,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       // limits and out of multi-hundred-megabyte bitmaps, while leaving
       // enough detail for zooming.
       maxDimension: 4096,
+      showProgress: true,
       errorMessage: 'The original image is unavailable. It may have been removed or require website access.',
     );
     if (!_shouldBlur(post) || (active && _revealed)) return image;
@@ -809,12 +827,29 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         fit: StackFit.expand,
         children: [
           _videoPoster(post, board),
-          const Center(child: CircularProgressIndicator()),
+          const Align(
+            alignment: Alignment.bottomCenter,
+            child: LinearProgressIndicator(
+              key: ValueKey('video_progress'),
+              minHeight: 4,
+            ),
+          ),
         ],
       );
     }
-    return Container(color: Colors.black, child: Chewie(controller: player));
+    return Container(
+      color: Colors.black,
+      child: _undimmedPlayer(context, Chewie(controller: player)),
+    );
   }
+
+  // Chewie lays a black scrim over the video whenever its controls show,
+  // except on iOS. Reporting iOS to the player subtree drops that scrim;
+  // the explicit MaterialControls keep the Android control style.
+  Widget _undimmedPlayer(BuildContext context, Widget child) => Theme(
+    data: Theme.of(context).copyWith(platform: TargetPlatform.iOS),
+    child: child,
+  );
 
   Widget _videoPoster(MediaPost post, Board board) {
     final preview = post.previewUrl;
@@ -930,7 +965,8 @@ String _postBrowserUrl(Board board, MediaPost post) {
   return switch (board) {
     Board.danbooru => 'https://${board.host}/posts/${post.id}',
     Board.e621 || Board.e926 => 'https://${board.host}/posts/${post.id}',
-    Board.sankaku => 'https://${board.host}/posts/${post.displayId}',
+    Board.sankaku ||
+    Board.idolcomplex => 'https://${board.host}/posts/${post.displayId}',
     Board.konachan ||
     Board.yandere => 'https://${board.host}/post/show/${post.id}',
     _ => 'https://${board.host}/index.php?page=post&s=view&id=${post.id}',

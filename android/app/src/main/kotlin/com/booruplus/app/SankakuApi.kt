@@ -23,7 +23,9 @@ internal class SankakuTagLimitException(val limit: Int?) : IOException("Sankaku 
 /**
  * Client for the Sankaku Complex API at sankakuapi.com (the
  * capi-v2.sankakucomplex.com host used by older wrappers now refuses requests).
- * Requests are anonymous unless Dart passes an access token.
+ * Requests are anonymous unless Dart passes an access token. Idol Complex is
+ * served by the same API at [IDOL_API_HOST] (see [idolComplex]); its posts
+ * link to [IDOL_SITE_HOST].
  *
  * Provider behavior this relies on:
  * - `/posts/keyset` returns `{meta: {next}, data: [...]}` with full typed tags.
@@ -42,7 +44,12 @@ internal class SankakuTagLimitException(val limit: Int?) : IOException("Sankaku 
  * - Tag-limit refusals are HTTP 429 with a code ending in `tags-limit` and the
  *   allowed count in `param`.
  */
-internal class SankakuApi(private val client: OkHttpClient, private val userAgent: String) {
+internal class SankakuApi(
+    private val client: OkHttpClient,
+    private val userAgent: String,
+    private val apiHost: String = API_HOST,
+    private val siteHost: String = SITE_HOST,
+) {
     // "$cursorKey\u0003$page" -> keyset token for that Flutter page. An empty
     // token marks an exhausted search.
     private val cursors = ConcurrentHashMap<String, String>()
@@ -149,19 +156,20 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
         for (index in 0 until array.length()) {
             if (result.size >= limit) break
             val post = array.optJSONObject(index) ?: continue
-            parseSankakuPost(post, avifPreviews)?.let(result::add)
+            parseSankakuPost(post, avifPreviews, siteHost)?.let(result::add)
         }
         return result
     }
 
     private fun endpoint(path: String): HttpUrl.Builder = HttpUrl.Builder()
-        .scheme("https").host(API_HOST).addPathSegments(path)
+        .scheme("https").host(apiHost).addPathSegments(path)
         .addQueryParameter("lang", "en")
 
     private fun request(url: HttpUrl, accessToken: String?, deadline: Long? = null): Any {
         val builder = Request.Builder().url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json")
+        if (siteHost != SITE_HOST) builder.header("Origin", "https://$siteHost")
         if (!accessToken.isNullOrBlank()) builder.header("Authorization", "Bearer $accessToken")
         val call = client.newCall(builder.build())
         if (deadline != null) {
@@ -197,6 +205,12 @@ internal class SankakuApi(private val client: OkHttpClient, private val userAgen
     companion object {
         const val API_HOST = "sankakuapi.com"
         const val SITE_HOST = "www.sankakucomplex.com"
+        const val IDOL_API_HOST = "i.sankakuapi.com"
+        const val IDOL_SITE_HOST = "www.idolcomplex.com"
+
+        /** Idol Complex: Sankaku's API on its own host, anonymous only here. */
+        fun idolComplex(client: OkHttpClient, userAgent: String) =
+            SankakuApi(client, userAgent, IDOL_API_HOST, IDOL_SITE_HOST)
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ERROR_BYTES = 16L * 1024
         private const val PAGE_SIZE = 100
@@ -265,7 +279,11 @@ private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp")
  * content). Signed media URLs are passed through byte-for-byte: re-encoding
  * their query would invalidate the signature.
  */
-internal fun parseSankakuPost(post: JSONObject, avifPreviews: Boolean): Map<String, Any?>? {
+internal fun parseSankakuPost(
+    post: JSONObject,
+    avifPreviews: Boolean,
+    siteHost: String = SankakuApi.SITE_HOST,
+): Map<String, Any?>? {
     val id = jsonString(post, "id") ?: return null
     if (!SANKAKU_ID.matches(id)) return null
     val url = sankakuMediaUrl(jsonString(post, "file_url")) ?: return null
@@ -307,7 +325,7 @@ internal fun parseSankakuPost(post: JSONObject, avifPreviews: Boolean): Map<Stri
         "previewUrl" to (previewUrl ?: ""),
         "tags" to rawTags,
         "tagDetails" to details.map { mapOf("name" to it.key, "category" to it.value) },
-        "postUrl" to "https://${SankakuApi.SITE_HOST}/posts/$id",
+        "postUrl" to "https://$siteHost/posts/$id",
         "rating" to when (jsonString(post, "rating")?.lowercase()) {
             "s" -> "safe"
             "q" -> "questionable"

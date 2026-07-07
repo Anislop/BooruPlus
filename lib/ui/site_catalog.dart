@@ -83,6 +83,12 @@ const _defaults = <Board, BoardAppearance>{
     accent: Color(0xFFF2A25C),
     surface: Color(0xFF3A2616),
   ),
+  Board.idolcomplex: BoardAppearance(
+    name: 'Idol Complex',
+    icon: Icons.photo_camera_outlined,
+    accent: Color(0xFFE88BB5),
+    surface: Color(0xFF3A1A2A),
+  ),
 };
 
 final boardAppearances = <Board, BoardAppearance>{..._defaults};

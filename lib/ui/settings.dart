@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'blocked_tags.dart';
 import 'onboarding.dart';
 import 'saved_posts.dart';
-import 'tag_input.dart';
 import 'theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -19,14 +19,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const _videoQualities = [0, 1080, 720, 480];
   late AppSettings _settings;
   final _downloads = DownloadService();
-  final _blacklistKey = GlobalKey<TagInputState>();
   bool _busy = false;
   bool _picking = false;
   String? _error;
-  bool _hasDraftTag = false;
 
-  bool get _hasUnsavedChanges =>
-      _settings != widget.state.settings || _hasDraftTag;
+  bool get _hasUnsavedChanges => _settings != widget.state.settings;
+
+  Future<void> _editBlockedTags() async {
+    final result = await Navigator.push<BlockedTags>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BlockedTagsScreen(
+          initial: BlockedTags(
+            all: _settings.blacklist,
+            byBoard: _settings.boardBlacklists,
+          ),
+          boards: _settings.boardOrder,
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(
+      () => _settings = _settings.copyWith(
+        blacklist: result.all,
+        boardBlacklists: result.byBoard,
+      ),
+    );
+  }
+
+  String get _blockedSummary {
+    final sites = _settings.boardBlacklists.length;
+    final all = _settings.blacklist.length;
+    if (all == 0 && sites == 0) return 'No blocked tags yet.';
+    final everywhere = all == 0 ? null : '$all blocked on all websites';
+    final perSite = sites == 0
+        ? null
+        : 'tags for $sites website${sites == 1 ? '' : 's'}';
+    return [?everywhere, ?perSite].join(' · ');
+  }
 
   @override
   void initState() {
@@ -53,11 +83,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _save() async {
-    _blacklistKey.currentState?.commit();
     setState(() {
       _busy = true;
       _error = null;
-      _hasDraftTag = false;
     });
     try {
       await widget.state.updateSettings(_settings);
@@ -553,29 +581,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
-                      const SectionLabel('Blacklisted tags'),
-                      const Text(
-                        'Blocked tags are added to every query and filtered from returned posts. Enter a tag, then press space.',
-                        style: TextStyle(
-                          color: Colors.white54,
-                          fontSize: 13,
-                          height: 1.6,
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: SwitchListTile.adaptive(
+                            value: _settings.globalSavedQueries,
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(
+                                    () => _settings = _settings.copyWith(
+                                      globalSavedQueries: value,
+                                    ),
+                                  ),
+                            secondary: const Icon(Icons.bookmarks_outlined),
+                            title: const Text('Share saved searches'),
+                            subtitle: const Text(
+                              'Show the same saved searches on every website. When off, each website keeps its own.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 14),
-                      TagInput(
-                        key: _blacklistKey,
-                        enabled: !_busy,
-                        tags: _settings.blacklist,
-                        hint: 'Add a blocked tag',
-                        onDraftChanged: (text) {
-                          final hasDraft = text.trim().isNotEmpty;
-                          if (hasDraft != _hasDraftTag) {
-                            setState(() => _hasDraftTag = hasDraft);
-                          }
-                        },
-                        onChanged: (tags) => setState(
-                          () => _settings = _settings.copyWith(blacklist: tags),
+                      const SectionLabel('Blocked tags'),
+                      Material(
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: ListTile(
+                          leading: const Icon(Icons.block_rounded),
+                          title: const Text('Blocked tags'),
+                          subtitle: Text(_blockedSummary),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          enabled: !_busy,
+                          onTap: _editBlockedTags,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                          ),
                         ),
                       ),
                       const SectionLabel('Downloads'),

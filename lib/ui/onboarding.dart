@@ -320,7 +320,7 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
             const SizedBox(height: 12),
             Text(
               _signIn
-                  ? 'Optional: signed-in searches can use more tags and include posts hidden from anonymous visitors. Your password is only used to sign in; BooruPlus keeps just the sign-in token, encrypted on this device.'
+                  ? 'By signing in, you can use more search tags and queries on your searches. Your username and password is needed to sign in first, where the app keeps just the sign-in token, encrypted on this device.'
                   : 'Use the API credentials from your website account. They are encrypted on this device so you only need to connect once.',
               style: const TextStyle(color: Colors.white60, height: 1.5),
             ),
