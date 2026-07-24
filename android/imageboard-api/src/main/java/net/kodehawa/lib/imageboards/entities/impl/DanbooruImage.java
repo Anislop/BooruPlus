@@ -31,6 +31,13 @@ import java.util.regex.Pattern;
  * @author Kodehawa
  */
 public class DanbooruImage implements BoardImage {
+    // BooruPlus patch: post id, file hash, and parent for links, md5 lookups, and related posts.
+    @JsonProperty("id")
+    private int id;
+    @JsonProperty("md5")
+    private String md5;
+    @JsonProperty("parent_id")
+    private Integer parent_id;
     private int uploader_id;
     @JsonProperty("created_at")
     private String created_at;
@@ -247,5 +254,18 @@ public class DanbooruImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return ZonedDateTime.parse(created_at).toInstant().toEpochMilli();
+    }
+
+    // BooruPlus patch accessors.
+    public int getId() {
+        return id;
+    }
+
+    public String getMd5() {
+        return md5;
+    }
+
+    public Integer getParent_id() {
+        return parent_id;
     }
 }

@@ -29,6 +29,13 @@ import java.util.List;
  * @author Kodehawa
  */
 public class Rule34Image implements BoardImage {
+    // BooruPlus patch: file hash, parent, and sample for md5 lookups, related posts, and data saver.
+    @JsonProperty("hash")
+    private String hash;
+    @JsonProperty("parent_id")
+    private Integer parent_id;
+    @JsonProperty("sample_url")
+    private String sample_url;
     // BooruPlus patch: expose provider metadata omitted by the upstream BoardImage interface.
     private int id;
     private String preview_url;
@@ -109,4 +116,9 @@ public class Rule34Image implements BoardImage {
     public long getCreationMillis() {
         return change * 1000;
     }
+
+    // BooruPlus patch accessors.
+    public String getMd5() { return hash; }
+    public Integer getParent_id() { return parent_id; }
+    public String getSample_url() { return sample_url; }
 }

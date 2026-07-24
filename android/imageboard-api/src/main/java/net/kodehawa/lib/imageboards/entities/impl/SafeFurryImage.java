@@ -8,6 +8,7 @@ import java.time.ZonedDateTime;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -17,6 +18,14 @@ public class SafeFurryImage implements BoardImage {
     private int uploader_id;
     private List<String> sources;
     private Preview preview;
+    // BooruPlus patch: parent/children and pools for related-post navigation.
+    @JsonProperty("relationships")
+    private Relationships relationships;
+    @JsonProperty("pools")
+    private List<Integer> pools;
+    // Kept untyped like e621's: used for the data-saver sample.
+    @JsonProperty("sample")
+    private Map<String, Object> sample;
     @JsonProperty("created_at")
     private String created_at;
     private String description;
@@ -150,6 +159,13 @@ public class SafeFurryImage implements BoardImage {
         private int height;
         private int size;
         private String url;
+        // BooruPlus patch: file hash for md5 lookups.
+        @JsonProperty("md5")
+        private String md5;
+
+        public String getMd5() {
+            return md5;
+        }
 
         public int getWidth() {
             return width;
@@ -215,5 +231,26 @@ public class SafeFurryImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return ZonedDateTime.parse(created_at).toInstant().toEpochMilli();
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() { return file == null ? null : file.getMd5(); }
+    public Integer getParent_id() { return relationships == null ? null : relationships.parent_id; }
+    public boolean getHas_active_children() { return relationships != null && relationships.has_active_children; }
+    public List<Integer> getPools() { return pools; }
+    public Map<String, Object> getSample() { return sample; }
+    public String getSample_url() {
+        Object url = sample == null ? null : sample.get("url");
+        return url instanceof String ? (String) url : null;
+    }
+
+    static class Relationships {
+        @JsonProperty("parent_id")
+        private Integer parent_id;
+        @JsonProperty("has_active_children")
+        private boolean has_active_children;
+
+        public Integer getParent_id() { return parent_id; }
+        public boolean isHas_active_children() { return has_active_children; }
     }
 }

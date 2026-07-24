@@ -1,12 +1,21 @@
 package com.booruplus.app
 
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.ClipData
 import android.content.ContentValues
 import android.content.Intent
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.graphics.drawable.Icon
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
+import android.os.CancellationSignal
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -22,6 +31,7 @@ import net.kodehawa.lib.imageboards.entities.BoardImage
 import net.kodehawa.lib.imageboards.entities.impl.KonachanImage
 import net.kodehawa.lib.imageboards.entities.impl.autocomplete.IAutoComplete
 import okhttp3.Call
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -36,6 +46,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -73,6 +84,13 @@ class MainActivity : FlutterActivity() {
     private val sankaku by lazy { SankakuApi(client, USER_AGENT) }
     private val idolComplex by lazy { SankakuApi.idolComplex(client, USER_AGENT) }
     private var directoryResult: MethodChannel.Result? = null
+    private var exportResult: MethodChannel.Result? = null
+    private var exportContent: String? = null
+    private var importResult: MethodChannel.Result? = null
+    private var authResult: MethodChannel.Result? = null
+    private var channel: MethodChannel? = null
+    // A launcher shortcut that opened the app, until Dart takes it.
+    private var pendingShortcut: Map<String, String>? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
     private val discoveryWindows = ConcurrentHashMap<Int, Int>()
     private val providerCursors = ConcurrentHashMap<String, ProviderCursor>()
@@ -103,8 +121,27 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ImageBoard.setUserAgent("BooruPlus/1.0 Android (imageboard browser)")
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/platform")
-            .setMethodCallHandler(::handle)
+        pendingShortcut = shortcutFrom(intent)
+        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/platform")
+            .also { it.setMethodCallHandler(::handle) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val shortcut = shortcutFrom(intent) ?: return
+        // Dart takes it from here, or asks for it with takeShortcut on startup.
+        pendingShortcut = shortcut
+        channel?.invokeMethod("shortcut", shortcut)
+    }
+
+    private fun shortcutFrom(intent: Intent?): Map<String, String>? {
+        val kind = intent?.getStringExtra(SHORTCUT_KIND)?.takeIf { it == "favorites" || it == "search" } ?: return null
+        return buildMap {
+            put("kind", kind)
+            intent.getStringExtra(SHORTCUT_BOARD)?.let { put("board", it) }
+            intent.getStringExtra(SHORTCUT_TAGS)?.let { put("tags", it) }
+        }
     }
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
@@ -117,6 +154,32 @@ class MainActivity : FlutterActivity() {
             "setKeepScreenOn" -> setKeepScreenOn(call, result)
             "signIn" -> signIn(call, result)
             "refreshSignIn" -> refreshSignIn(call, result)
+            "setSecureScreen" -> setSecureScreen(call, result)
+            "authenticate" -> authenticate(call, result)
+            "share" -> share(call, result)
+            "exportFile" -> exportFile(call, result)
+            "importFile" -> importFile(result)
+            "pools" -> pools(call, result)
+            "isMeteredNetwork" -> result.success(
+                getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
+            )
+            "cacheSize" -> background(result, mediaExecutor) {
+                cacheDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+            }
+            "clearCache" -> background(result, mediaExecutor) {
+                // Files written in the last few minutes may still be in use,
+                // such as media just handed to the share sheet.
+                val recent = System.currentTimeMillis() - 5 * 60 * 1000L
+                cacheDir.walkBottomUp().filter { it != cacheDir }.forEach { file ->
+                    if (file.isDirectory) file.delete() else if (file.lastModified() < recent) file.delete()
+                }
+                null
+            }
+            "setShortcuts" -> setShortcuts(call, result)
+            "takeShortcut" -> {
+                result.success(pendingShortcut)
+                pendingShortcut = null
+            }
             else -> result.notImplemented()
         }
     }
@@ -132,6 +195,218 @@ class MainActivity : FlutterActivity() {
             result.success(null)
         }
     }
+
+    /** Hides the window from the recent-apps screen and screenshots. */
+    private fun setSecureScreen(call: MethodCall, result: MethodChannel.Result) {
+        val enabled = call.argument<Boolean>("enabled") ?: false
+        runOnUiThread {
+            if (enabled) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            result.success(null)
+        }
+    }
+
+    /**
+     * Shows the biometric prompt with the screen lock as an alternative
+     * (API 29+), or the screen-lock confirmation below that. Answers true when
+     * verified and false when dismissed; `UNAVAILABLE` means the device has no
+     * screen lock to verify with.
+     */
+    private fun authenticate(call: MethodCall, result: MethodChannel.Result) {
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (keyguard == null || !keyguard.isDeviceSecure) {
+            result.error("UNAVAILABLE", "No screen lock is set up", null); return
+        }
+        if (authResult != null) { result.error("BUSY", "Already verifying", null); return }
+        val title = call.argument<String>("title")?.takeIf { it.isNotBlank() } ?: "Unlock BooruPlus"
+        authResult = result
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val builder = BiometricPrompt.Builder(this).setTitle(title)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    builder.setAllowedAuthenticators(
+                        BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                    )
+                } else {
+                    @Suppress("DEPRECATION") builder.setDeviceCredentialAllowed(true)
+                }
+                builder.build().authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(authentication: BiometricPrompt.AuthenticationResult?) = finishAuth(true)
+                    // A rejected fingerprint keeps the prompt open; only errors (including cancel) end it.
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) = finishAuth(false)
+                })
+            } else {
+                @Suppress("DEPRECATION")
+                val intent = keyguard.createConfirmDeviceCredentialIntent(title, null)
+                if (intent == null) finishAuth(true) else startActivityForResult(intent, CONFIRM_CREDENTIAL)
+            }
+        } catch (_: Exception) {
+            if (authResult === result) authResult = null
+            result.error("UNAVAILABLE", "Verification is not available", null)
+        }
+    }
+
+    private fun finishAuth(verified: Boolean) {
+        val result = authResult ?: return
+        authResult = null
+        result.success(verified)
+    }
+
+    /**
+     * Opens the share sheet with `text`, or with the media at `url` saved as
+     * `name` in a private cache served by [SharedMediaProvider].
+     */
+    private fun share(call: MethodCall, result: MethodChannel.Result) {
+        val text = call.argument<String>("text")?.takeIf { it.isNotBlank() }
+        val url = call.argument<String>("url")
+        if (url == null) {
+            if (text == null) { result.error("INVALID_REQUEST", "Nothing to share", null); return }
+            val intent = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+            try {
+                startActivity(Intent.createChooser(intent, null))
+                result.success(null)
+            } catch (_: Exception) { result.error("SHARE_UNAVAILABLE", "No app can share this", null) }
+            return
+        }
+        val name = call.argument<String>("name")?.trim()
+        if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media can be shared", null); return }
+        if (!validFileName(name)) { result.error("INVALID_NAME", "Invalid file name", null); return }
+        background(result, mediaExecutor) {
+            val directory = File(cacheDir, SharedMediaProvider.DIRECTORY).apply { mkdirs() }
+            // Earlier shares may still be read by the receiving app for a while.
+            val stale = System.currentTimeMillis() - SHARE_CACHE_MILLIS
+            directory.listFiles()?.forEach { if (it.lastModified() < stale) it.delete() }
+            val file = File(directory, name!!)
+            try {
+                openSecureDownload(url).use { input ->
+                    file.outputStream().use { output ->
+                        val buffer = ByteArray(65536)
+                        var total = 0L
+                        while (true) {
+                            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > MAX_SHARE_BYTES) throw IOException("Too large to share")
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                file.delete()
+                throw error
+            }
+            val uri = SharedMediaProvider.uriFor(this, file.name)
+            val intent = Intent(Intent.ACTION_SEND)
+                .setType(mediaMimeType(file.name))
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent.clipData = ClipData.newRawUri(file.name, uri)
+            if (text != null) intent.putExtra(Intent.EXTRA_TEXT, text)
+            runOnUiThread {
+                try { startActivity(Intent.createChooser(intent, null)) } catch (_: Exception) { }
+            }
+            null
+        }
+    }
+
+    /** Asks where to save [content] (a backup), then writes it there. */
+    private fun exportFile(call: MethodCall, result: MethodChannel.Result) {
+        val name = call.argument<String>("name")?.trim()
+        val content = call.argument<String>("content")
+        if (!validFileName(name) || content == null) { result.error("INVALID_REQUEST", "Invalid export", null); return }
+        if (exportResult != null || importResult != null) { result.error("PICKER_BUSY", "A file picker is already open", null); return }
+        exportResult = result
+        exportContent = content
+        try {
+            startActivityForResult(
+                Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/json").putExtra(Intent.EXTRA_TITLE, name),
+                EXPORT
+            )
+        } catch (_: Exception) {
+            exportResult = null
+            exportContent = null
+            result.error("PICKER_UNAVAILABLE", "No file picker is available", null)
+        }
+    }
+
+    /** Lets the user pick a text file (a backup) and returns its contents. */
+    private fun importFile(result: MethodChannel.Result) {
+        if (exportResult != null || importResult != null) { result.error("PICKER_BUSY", "A file picker is already open", null); return }
+        importResult = result
+        try {
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream")),
+                IMPORT
+            )
+        } catch (_: Exception) {
+            importResult = null
+            result.error("PICKER_UNAVAILABLE", "No file picker is available", null)
+        }
+    }
+
+    /**
+     * Pools containing a post: Danbooru is searched by post ID, e621/e926 look
+     * up the pool IDs the post already lists. Other boards report none.
+     */
+    private fun pools(call: MethodCall, result: MethodChannel.Result) {
+        val board = call.argument<String>("board")
+        val postId = call.argument<String>("postId")?.toLongOrNull()
+        val ids = (call.argument<List<Any?>>("ids") ?: emptyList()).mapNotNull { it?.toString()?.toLongOrNull() }.take(20)
+        val url = when (board) {
+            "danbooru" -> postId?.let {
+                HttpUrl.Builder().scheme("https").host(HOSTS.getValue("danbooru")).addPathSegment("pools.json")
+                    .addQueryParameter("search[post_ids_include_all]", it.toString())
+                    .addQueryParameter("limit", "20").build()
+            }
+            "e621", "e926" -> ids.takeIf { it.isNotEmpty() }?.let {
+                HttpUrl.Builder().scheme("https").host(HOSTS.getValue(board)).addPathSegment("pools.json")
+                    .addQueryParameter("search[id]", it.joinToString(",")).build()
+            }
+            else -> null
+        }
+        if (url == null) { result.success(emptyList<Map<String, Any?>>()); return }
+        background(result) {
+            client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build()).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP failure")
+                parsePools(response.body?.string() ?: "[]")
+            }
+        }
+    }
+
+    /** Replaces the launcher icon's shortcuts (favorites and saved searches). */
+    private fun setShortcuts(call: MethodCall, result: MethodChannel.Result) {
+        val manager = getSystemService(ShortcutManager::class.java)
+        if (manager == null) { result.success(null); return }
+        val items = call.argument<List<Map<String, Any?>>>("items") ?: emptyList()
+        val shortcuts = items.take(manager.maxShortcutCountPerActivity).mapNotNull { item ->
+            val id = (item["id"] as? String)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val label = (item["label"] as? String)?.trim()?.take(40)?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val kind = item["kind"] as? String ?: return@mapNotNull null
+            val intent = Intent(Intent.ACTION_VIEW).setClass(this, MainActivity::class.java)
+                .putExtra(SHORTCUT_KIND, kind)
+            (item["board"] as? String)?.let { intent.putExtra(SHORTCUT_BOARD, it) }
+            (item["tags"] as? String)?.let { intent.putExtra(SHORTCUT_TAGS, it) }
+            ShortcutInfo.Builder(this, id).setShortLabel(label).setLongLabel(label)
+                .setIcon(Icon.createWithResource(this, R.drawable.app_icon))
+                .setIntent(intent).build()
+        }
+        try {
+            manager.dynamicShortcuts = shortcuts
+        } catch (_: Exception) {
+            // Rate limited or refused by the launcher; the next change retries.
+        }
+        result.success(null)
+    }
+
+    private fun validFileName(name: String?): Boolean =
+        !name.isNullOrEmpty() && name.length <= 180 && !name.contains('/') && !name.contains('\\') &&
+            !name.startsWith(".") && name.none { it.code < 32 }
 
     private fun autocomplete(call: MethodCall, result: MethodChannel.Result) {
         val board = call.argument<String>("board")
@@ -518,8 +793,20 @@ class MainActivity : FlutterActivity() {
             "uploader" to (value(image, "getUploader_name", "getOwner", "getAuthor", "getUploader_id")?.toString() ?: ""),
             "source" to sourceValue(image), "width" to image.getWidth(), "height" to image.getHeight(),
             "score" to image.getScore(), "description" to (value(image, "getDescription")?.toString() ?: ""),
-            "videoVariants" to videoVariants(image, board, original)
+            "videoVariants" to videoVariants(image, board, original),
+            "md5" to (value(image, "getMd5")?.toString()?.trim()?.lowercase()?.takeIf { MD5_HASH.matches(it) } ?: ""),
+            "parentId" to (value(image, "getParent_id") as? Number)?.toLong()?.takeIf { it > 0 }?.toString(),
+            "hasChildren" to (image.hasChildren() || value(image, "getHas_active_children") == true),
+            "sampleUrl" to sampleUrl(image, board, original, preview, apiKey, userId),
+            "pools" to ((value(image, "getPools") as? List<*>)?.mapNotNull { (it as? Number)?.toLong()?.toString() } ?: emptyList<String>()),
         )
+    }
+
+    /** A resized rendition for the viewer's data saver; empty when there is none. */
+    private fun sampleUrl(image: BoardImage, board: String, original: String, preview: String, apiKey: String?, userId: String?): String {
+        val raw = if (board == "danbooru") value(image, "getParsedLargeFileUrl") else value(image, "getSample_url")
+        val url = authorizeMediaUrl(normalizeUrl(raw?.toString(), board), board, apiKey, userId)
+        return if (url == original || url == preview) "" else url
     }
 
     /**
@@ -744,6 +1031,11 @@ class MainActivity : FlutterActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            CONFIRM_CREDENTIAL -> { finishAuth(resultCode == Activity.RESULT_OK); return }
+            EXPORT -> { finishExport(resultCode, data?.data); return }
+            IMPORT -> { finishImport(resultCode, data?.data); return }
+        }
         if (requestCode != PICKER) return
         val result = directoryResult ?: return
         directoryResult = null
@@ -755,6 +1047,41 @@ class MainActivity : FlutterActivity() {
             contentResolver.takePersistableUriPermission(uri, flags)
             result.success(uri.toString())
         } catch (_: Exception) { result.error("DIRECTORY_ACCESS", "The folder cannot retain write access. Choose another folder.", null) }
+    }
+
+    private fun finishExport(resultCode: Int, uri: Uri?) {
+        val result = exportResult ?: return
+        val content = exportContent
+        exportResult = null
+        exportContent = null
+        if (resultCode != Activity.RESULT_OK || uri == null || content == null) { result.success(false); return }
+        background(result, mediaExecutor) {
+            (contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Cannot open file")).use {
+                it.write(content.toByteArray(Charsets.UTF_8))
+            }
+            true
+        }
+    }
+
+    private fun finishImport(resultCode: Int, uri: Uri?) {
+        val result = importResult ?: return
+        importResult = null
+        if (resultCode != Activity.RESULT_OK || uri == null) { result.success(null); return }
+        background(result, mediaExecutor) {
+            (contentResolver.openInputStream(uri) ?: throw IOException("Cannot open file")).use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(65536)
+                var total = 0L
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    if (total > MAX_IMPORT_BYTES) throw IllegalArgumentException("File too large")
+                    output.write(buffer, 0, count)
+                }
+                output.toString(Charsets.UTF_8.name())
+            }
+        }
     }
 
     private fun download(call: MethodCall, result: MethodChannel.Result) {
@@ -838,15 +1165,7 @@ class MainActivity : FlutterActivity() {
         return contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IOException("Cannot create download")
     }
 
-    private fun mimeType(name: String) = when (name.substringAfterLast('.', "").lowercase()) {
-        "jpg", "jpeg" -> "image/jpeg"
-        "png" -> "image/png"
-        "gif" -> "image/gif"
-        "webp" -> "image/webp"
-        "mp4" -> "video/mp4"
-        "webm" -> "video/webm"
-        else -> "application/octet-stream"
-    }
+    private fun mimeType(name: String) = mediaMimeType(name)
 
     private fun secureHttps(value: String?): Boolean = try {
         val uri = URI(value ?: "")
@@ -857,6 +1176,13 @@ class MainActivity : FlutterActivity() {
         closing = true
         directoryResult?.success(null)
         directoryResult = null
+        exportResult?.success(false)
+        exportResult = null
+        exportContent = null
+        importResult?.success(null)
+        importResult = null
+        authResult?.success(false)
+        authResult = null
         pending.toList().forEach { if (pending.remove(it)) it.error("CANCELLED", "Activity closed", null) }
         client.dispatcher.cancelAll()
         executor.shutdownNow()
@@ -866,6 +1192,15 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val PICKER = 4101
+        private const val EXPORT = 4102
+        private const val IMPORT = 4103
+        private const val CONFIRM_CREDENTIAL = 4104
+        private const val SHORTCUT_KIND = "com.booruplus.app.SHORTCUT_KIND"
+        private const val SHORTCUT_BOARD = "com.booruplus.app.SHORTCUT_BOARD"
+        private const val SHORTCUT_TAGS = "com.booruplus.app.SHORTCUT_TAGS"
+        private const val MAX_SHARE_BYTES = 200L * 1024L * 1024L
+        private const val MAX_IMPORT_BYTES = 20L * 1024L * 1024L
+        private const val SHARE_CACHE_MILLIS = 60L * 60L * 1000L
         private const val MAX_WINDOW_REQUESTS = 32
         private const val MAX_MEDIA_REDIRECTS = 5
         private const val MAX_MEDIA_BYTES = 50L * 1024L * 1024L
@@ -881,6 +1216,36 @@ class MainActivity : FlutterActivity() {
         private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
+}
+
+internal fun mediaMimeType(name: String) = when (name.substringAfterLast('.', "").lowercase()) {
+    "jpg", "jpeg" -> "image/jpeg"
+    "png" -> "image/png"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "avif" -> "image/avif"
+    "mp4" -> "video/mp4"
+    "webm" -> "video/webm"
+    else -> "application/octet-stream"
+}
+
+/** Danbooru/e621 pool records as `{id, name, postCount}`; names use spaces. */
+internal fun parsePools(body: String): List<Map<String, Any?>> {
+    val records = JSONArray(body.trim().ifEmpty { "[]" })
+    val pools = ArrayList<Map<String, Any?>>()
+    for (index in 0 until records.length()) {
+        val record = records.optJSONObject(index) ?: continue
+        val id = record.optLong("id")
+        if (id <= 0) continue
+        pools.add(
+            mapOf(
+                "id" to id.toString(),
+                "name" to record.optString("name").replace('_', ' ').trim().ifEmpty { "Pool $id" },
+                "postCount" to record.optInt("post_count"),
+            )
+        )
+    }
+    return pools
 }
 
 internal fun parseGelbooruTagRecords(body: String): JSONArray {

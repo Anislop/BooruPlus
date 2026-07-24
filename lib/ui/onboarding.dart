@@ -84,13 +84,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'Choose your imageboard to get started.\nYou can switch websites anytime.',
-                style: TextStyle(
-                  fontSize: 15,
-                  height: 1.6,
-                  color: Colors.white60,
-                ),
+                style: TextStyle(fontSize: 15, height: 1.6, color: ink(.60)),
               ),
               const SectionLabel('Choose a website'),
               for (final board in Board.values)
@@ -131,30 +127,28 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                         : board.supportsSignIn
                                         ? '${board.host} · sign-in optional'
                                         : board.host,
-                                    style: const TextStyle(
+                                    style: TextStyle(
                                       fontSize: 12,
-                                      color: Colors.white54,
+                                      color: ink(.54),
                                     ),
                                   ),
                                 ],
                               ),
                             ),
                             if (board.requiresAuth)
-                              const Padding(
+                              Padding(
                                 padding: EdgeInsets.only(right: 12),
                                 child: Icon(
                                   Icons.key_rounded,
                                   size: 18,
-                                  color: Colors.white38,
+                                  color: ink(.38),
                                 ),
                               ),
                             Icon(
                               _selected == board
                                   ? Icons.radio_button_checked
                                   : Icons.radio_button_off,
-                              color: _selected == board
-                                  ? accent
-                                  : Colors.white30,
+                              color: _selected == board ? accent : ink(.30),
                             ),
                           ],
                         ),
@@ -163,13 +157,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   ),
                 ),
               const SizedBox(height: 16),
-              const Text(
+              Text(
                 'Content and availability depend on the selected website.',
-                style: TextStyle(
-                  color: Colors.white38,
-                  fontSize: 12,
-                  height: 1.5,
-                ),
+                style: TextStyle(color: ink(.38), fontSize: 12, height: 1.5),
               ),
               if (_error != null || widget.state.error != null)
                 Padding(
@@ -322,7 +312,7 @@ class _AuthenticationSheetState extends State<AuthenticationSheet> {
               _signIn
                   ? 'By signing in, you can use more search tags and queries on your searches. Your username and password is needed to sign in first, where the app keeps just the sign-in token, encrypted on this device.'
                   : 'Use the API credentials from your website account. They are encrypted on this device so you only need to connect once.',
-              style: const TextStyle(color: Colors.white60, height: 1.5),
+              style: TextStyle(color: ink(.60), height: 1.5),
             ),
             TextButton.icon(
               onPressed: () async {

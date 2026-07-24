@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
@@ -110,11 +111,16 @@ abstract interface class PostStore {
   Future<List<SavedPost>> loadHidden();
   Future<void> saveFavorites(Iterable<SavedPost> posts);
   Future<void> saveHidden(Iterable<SavedPost> posts);
+
+  /// Download history, oldest first.
+  Future<List<DownloadRecord>> loadDownloads();
+  Future<void> saveDownloads(Iterable<DownloadRecord> records);
 }
 
 class MemoryPostStore implements PostStore {
   List<SavedPost> _favorites = const [];
   List<SavedPost> _hidden = const [];
+  List<DownloadRecord> _downloads = const [];
   @override
   Future<List<SavedPost>> loadFavorites() async => _favorites;
   @override
@@ -125,6 +131,11 @@ class MemoryPostStore implements PostStore {
   @override
   Future<void> saveHidden(Iterable<SavedPost> posts) async =>
       _hidden = List.unmodifiable(posts);
+  @override
+  Future<List<DownloadRecord>> loadDownloads() async => _downloads;
+  @override
+  Future<void> saveDownloads(Iterable<DownloadRecord> records) async =>
+      _downloads = List.unmodifiable(records);
 }
 
 class LocalPostStore implements PostStore {
@@ -165,12 +176,37 @@ class LocalPostStore implements PostStore {
     await (await prefs).setStringList('posts.$name', values);
   }
 
+  @override
+  Future<List<DownloadRecord>> loadDownloads() async {
+    final values = (await prefs).getStringList('posts.downloads') ?? const [];
+    return values
+        .map((value) {
+          try {
+            return DownloadRecord.fromMap(jsonDecode(value) as Map);
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<DownloadRecord>()
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> saveDownloads(Iterable<DownloadRecord> records) async {
+    // DownloadRecord.toMap stores the post without credentials.
+    final values = records
+        .map((record) => jsonEncode(record.toMap()))
+        .toList(growable: false);
+    await (await prefs).setStringList('posts.downloads', values);
+  }
+
   SavedPost _sanitized(SavedPost value) =>
       SavedPost(board: value.board, post: _sanitizePost(value.post));
 
   MediaPost _sanitizePost(MediaPost value) => value.withUrls(
     url: _sanitizeUrl(value.url),
     previewUrl: _sanitizeUrl(value.previewUrl),
+    sampleUrl: _sanitizeUrl(value.sampleUrl),
   );
 
   static String _sanitizeUrl(String value) {
@@ -409,6 +445,16 @@ class MediaService {
     return future;
   }
 
+  /// Drops every shared response, for the Settings "Clear cache" action.
+  static void clearRecent() {
+    _recent.clear();
+    _recentBytes.clear();
+  }
+
+  /// Approximate bytes held by settled shared responses.
+  static int get recentBytes =>
+      _recentBytes.values.fold(0, (sum, size) => sum + size);
+
   static void _trimRecent() {
     _recentBytes.removeWhere((key, _) => !_recent.containsKey(key));
     var total = _recentBytes.values.fold(0, (sum, size) => sum + size);
@@ -449,5 +495,207 @@ class ScreenAwakeService {
       // The Android implementation owns this capability. Keep the viewer
       // usable in widget tests and on platforms without the channel.
     }
+  }
+}
+
+/// The device has no screen lock, so the app lock cannot verify the user.
+class DeviceLockUnavailableException implements Exception {
+  const DeviceLockUnavailableException();
+}
+
+/// Privacy, sharing, and backup-file capabilities of the Android host.
+class DeviceService {
+  DeviceService({MethodChannel? channel})
+    : channel = channel ?? const MethodChannel('booruplus/platform');
+  final MethodChannel channel;
+
+  /// Whether any verification prompt is showing. The prompt sends the app to
+  /// the background, which must not count as leaving it.
+  static bool get authenticating => _authenticating;
+  static bool _authenticating = false;
+
+  /// Hides the window from the recent-apps screen and screenshots.
+  Future<void> setSecureScreen(bool enabled) async {
+    try {
+      await channel.invokeMethod<void>('setSecureScreen', {'enabled': enabled});
+    } catch (_) {
+      // Not available in widget tests or without the Android host.
+    }
+  }
+
+  /// Shows the device's biometric or screen-lock prompt. Returns false when
+  /// the prompt is dismissed; throws [DeviceLockUnavailableException] when
+  /// the device has no screen lock.
+  Future<bool> authenticate({String title = 'Unlock BooruPlus'}) async {
+    _authenticating = true;
+    try {
+      return await channel.invokeMethod<bool>('authenticate', {
+            'title': title,
+          }) ??
+          false;
+    } on PlatformException catch (error) {
+      if (error.code == 'UNAVAILABLE') {
+        throw const DeviceLockUnavailableException();
+      }
+      return false;
+    } finally {
+      _authenticating = false;
+    }
+  }
+
+  Future<void> shareText(String text) =>
+      channel.invokeMethod<void>('share', {'text': text});
+
+  /// Downloads [url] to a private cache and opens the share sheet with it.
+  Future<void> shareMedia({
+    required String url,
+    required String name,
+    String? text,
+  }) => channel.invokeMethod<void>('share', {
+    'url': url,
+    'name': name,
+    'text': ?text,
+  });
+
+  /// Lets the user choose where to save [content]. Returns false when the
+  /// picker is cancelled.
+  Future<bool> exportFile({required String name, required String content}) =>
+      channel
+          .invokeMethod<bool>('exportFile', {'name': name, 'content': content})
+          .then((value) => value ?? false);
+
+  /// Reads a text file the user picks; null when the picker is cancelled.
+  Future<String?> importFile() => channel.invokeMethod<String>('importFile');
+
+  /// Whether the active network is metered (usually mobile data). False
+  /// when unknown.
+  Future<bool> isMeteredNetwork() async {
+    try {
+      return await channel.invokeMethod<bool>('isMeteredNetwork') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Bytes in the app's cache folder (shared media and other temporary
+  /// files).
+  Future<int> cacheSize() async =>
+      (await channel.invokeMethod<num>('cacheSize'))?.toInt() ?? 0;
+
+  /// Deletes the app's cache folder contents.
+  Future<void> clearCache() => channel.invokeMethod<void>('clearCache');
+
+  /// Pools [post] belongs to, as `{id, name, postCount}` maps. Only Danbooru
+  /// and e621/e926 report them.
+  Future<List<PostPool>> pools({
+    required Board board,
+    required MediaPost post,
+  }) async {
+    final response = await channel.invokeMethod<List<dynamic>>('pools', {
+      'board': board.name,
+      'postId': post.displayId,
+      'ids': post.pools,
+    });
+    return (response ?? const [])
+        .whereType<Map>()
+        .map(PostPool.fromMap)
+        .where((pool) => pool.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// Replaces the launcher icon's shortcuts.
+  Future<void> setShortcuts(List<AppShortcut> shortcuts) async {
+    try {
+      await channel.invokeMethod<void>('setShortcuts', {
+        'items': [for (final shortcut in shortcuts) shortcut.toMap()],
+      });
+    } catch (_) {
+      // Not available in widget tests or without the Android host.
+    }
+  }
+
+  /// The launcher shortcut that opened the app, once.
+  Future<AppShortcut?> takeShortcut() async {
+    try {
+      final value = await channel.invokeMethod<Map<dynamic, dynamic>>(
+        'takeShortcut',
+      );
+      return value == null ? null : AppShortcut.fromMap(value);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static final _shortcuts = StreamController<AppShortcut>.broadcast();
+  static bool _listening = false;
+
+  /// Launcher shortcuts used while the app is running.
+  Stream<AppShortcut> get shortcuts {
+    if (!_listening) {
+      _listening = true;
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'shortcut' && call.arguments is Map) {
+          _shortcuts.add(AppShortcut.fromMap(call.arguments as Map));
+        }
+      });
+    }
+    return _shortcuts.stream;
+  }
+}
+
+/// A pool a post belongs to.
+class PostPool {
+  const PostPool({required this.id, required this.name, this.postCount = 0});
+  final String id, name;
+  final int postCount;
+
+  factory PostPool.fromMap(Map<dynamic, dynamic> map) => PostPool(
+    id: '${map['id'] ?? ''}',
+    name: '${map['name'] ?? ''}',
+    postCount: map['postCount'] is num ? (map['postCount'] as num).toInt() : 0,
+  );
+}
+
+/// A launcher icon shortcut: open favorites, or run a saved search.
+class AppShortcut {
+  const AppShortcut.favorites()
+    : kind = 'favorites',
+      id = 'favorites',
+      label = 'Favorites',
+      board = null,
+      tags = const [];
+  const AppShortcut.search({
+    required this.id,
+    required this.label,
+    required Board this.board,
+    required this.tags,
+  }) : kind = 'search';
+
+  final String kind, id, label;
+  final Board? board;
+  final List<String> tags;
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'label': label,
+    'kind': kind,
+    'board': ?board?.name,
+    if (tags.isNotEmpty) 'tags': tags.join(' '),
+  };
+
+  factory AppShortcut.fromMap(Map<dynamic, dynamic> map) {
+    final board = Board.values.asNameMap()['${map['board']}'];
+    final tags = '${map['tags'] ?? ''}'
+        .split(RegExp(r'\s+'))
+        .where((tag) => tag.isNotEmpty)
+        .toList(growable: false);
+    return map['kind'] == 'search' && board != null
+        ? AppShortcut.search(
+            id: '${map['id'] ?? 'search'}',
+            label: tags.join(' '),
+            board: board,
+            tags: tags,
+          )
+        : const AppShortcut.favorites();
   }
 }

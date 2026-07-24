@@ -19,9 +19,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const _videoQualities = [0, 1080, 720, 480];
   late AppSettings _settings;
   final _downloads = DownloadService();
+  final _device = DeviceService();
   bool _busy = false;
   bool _picking = false;
+  bool _backingUp = false;
+  bool _verifying = false;
   String? _error;
+  late final _filenameTemplate = TextEditingController(
+    text: widget.state.settings.filenameTemplate,
+  );
+  // App cache plus in-memory images, in bytes; null while measuring.
+  int? _cacheBytes;
+  bool _clearingCache = false;
 
   bool get _hasUnsavedChanges => _settings != widget.state.settings;
 
@@ -62,6 +71,136 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _settings = widget.state.settings;
+    _measureCache();
+  }
+
+  @override
+  void dispose() {
+    _filenameTemplate.dispose();
+    super.dispose();
+  }
+
+  Future<void> _measureCache() async {
+    final disk = await _device.cacheSize();
+    if (!mounted) return;
+    setState(
+      () => _cacheBytes =
+          disk +
+          MediaService.recentBytes +
+          PaintingBinding.instance.imageCache.currentSizeBytes,
+    );
+  }
+
+  Future<void> _clearCache() async {
+    setState(() => _clearingCache = true);
+    try {
+      await _device.clearCache();
+      MediaService.clearRecent();
+      PaintingBinding.instance.imageCache
+        ..clear()
+        ..clearLiveImages();
+      _notify('Cache cleared.');
+    } catch (_) {
+      _notify('Could not clear the cache. Please try again.');
+    } finally {
+      if (mounted) setState(() => _clearingCache = false);
+    }
+    await _measureCache();
+  }
+
+  static String _bytes(int bytes) {
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  String get _uploadersSummary {
+    final total = _settings.boardHiddenUploaders.values.fold(
+      0,
+      (sum, names) => sum + names.length,
+    );
+    if (total == 0) {
+      return "Hide an uploader from a post's details or its hold menu.";
+    }
+    final sites = _settings.boardHiddenUploaders.length;
+    return '$total hidden on $sites website${sites == 1 ? '' : 's'}';
+  }
+
+  /// Lists hidden uploaders by website; removing one edits the draft.
+  Future<void> _editHiddenUploaders() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          final byBoard = _settings.boardHiddenUploaders;
+          void remove(Board board, String name) {
+            final names = [...?byBoard[board]]..remove(name);
+            setState(
+              () => _settings = _settings.copyWith(
+                boardHiddenUploaders: {
+                  for (final entry in byBoard.entries)
+                    if (entry.key != board) entry.key: entry.value,
+                  if (names.isNotEmpty) board: names,
+                },
+              ),
+            );
+            setSheetState(() {});
+          }
+
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * .7,
+              ),
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  const ListTile(
+                    leading: Icon(Icons.person_off_outlined),
+                    title: Text('Hidden uploaders'),
+                    subtitle: Text('Changes apply when you save settings.'),
+                  ),
+                  if (byBoard.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+                      child: Text(
+                        'No hidden uploaders.',
+                        style: TextStyle(color: ink(.54)),
+                      ),
+                    ),
+                  for (final board in _settings.boardOrder)
+                    if (byBoard[board] case final names?) ...[
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                        child: Text(
+                          board.label,
+                          style: const TextStyle(
+                            color: accent,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      for (final name in names)
+                        ListTile(
+                          dense: true,
+                          title: Text(name),
+                          trailing: IconButton(
+                            tooltip: 'Show posts by $name again',
+                            icon: const Icon(Icons.close_rounded),
+                            onPressed: () => remove(board, name),
+                          ),
+                        ),
+                    ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _pickFolder() async {
@@ -99,6 +238,174 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Turning the app lock on first checks that this device can verify the
+  /// user, so it cannot lock anyone out.
+  Future<void> _setAppLock(bool enabled) async {
+    if (!enabled) {
+      setState(() => _settings = _settings.copyWith(appLock: false));
+      return;
+    }
+    setState(() => _verifying = true);
+    try {
+      final verified = await _device.authenticate(title: 'Turn on app lock');
+      if (verified && mounted) {
+        setState(() => _settings = _settings.copyWith(appLock: true));
+      }
+    } on DeviceLockUnavailableException {
+      _notify('Set up a screen lock in Android settings to use the app lock.');
+    } finally {
+      if (mounted) setState(() => _verifying = false);
+    }
+  }
+
+  Future<void> _exportBackup() async {
+    setState(() => _backingUp = true);
+    try {
+      final now = DateTime.now();
+      String two(int value) => value.toString().padLeft(2, '0');
+      final saved = await _device.exportFile(
+        name:
+            'booruplus-backup-${now.year}-${two(now.month)}-${two(now.day)}.json',
+        content: widget.state.exportBackup(),
+      );
+      if (saved) _notify('Backup saved.');
+    } catch (_) {
+      _notify('Could not save the backup. Please try again.');
+    } finally {
+      if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  Future<void> _importBackup() async {
+    setState(() => _backingUp = true);
+    try {
+      final content = await _device.importFile();
+      if (content == null || !mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Restore this backup?'),
+          content: const Text(
+            'Its settings, saved searches, and blocked tags replace the current ones. Its favorites and hidden posts are added to yours. Your download folder, app lock, and website connections stay as they are.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Restore'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      final summary = await widget.state.importBackup(content);
+      if (!mounted) return;
+      setState(() => _settings = widget.state.settings);
+      _notify(
+        'Backup restored: ${summary.favorites} new favorite${summary.favorites == 1 ? '' : 's'}, ${summary.hidden} new hidden post${summary.hidden == 1 ? '' : 's'}.',
+      );
+    } on FormatException catch (error) {
+      _notify(error.message);
+    } catch (_) {
+      _notify('Could not restore the backup. Please try again.');
+    } finally {
+      if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  Widget _switchCard({
+    required bool value,
+    required ValueChanged<bool>? onChanged,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Material(
+      color: panel,
+      borderRadius: BorderRadius.circular(16),
+      clipBehavior: Clip.antiAlias,
+      child: SwitchListTile.adaptive(
+        value: value,
+        onChanged: _busy ? null : onChanged,
+        secondary: Icon(icon),
+        title: Text(title),
+        subtitle: Text(subtitle),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      ),
+    ),
+  );
+
+  /// A setting with a few choices, as a button group.
+  Widget _choiceCard<T>({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required List<T> values,
+    required String Function(T) label,
+    required T selected,
+    required ValueChanged<T> onChanged,
+  }) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<T>(
+              showSelectedIcon: false,
+              segments: [
+                for (final value in values)
+                  ButtonSegment<T>(value: value, label: Text(label(value))),
+              ],
+              selected: {selected},
+              onSelectionChanged: _busy
+                  ? null
+                  : (choice) => onChanged(choice.single),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: TextStyle(color: ink(.54), fontSize: 12, height: 1.5),
+          ),
+        ],
+      ),
+    ),
+  );
+
   Widget _slider(
     String title,
     String subtitle,
@@ -131,11 +438,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       const SizedBox(height: 4),
       Text(
         subtitle,
-        style: const TextStyle(
-          color: Colors.white54,
-          fontSize: 12,
-          height: 1.5,
-        ),
+        style: TextStyle(color: ink(.54), fontSize: 12, height: 1.5),
       ),
       Slider(
         value: value.toDouble(),
@@ -320,6 +623,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           fontWeight: FontWeight.w700,
                           height: 1.2,
                           letterSpacing: -.7,
+                        ),
+                      ),
+                      const SectionLabel('Appearance'),
+                      _choiceCard<ThemeChoice>(
+                        icon: Icons.palette_outlined,
+                        title: 'Theme',
+                        subtitle: switch (_settings.theme) {
+                          ThemeChoice.standard =>
+                            'Dark surfaces tinted by the current website.',
+                          ThemeChoice.white => 'Light surfaces with dark text.',
+                          ThemeChoice.amoled => 'Pure black backgrounds that save power on OLED screens.',
+                        },
+                        values: ThemeChoice.values,
+                        label: (choice) => choice.label,
+                        selected: _settings.theme,
+                        onChanged: (choice) => setState(
+                          () => _settings = _settings.copyWith(theme: choice),
                         ),
                       ),
                       const SectionLabel('Media grid'),
@@ -607,6 +927,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      const SectionLabel('Viewer'),
+                      _choiceCard<DataSaverMode>(
+                        icon: Icons.data_saver_on_outlined,
+                        title: 'Data saver',
+                        subtitle: "Show the website's smaller sample image when it has one. Tap Load original for full size.",
+                        values: DataSaverMode.values,
+                        label: (mode) => switch (mode) {
+                          DataSaverMode.off => 'Off',
+                          DataSaverMode.mobileData => 'Mobile data',
+                          DataSaverMode.always => 'Always',
+                        },
+                        selected: _settings.dataSaver,
+                        onChanged: (mode) => setState(
+                          () => _settings = _settings.copyWith(dataSaver: mode),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _slider(
+                        'Slideshow interval',
+                        'Seconds each image shows during a slideshow. Videos move on when they finish.',
+                        _settings.slideshowSeconds,
+                        2,
+                        60,
+                        58,
+                        (v) => setState(
+                          () => _settings = _settings.copyWith(
+                            slideshowSeconds: v,
+                          ),
+                        ),
+                      ),
+                      _switchCard(
+                        value: _settings.doubleTapFavorite,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            doubleTapFavorite: value,
+                          ),
+                        ),
+                        icon: Icons.favorite_border_rounded,
+                        title: 'Double-tap to favorite',
+                        subtitle: 'Double-tapping an image favorites it instead of zooming. Pinch to zoom.',
+                      ),
+                      _switchCard(
+                        value: _settings.volumeKeyPaging,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            volumeKeyPaging: value,
+                          ),
+                        ),
+                        icon: Icons.volume_up_outlined,
+                        title: 'Volume keys turn pages',
+                        subtitle: 'Volume down shows the next post and volume up the previous one while viewing.',
+                      ),
                       const SectionLabel('Blocked tags'),
                       Material(
                         color: panel,
@@ -619,6 +991,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           trailing: const Icon(Icons.chevron_right_rounded),
                           enabled: !_busy,
                           onTap: _editBlockedTags,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Material(
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: ListTile(
+                          leading: const Icon(Icons.person_off_outlined),
+                          title: const Text('Hidden uploaders'),
+                          subtitle: Text(_uploadersSummary),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          enabled: !_busy,
+                          onTap: _editHiddenUploaders,
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 16,
                           ),
@@ -655,8 +1044,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   : Uri.decodeFull(_settings.downloadDirectory!)
                                         .split('/tree/')
                                         .last,
-                              style: const TextStyle(
-                                color: Colors.white54,
+                              style: TextStyle(
+                                color: ink(.54),
                                 fontSize: 12,
                                 height: 1.6,
                               ),
@@ -691,10 +1080,177 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ],
                         ),
                       ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            TextField(
+                              controller: _filenameTemplate,
+                              enabled: !_busy,
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              maxLength: 120,
+                              decoration: InputDecoration(
+                                labelText: 'File name',
+                                hintText: defaultFilenameTemplate,
+                                suffixIcon: IconButton(
+                                  tooltip: 'Reset file name',
+                                  icon: const Icon(Icons.restart_alt_rounded),
+                                  onPressed: _busy
+                                      ? null
+                                      : () {
+                                          _filenameTemplate.text =
+                                              defaultFilenameTemplate;
+                                          setState(
+                                            () =>
+                                                _settings = _settings.copyWith(
+                                                  filenameTemplate:
+                                                      defaultFilenameTemplate,
+                                                ),
+                                          );
+                                        },
+                                ),
+                              ),
+                              onChanged: (value) => setState(
+                                () => _settings = _settings.copyWith(
+                                  filenameTemplate: value,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              'Use {site} {id} {md5} {artist} {character} {copyright} {rating} {width} {height}. The extension is added for you.',
+                              style: TextStyle(
+                                color: ink(.54),
+                                fontSize: 12,
+                                height: 1.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      _switchCard(
+                        value: _settings.autoFavoriteOnDownload,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            autoFavoriteOnDownload: value,
+                          ),
+                        ),
+                        icon: Icons.favorite_outline_rounded,
+                        title: 'Favorite when downloading',
+                        subtitle:
+                            'Add downloaded posts to your favorites as well.',
+                      ),
+                      const SectionLabel('Storage'),
+                      Material(
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: ListTile(
+                          leading: const Icon(Icons.cleaning_services_outlined),
+                          title: const Text('Cache'),
+                          subtitle: Text(
+                            _cacheBytes == null
+                                ? 'Measuring…'
+                                : '${_bytes(_cacheBytes!)} of previews and media. Downloads and favorites are not affected.',
+                          ),
+                          trailing: TextButton(
+                            onPressed: _clearingCache || _busy
+                                ? null
+                                : _clearCache,
+                            child: Text(_clearingCache ? 'Clearing…' : 'Clear'),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                          ),
+                        ),
+                      ),
+                      const SectionLabel('Privacy'),
+                      _switchCard(
+                        value: _settings.appLock,
+                        onChanged: _verifying ? null : _setAppLock,
+                        icon: Icons.lock_outline_rounded,
+                        title: 'App lock',
+                        subtitle: 'Ask for your fingerprint, face, or screen lock when opening BooruPlus or returning after 30 seconds away.',
+                      ),
+                      _switchCard(
+                        value: _settings.secureScreen,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            secureScreen: value,
+                          ),
+                        ),
+                        icon: Icons.screenshot_monitor_outlined,
+                        title: 'Hide in recent apps',
+                        subtitle: 'Blank the app preview in the recent-apps screen and block screenshots.',
+                      ),
+                      _switchCard(
+                        value: _settings.incognito,
+                        onChanged: (value) => setState(
+                          () =>
+                              _settings = _settings.copyWith(incognito: value),
+                        ),
+                        icon: Icons.visibility_off_outlined,
+                        title: 'Incognito',
+                        subtitle: "Don't record recent searches or searched and browsed tags. Also in the menu.",
+                      ),
+                      const SectionLabel('Backup'),
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included.',
+                              style: TextStyle(
+                                color: ink(.54),
+                                fontSize: 12,
+                                height: 1.6,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: _backingUp || _busy
+                                      ? null
+                                      : _exportBackup,
+                                  icon: const Icon(
+                                    Icons.upload_file_outlined,
+                                    size: 17,
+                                  ),
+                                  label: const Text('Export backup'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: _backingUp || _busy
+                                      ? null
+                                      : _importBackup,
+                                  icon: const Icon(
+                                    Icons.restore_rounded,
+                                    size: 17,
+                                  ),
+                                  label: const Text('Restore backup'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
                       const SectionLabel('Website connections'),
-                      const Text(
+                      Text(
                         'Manage credentials stored on this device.',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                        style: TextStyle(color: ink(.54), fontSize: 13),
                       ),
                       for (final board in Board.values.where(
                         (b) => b.supportsAuth,

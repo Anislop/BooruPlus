@@ -28,6 +28,7 @@ import java.util.List;
  * @author Kodehawa
  */
 public class YandereImage implements BoardImage {
+    // BooruPlus patch: md5 and parent_id below gain accessors so they deserialize.
     private int actual_preview_width;
     private String author;
     private String file_ext;
@@ -194,5 +195,14 @@ public class YandereImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return created_at * 1000;
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() {
+        return md5;
+    }
+
+    public int getParent_id() {
+        return parent_id;
     }
 }

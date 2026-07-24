@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show PlatformException;
 
 import 'models.dart';
 import 'services.dart';
@@ -12,8 +15,10 @@ class AppState extends ChangeNotifier {
     SettingsStore? store,
     PostStore? postStore,
     AccountRepository? accounts,
+    DownloadService? downloads,
   }) : _repository = repository ?? PlatformBoardRepository(),
        _accounts = accounts ?? PlatformAccountRepository(),
+       _downloads = downloads ?? DownloadService(),
        _store = store ?? LocalSettingsStore(),
        _postStore =
            postStore ??
@@ -22,6 +27,7 @@ class AppState extends ChangeNotifier {
                : MemoryPostStore());
   final BoardRepository _repository;
   final AccountRepository _accounts;
+  final DownloadService _downloads;
   final SettingsStore _store;
   final PostStore _postStore;
   AppSettings _settings = const AppSettings();
@@ -58,6 +64,15 @@ class AppState extends ChangeNotifier {
   final Map<String, DateTime> _refreshAttempts = {};
   final Map<String, SavedPost> _refreshQueue = {};
   bool _refreshScheduled = false;
+  List<DownloadRecord> _downloadRecords = const [];
+  Set<String> _downloadedIds = const {};
+  // Post counts from autocomplete, per website, for the search chips.
+  final Map<Board, Map<String, int>> _postCounts = {};
+  // When a rate-limited feed may be retried.
+  DateTime? _retryAt;
+  // Recent new-post counts per saved search, so reopening the list does not
+  // query every search again.
+  final Map<String, (DateTime, int?)> _newPostCounts = {};
 
   AppSettings get settings => _settings;
   Board? get board => _board;
@@ -96,9 +111,46 @@ class AppState extends ChangeNotifier {
   List<SavedPost> get favoritePosts => List.unmodifiable(_favoritePosts);
   List<SavedPost> get hiddenPosts => List.unmodifiable(_hiddenPosts);
   bool isFavorite(MediaPost post, {Board? board}) =>
-      _favoriteIds.contains(_identity(post, board));
+      _savedIn(_favoriteIds, post, board);
   bool isHidden(MediaPost post, {Board? board}) =>
-      _hiddenIds.contains(_identity(post, board));
+      _savedIn(_hiddenIds, post, board);
+
+  /// Whether [post] is among [ids], including by its pre-ID identity.
+  bool _savedIn(Set<String> ids, MediaPost post, Board? board) {
+    final saved = SavedPost(
+      board: board ?? _board ?? Board.safebooru,
+      post: post,
+    );
+    if (ids.contains(saved.identity)) return true;
+    final legacy = saved.legacyIdentity;
+    return legacy != null && ids.contains(legacy);
+  }
+
+  /// Saved posts that are [post], including by its pre-ID identity.
+  bool Function(SavedPost) _same(MediaPost post, Board? board) {
+    final saved = SavedPost(
+      board: board ?? _board ?? Board.safebooru,
+      post: post,
+    );
+    final keys = {saved.identity, ?saved.legacyIdentity};
+    return (value) => keys.contains(value.identity);
+  }
+
+  /// Download history, newest last.
+  List<DownloadRecord> get downloadHistory =>
+      List.unmodifiable(_downloadRecords);
+  bool isDownloaded(MediaPost post, {Board? board}) =>
+      _downloadedIds.contains(_identity(post, board));
+
+  /// When the rate-limited feed can be retried, while its error shows.
+  DateTime? get retryAt => _error == null ? null : _retryAt;
+
+  /// The post count autocomplete last reported for [tag] on this website.
+  int? postCountFor(String tag) {
+    final board = _board;
+    if (board == null) return null;
+    return _postCounts[board]?[_normalize(tag)];
+  }
 
   SavedPost displayReady(SavedPost post) {
     final authorized = post.authorized(_credentialsByBoard[post.board]);
@@ -139,18 +191,16 @@ class AppState extends ChangeNotifier {
 
   Future<void> favoritePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    if (_favoriteIds.contains(saved.identity)) return;
+    if (_savedIn(_favoriteIds, post, board)) return;
     _setFavorites([..._favoritePosts, saved]);
     await _postStore.saveFavorites(_favoritePosts);
     notifyListeners();
   }
 
   Future<void> unfavoritePost(MediaPost post, {Board? board}) async {
-    final saved = _saved(post, board);
+    final same = _same(post, board);
     _setFavorites(
-      _favoritePosts
-          .where((value) => value.identity != saved.identity)
-          .toList(growable: false),
+      _favoritePosts.where((value) => !same(value)).toList(growable: false),
     );
     await _postStore.saveFavorites(_favoritePosts);
     notifyListeners();
@@ -158,7 +208,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> hidePost(MediaPost post, {Board? board}) async {
     final saved = _saved(post, board);
-    if (!_hiddenIds.contains(saved.identity)) {
+    if (!_savedIn(_hiddenIds, post, board)) {
       _setHidden([..._hiddenPosts, saved]);
       await _postStore.saveHidden(_hiddenPosts);
     }
@@ -171,14 +221,451 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> unhidePost(MediaPost post, {Board? board}) async {
-    final saved = _saved(post, board);
+    final same = _same(post, board);
+    _setHidden(
+      _hiddenPosts.where((value) => !same(value)).toList(growable: false),
+    );
+    await _postStore.saveHidden(_hiddenPosts);
+    notifyListeners();
+  }
+
+  /// Removes several favorites with one write.
+  Future<void> unfavoritePosts(Iterable<SavedPost> posts) async {
+    final remove = {for (final saved in posts) saved.identity};
+    if (remove.isEmpty) return;
+    _setFavorites(
+      _favoritePosts
+          .where((value) => !remove.contains(value.identity))
+          .toList(growable: false),
+    );
+    await _postStore.saveFavorites(_favoritePosts);
+    notifyListeners();
+  }
+
+  /// Unhides several posts with one write. Unhidden posts return to the
+  /// feed on its next load.
+  Future<void> unhidePosts(Iterable<SavedPost> posts) async {
+    final remove = {for (final saved in posts) saved.identity};
+    if (remove.isEmpty) return;
     _setHidden(
       _hiddenPosts
-          .where((value) => value.identity != saved.identity)
+          .where((value) => !remove.contains(value.identity))
           .toList(growable: false),
     );
     await _postStore.saveHidden(_hiddenPosts);
     notifyListeners();
+  }
+
+  /// Blocks [tag] on [board], or on every website when [board] is null, and
+  /// drops matching posts from the current feed without reloading it.
+  Future<void> blockTag(String tag, {Board? board}) async {
+    var value = _normalize(tag);
+    if (value.startsWith('-')) value = value.substring(1);
+    if (value.isEmpty) return;
+    await _enqueueSettingsUpdate(() async {
+      final next = board == null
+          ? _settings.copyWith(blacklist: [..._settings.blacklist, value])
+          : _settings.copyWith(
+              boardBlacklists: {
+                ..._settings.boardBlacklists,
+                board: [...?_settings.boardBlacklists[board], value],
+              },
+            );
+      if (next == _settings) return;
+      await _store.saveSettings(next);
+      _settings = next;
+    });
+    _posts = _posts.where(_allowed).toList(growable: false);
+    notifyListeners();
+  }
+
+  /// Hides every post by [uploader] on [board] and drops them from the
+  /// current feed without reloading it.
+  Future<void> hideUploader(String uploader, {required Board board}) async {
+    final name = _normalize(uploader);
+    if (name.isEmpty) return;
+    await _enqueueSettingsUpdate(() async {
+      final next = _settings.copyWith(
+        boardHiddenUploaders: {
+          ..._settings.boardHiddenUploaders,
+          board: [...?_settings.boardHiddenUploaders[board], name],
+        },
+      );
+      if (next == _settings) return;
+      await _store.saveSettings(next);
+      _settings = next;
+    });
+    _posts = _posts.where(_allowed).toList(growable: false);
+    notifyListeners();
+  }
+
+  /// Saves [post]'s original media with the file name template, records it
+  /// in the download history, and favorites it when that setting is on.
+  /// Returns the saved file's location; platform errors are rethrown.
+  Future<String> downloadPost(MediaPost post, {Board? board}) async {
+    final display = displayReady(_saved(post, board));
+    final url = display.post.url;
+    if (url.isEmpty) throw StateError('Missing media URL');
+    final location = await _downloads.download(
+      url: url,
+      name: mediaFileName(
+        display.board,
+        display.post,
+        url,
+        template: _settings.filenameTemplate,
+      ),
+      directory: _settings.downloadDirectory,
+    );
+    final record = DownloadRecord(
+      saved: display.sanitized(),
+      savedAt: DateTime.now(),
+      location: location,
+    );
+    final identity = record.saved.identity;
+    final records = [
+      ..._downloadRecords.where((value) => value.saved.identity != identity),
+      record,
+    ];
+    _setDownloads(
+      records.length > _maxDownloadRecords
+          ? records.sublist(records.length - _maxDownloadRecords)
+          : records,
+    );
+    try {
+      await _postStore.saveDownloads(_downloadRecords);
+    } catch (_) {
+      // The file is saved; only its history entry may be lost.
+    }
+    if (_settings.autoFavoriteOnDownload) {
+      await favoritePost(post, board: display.board);
+    }
+    notifyListeners();
+    return location;
+  }
+
+  static const _maxDownloadRecords = 1000;
+
+  /// Downloads [posts] one at a time. Stops early when the download folder
+  /// needs to be chosen again.
+  Future<DownloadSummary> downloadPosts(
+    List<SavedPost> posts, {
+    void Function(int index, int total)? onProgress,
+  }) async {
+    var saved = 0, failed = 0;
+    var folderLost = false;
+    for (var i = 0; i < posts.length; i++) {
+      onProgress?.call(i, posts.length);
+      try {
+        await downloadPost(posts[i].post, board: posts[i].board);
+        saved++;
+      } on PlatformException catch (error) {
+        failed++;
+        if (error.code == 'DIRECTORY_ACCESS' ||
+            error.code == 'DIRECTORY_REQUIRED') {
+          folderLost = true;
+          break;
+        }
+      } catch (_) {
+        failed++;
+      }
+    }
+    return DownloadSummary(
+      saved: saved,
+      failed: failed,
+      folderLost: folderLost,
+    );
+  }
+
+  /// Removes entries from the download history; the files stay.
+  Future<void> removeDownloadRecords(Iterable<DownloadRecord> records) async {
+    final remove = {for (final record in records) record.saved.identity};
+    if (remove.isEmpty) return;
+    _setDownloads(
+      _downloadRecords
+          .where((record) => !remove.contains(record.saved.identity))
+          .toList(growable: false),
+    );
+    await _postStore.saveDownloads(_downloadRecords);
+    notifyListeners();
+  }
+
+  /// The visible feed's state, so going back to it can restore its posts
+  /// and pages instead of searching again.
+  FeedSnapshot? snapshotFeed() {
+    final board = _board;
+    if (board == null || _posts.isEmpty) return null;
+    return FeedSnapshot._(
+      board: board,
+      tags: _tags,
+      posts: _posts,
+      page: _page,
+      hasMore: _hasMore,
+      randomSeed: _randomSeed,
+    );
+  }
+
+  /// Shows [snapshot] again without fetching. Returns false when it belongs
+  /// to another website.
+  bool restoreFeed(FeedSnapshot snapshot) {
+    if (snapshot.board != _board) return false;
+    _invalidate();
+    _tags = snapshot.tags;
+    // Settings or hidden posts may have changed since it was taken.
+    _posts = snapshot.posts.where(_allowed).toList(growable: false);
+    _page = snapshot.page;
+    _hasMore = snapshot.hasMore;
+    _randomSeed = snapshot.randomSeed;
+    _error = null;
+    _retryAt = null;
+    notifyListeners();
+    return true;
+  }
+
+  /// How many posts newer than the last visit [query] has on this website,
+  /// up to 100; null when unknown (never visited, Sankaku's opaque IDs, a
+  /// custom sort order, or a failed request). Results are kept briefly.
+  Future<int?> newPostCount(List<String> query) async {
+    final board = _board;
+    if (board == null || board.isSankakuFamily) return null;
+    final key = AppSettings.savedSearchKey(board, query);
+    final mark = _settings.savedSearchMarks[key];
+    if (mark == null ||
+        query.any(
+          (tag) => tag.startsWith('order:') || tag.startsWith('sort:'),
+        )) {
+      return null;
+    }
+    if (board.requiresAuth && _credentialsByBoard[board] == null) return null;
+    final cached = _newPostCounts[key];
+    if (cached != null &&
+        DateTime.now().difference(cached.$1) < const Duration(minutes: 5)) {
+      return cached.$2;
+    }
+    int? count;
+    try {
+      final raw = await _withSession(
+        board,
+        (credentials) => _repository.fetch(
+          board: board,
+          tags: _queryTagsFor(board, query, signedIn: credentials != null),
+          limit: 100,
+          page: 0,
+          random: false,
+          credentials: credentials,
+        ),
+      );
+      count = raw
+          .map(MediaPost.fromMap)
+          .where((post) => post.id > mark && _allowedOn(post, board))
+          .length;
+    } catch (_) {
+      count = null;
+    }
+    _newPostCounts[key] = (DateTime.now(), count);
+    return count;
+  }
+
+  /// Remembers the newest post ID seen for a saved search on [board].
+  void _markSavedSearch(Board board, List<String> tags, int highest) {
+    if (board.isSankakuFamily || tags.isEmpty || highest <= 0) return;
+    final key = AppSettings.savedSearchKey(board, tags);
+    final saved = _settings
+        .savedQueriesFor(board)
+        .any((query) => AppSettings.savedSearchKey(board, query) == key);
+    if (!saved || (_settings.savedSearchMarks[key] ?? 0) >= highest) return;
+    _newPostCounts.remove(key);
+    unawaited(
+      _enqueueSettingsUpdate(() async {
+        if ((_settings.savedSearchMarks[key] ?? 0) >= highest) return;
+        // Re-inserted last, so the newest marks survive trimming.
+        final marks = {..._settings.savedSearchMarks}..remove(key);
+        marks[key] = highest;
+        final next = _settings.copyWith(savedSearchMarks: marks);
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+        notifyListeners();
+      }),
+    );
+  }
+
+  /// Websites that can search now: those not needing credentials, or with
+  /// credentials saved.
+  Future<List<Board>> searchableBoards({Iterable<Board>? among}) async {
+    final boards = (among ?? Board.values).toList();
+    for (final board in boards) {
+      if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
+        try {
+          _credentialsByBoard[board] = await _store.loadCredentials(board);
+        } catch (_) {
+          _credentialsByBoard[board] = null;
+        }
+      }
+    }
+    return boards
+        .where(
+          (board) => !board.requiresAuth || _credentialsByBoard[board] != null,
+        )
+        .toList(growable: false);
+  }
+
+  /// The same file (by MD5 hash) on other websites, using each website's
+  /// `md5:` search. Results must report the same hash.
+  Future<List<SavedPost>> findOnOtherSites(
+    MediaPost post, {
+    required Board board,
+  }) async {
+    final md5 = post.md5;
+    if (md5.isEmpty) return const [];
+    final boards = await searchableBoards(
+      among: Board.values.where((other) => other != board),
+    );
+    final found = await Future.wait(
+      boards.map((other) async {
+        try {
+          final raw = await _withSession(
+            other,
+            (credentials) => _repository.fetch(
+              board: other,
+              tags: ['md5:$md5'],
+              limit: 5,
+              page: 0,
+              random: false,
+              credentials: credentials,
+            ),
+          );
+          return raw
+              .map(MediaPost.fromMap)
+              .where((match) => match.md5 == md5 && _allowedOn(match, other))
+              .map((match) => SavedPost(board: other, post: match))
+              .toList(growable: false);
+        } catch (_) {
+          return const <SavedPost>[];
+        }
+      }),
+    );
+    return [for (final posts in found) ...posts];
+  }
+
+  /// A search across several websites at once; see [MultiSiteSearch].
+  MultiSiteSearch multiSiteSearch() => MultiSiteSearch._(this);
+
+  /// Turns incognito on or off without reloading the feed.
+  Future<void> setIncognito(bool enabled) => _enqueueSettingsUpdate(() async {
+    final next = _settings.copyWith(incognito: enabled);
+    if (next == _settings) return;
+    try {
+      await _store.saveSettings(next);
+    } catch (_) {
+      return;
+    }
+    _settings = next;
+    notifyListeners();
+  });
+
+  /// Turns the app lock off without reloading the feed, for when the device
+  /// no longer has a screen lock to verify with.
+  Future<void> disableAppLock() => _enqueueSettingsUpdate(() async {
+    final next = _settings.copyWith(appLock: false);
+    if (next == _settings) return;
+    try {
+      await _store.saveSettings(next);
+    } catch (_) {
+      return;
+    }
+    _settings = next;
+    notifyListeners();
+  });
+
+  static const backupFormat = 'booruplus-backup';
+
+  /// Settings, saved searches, blocked tags, favorites, and hidden posts as
+  /// JSON. Credentials and the device-specific download folder are left out;
+  /// saved posts are stored without API keys.
+  String exportBackup() => jsonEncode({
+    'format': backupFormat,
+    'version': 1,
+    'exportedAt': DateTime.now().toUtc().toIso8601String(),
+    'settings': _settings.copyWith(downloadDirectory: null).toMap(),
+    'favorites': [
+      for (final saved in _favoritePosts) saved.sanitized().toMap(),
+    ],
+    'hidden': [for (final saved in _hiddenPosts) saved.sanitized().toMap()],
+  });
+
+  /// Restores an [exportBackup] file: its settings replace the current ones
+  /// (keeping this device's download folder and app lock), and its favorites
+  /// and hidden posts are merged with the current ones.
+  Future<BackupSummary> importBackup(String source) async {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(source);
+    } on FormatException {
+      throw const FormatException('This file is not a BooruPlus backup.');
+    }
+    if (decoded is! Map || decoded['format'] != backupFormat) {
+      throw const FormatException('This file is not a BooruPlus backup.');
+    }
+    List<SavedPost> posts(Object? value) => value is List
+        ? value
+              .whereType<Map>()
+              .map((map) {
+                try {
+                  return SavedPost.fromMap(map).sanitized();
+                } catch (_) {
+                  return null;
+                }
+              })
+              .whereType<SavedPost>()
+              .toList(growable: false)
+        : const [];
+    final settings = decoded['settings'];
+    if (settings is Map) {
+      await _enqueueSettingsUpdate(() async {
+        final next = AppSettings.fromMap(settings).copyWith(
+          downloadDirectory: _settings.downloadDirectory,
+          appLock: _settings.appLock,
+        );
+        await _store.saveSettings(next);
+        _settings = next;
+      });
+    }
+    // SavedPost equality is its identity, so the sets also drop duplicates
+    // inside the backup.
+    final newFavorites = posts(decoded['favorites'])
+        .where((saved) => !_favoriteIds.contains(saved.identity))
+        .toSet();
+    final newHidden = posts(decoded['hidden'])
+        .where((saved) => !_hiddenIds.contains(saved.identity))
+        .toSet();
+    if (newFavorites.isNotEmpty) {
+      _setFavorites([..._favoritePosts, ...newFavorites]);
+      await _postStore.saveFavorites(_favoritePosts);
+    }
+    if (newHidden.isNotEmpty) {
+      _setHidden([..._hiddenPosts, ...newHidden]);
+      await _postStore.saveHidden(_hiddenPosts);
+    }
+    for (final saved in [...newFavorites, ...newHidden]) {
+      if (saved.board.supportsAuth &&
+          !_credentialsByBoard.containsKey(saved.board)) {
+        _credentialsByBoard[saved.board] = await _store.loadCredentials(
+          saved.board,
+        );
+      }
+    }
+    _invalidate();
+    _clearResults();
+    notifyListeners();
+    unawaited(_load(reset: true, generation: _generation));
+    return BackupSummary(
+      settings: settings is Map,
+      favorites: newFavorites.length,
+      hidden: newHidden.length,
+    );
   }
 
   Future<List<TagSuggestion>> autocomplete(String query) async {
@@ -201,10 +688,22 @@ class AppState extends ChangeNotifier {
         ),
       );
       if (generation != _autocompleteGeneration) return const [];
-      return response
+      final suggestions = response
           .map(TagSuggestion.fromMap)
           .where((item) => item.name.isNotEmpty)
           .toList();
+      final counts = _postCounts.putIfAbsent(board, () => {});
+      for (final suggestion in suggestions) {
+        final count = suggestion.postCount;
+        if (count == null) continue;
+        final key = _normalize(suggestion.name);
+        counts.remove(key);
+        counts[key] = count;
+      }
+      while (counts.length > 500) {
+        counts.remove(counts.keys.first);
+      }
+      return suggestions;
     } catch (_) {
       return const [];
     }
@@ -231,7 +730,16 @@ class AppState extends ChangeNotifier {
             .map((saved) => saved.sanitized())
             .toList(growable: false),
       );
-      for (final saved in [..._favoritePosts, ..._hiddenPosts]) {
+      try {
+        _setDownloads(await _postStore.loadDownloads());
+      } catch (_) {
+        // History is optional; a damaged list starts empty.
+      }
+      for (final saved in [
+        ..._favoritePosts,
+        ..._hiddenPosts,
+        for (final record in _downloadRecords) record.saved,
+      ]) {
         if (saved.board.supportsAuth &&
             !_credentialsByBoard.containsKey(saved.board)) {
           _credentialsByBoard[saved.board] = await _store.loadCredentials(
@@ -249,7 +757,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> chooseBoard(Board value, {Credentials? credentials}) async {
+  /// Switches to [value], showing a search for [tags] when given.
+  Future<void> chooseBoard(
+    Board value, {
+    Credentials? credentials,
+    List<String> tags = const [],
+  }) async {
     _invalidate();
     final generation = _generation;
     try {
@@ -262,7 +775,7 @@ class AppState extends ChangeNotifier {
       _credentials = loadedCredentials;
       _credentialsByBoard[value] = loadedCredentials;
       _clearResults();
-      _tags = const [];
+      _tags = List.unmodifiable(tags);
       notifyListeners();
       await _load(reset: true, generation: generation);
     } catch (error) {
@@ -367,6 +880,7 @@ class AppState extends ChangeNotifier {
       });
 
   Future<void> _recordRecentSearch(List<String> value) {
+    if (_settings.incognito) return Future<void>.value();
     final query = value
         .map(_normalize)
         .where((tag) => tag.isNotEmpty)
@@ -399,6 +913,7 @@ class AppState extends ChangeNotifier {
     Iterable<String> values, {
     required bool searched,
   }) {
+    if (_settings.incognito) return Future<void>.value();
     final tags = _usageTags(values, searched: searched);
     if (tags.isEmpty) return Future<void>.value();
     return _enqueueSettingsUpdate(() async {
@@ -496,6 +1011,12 @@ class AppState extends ChangeNotifier {
       _settings = normalized;
       notifyListeners();
     });
+    // Saving the search on screen counts as visiting it.
+    if (board != null &&
+        AppSettings.savedSearchKey(board, _tags) ==
+            AppSettings.savedSearchKey(board, query)) {
+      _markSavedSearch(board, query, _posts.fold(0, (a, b) => max(a, b.id)));
+    }
   }
 
   /// [_settings] with [queries] as [board]'s bookmarks, or as the shared
@@ -551,6 +1072,7 @@ class AppState extends ChangeNotifier {
             browsedTagCounts: _settings.browsedTagCounts,
             boardOrder: _settings.boardOrder,
             hiddenBoards: _settings.hiddenBoards,
+            savedSearchMarks: _settings.savedSearchMarks,
           )
           .normalized();
       await _store.saveSettings(normalized);
@@ -711,10 +1233,14 @@ class AppState extends ChangeNotifier {
     }
     _loading = true;
     _error = null;
+    _retryAt = null;
     notifyListeners();
     final page = reset ? 0 : _page + 1;
     if (reset && _tags.isEmpty) _randomSeed = Random().nextInt(1 << 31);
     var superseded = false;
+    final board = _board!;
+    final tags = _tags;
+    var highest = 0;
     try {
       var accepted = <MediaPost>[];
       var currentPage = page;
@@ -731,7 +1257,11 @@ class AppState extends ChangeNotifier {
           _hasMore = false;
           break;
         }
-        final incoming = raw.map(MediaPost.fromMap).where(_allowed).toList();
+        final parsed = raw.map(MediaPost.fromMap).toList(growable: false);
+        for (final post in parsed) {
+          if (post.id > highest) highest = post.id;
+        }
+        final incoming = parsed.where(_allowed).toList();
         final seen = {
           ...(reset ? const <String>[] : _posts.map(_postKey)),
           ...accepted.map(_postKey),
@@ -747,13 +1277,21 @@ class AppState extends ChangeNotifier {
       _page = lastFetchedPage;
       if (accepted.length >= _settings.batchSize) _hasMore = true;
       _posts = [...(reset ? const <MediaPost>[] : _posts), ...accepted];
+      if (reset) _markSavedSearch(board, tags, highest);
     } on RequestCancelledException {
       // A newer feed request superseded this one natively. A newer
       // generation discards it anyway; within this generation the newer
       // load owns the loading state.
       superseded = true;
     } catch (error) {
-      if (generation == _generation) _error = _friendly(error);
+      if (generation == _generation) {
+        _error = _friendly(error);
+        if (error is RateLimitedException) {
+          _retryAt = DateTime.now().add(
+            error.retryAfter ?? const Duration(seconds: 15),
+          );
+        }
+      }
     } finally {
       if (generation == _generation && !superseded) {
         _loading = false;
@@ -802,24 +1340,33 @@ class AppState extends ChangeNotifier {
     }, test: (error) => error is TagLimitException);
   }
 
-  List<String> _queryTags({bool signedIn = false}) {
+  List<String> _queryTags({bool signedIn = false}) =>
+      _queryTagsFor(_board, _tags, signedIn: signedIn);
+
+  /// The provider query for [tags] on [board]: the user's tags plus rating
+  /// and blocked-tag exclusions within the website's tag budget.
+  List<String> _queryTagsFor(
+    Board? board,
+    List<String> tags, {
+    bool signedIn = false,
+  }) {
     final exclusions = [
-      ..._settings.blacklistFor(_board).map((tag) => '-$tag'),
-      if (_settings.excludeAi) '-$_aiTag',
+      ..._settings.blacklistFor(board).map((tag) => '-$tag'),
+      if (_settings.excludeAi) '-${_aiTagFor(board)}',
     ];
-    final rating = _singleProviderRating;
+    final rating = _singleProviderRatingFor(board);
     // Anonymous Sankaku searches allow four counted tags: ordinary tags,
     // negated or not, plus rating:q/rating:e (order:, rating:s and other
     // metatags are free). Exclusions are rejected unless a positive tag is
     // present, so the unfiltered feed relies on local filtering instead.
     // Signed-in searches allow more; their limit is learned on refusal.
     // Idol Complex uses the same API and is treated the same way.
-    if (_board?.isSankakuFamily == true) {
+    if (board?.isSankakuFamily == true) {
       final query = [
-        ..._tags,
+        ...tags,
         if (rating != null) 'rating:${rating.shortQueryValue}',
       ];
-      final hasPositive = _tags.any(
+      final hasPositive = tags.any(
         (tag) => _isOrdinaryTag(tag) && !tag.startsWith('-'),
       );
       final limit = signedIn ? _sankakuSignedInTagLimit : 4;
@@ -835,28 +1382,28 @@ class AppState extends ChangeNotifier {
     // user's search intact and let the local filter enforce any remaining
     // blacklist/no-AI exclusions instead of turning a valid query into a
     // provider-side "too many tags" error.
-    if (_board == Board.danbooru) {
-      final ordinary = _tags.where(_isOrdinaryTag).length;
+    if (board == Board.danbooru) {
+      final ordinary = tags.where(_isOrdinaryTag).length;
       final budget = (2 - ordinary).clamp(0, 2);
       return [
-        ..._tags,
+        ...tags,
         if (rating != null)
-          'rating:${_board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
+          'rating:${board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
         ...exclusions.take(budget),
       ];
     }
     return [
-      ..._tags,
+      ...tags,
       if (rating != null)
-        'rating:${_board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
+        'rating:${board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
       ...exclusions,
     ];
   }
 
-  Rating? get _singleProviderRating =>
+  Rating? _singleProviderRatingFor(Board? board) =>
       _settings.selectedRatings.length == 1 &&
-          _board != Board.gelbooru &&
-          _board != Board.rule34
+          board != Board.gelbooru &&
+          board != Board.rule34
       ? _settings.selectedRatings.single
       : null;
 
@@ -877,20 +1424,26 @@ class AppState extends ChangeNotifier {
   }
 
   /// The provider's tag for AI-generated media.
-  String get _aiTag =>
-      _board?.isSankakuFamily == true ? 'ai-created' : 'ai_generated';
+  String _aiTagFor(Board? board) =>
+      board?.isSankakuFamily == true ? 'ai-created' : 'ai_generated';
 
-  bool _allowed(MediaPost post) {
+  bool _allowed(MediaPost post) => _allowedOn(post, _board);
+
+  /// The local no-AI, blocked-tag, uploader, rating, and hidden-post checks
+  /// for [post] on [board].
+  bool _allowedOn(MediaPost post, Board? board) {
+    final aiTag = _aiTagFor(board);
     if (_settings.excludeAi &&
-        post.tags.any((tag) => _normalize(tag) == _aiTag)) {
+        post.tags.any((tag) => _normalize(tag) == aiTag)) {
       return false;
     }
-    final blocked = _settings.blacklistFor(_board);
+    final blocked = _settings.blacklistFor(board);
     if (blocked.isNotEmpty) {
       final tags = post.tags.map(_normalize).toSet();
       if (blocked.any((tag) => tags.contains(_normalize(tag)))) return false;
     }
-    return _ratingAllowed(post) && !_isHidden(post);
+    if (_settings.hidesUploader(board, post.uploader)) return false;
+    return _ratingAllowed(post) && !isHidden(post, board: board);
   }
 
   Rating? _postRating(MediaPost post) => RatingInfo.parse(post.rating);
@@ -899,8 +1452,6 @@ class AppState extends ChangeNotifier {
     final rating = _postRating(post);
     return rating != null && _settings.selectedRatings.contains(rating);
   }
-
-  bool _isHidden(MediaPost post) => isHidden(post, board: _board);
 
   SavedPost _saved(MediaPost post, Board? board) => SavedPost(
     board: board ?? _board ?? Board.safebooru,
@@ -918,6 +1469,11 @@ class AppState extends ChangeNotifier {
   void _setHidden(List<SavedPost> value) {
     _hiddenPosts = value;
     _hiddenIds = {for (final saved in value) saved.identity};
+  }
+
+  void _setDownloads(List<DownloadRecord> value) {
+    _downloadRecords = value;
+    _downloadedIds = {for (final record in value) record.saved.identity};
   }
 
   static bool _mediaExpired(MediaPost post) {
@@ -1009,13 +1565,14 @@ class AppState extends ChangeNotifier {
     _loading = false;
   }
 
-  String _friendly(Object error) {
-    final board = _board;
+  String _friendly(Object error) => _friendlyFor(_board, error);
+
+  String _friendlyFor(Board? board, Object error) {
     if (error is TagLimitException && board != null) {
       final limit = error.limit == null
           ? 'fewer tags'
           : 'up to ${error.limit} tags';
-      final hint = board.supportsSignIn && _credentials == null
+      final hint = board.supportsSignIn && _credentialsByBoard[board] == null
           ? ' Sign in from Settings to search with more tags.'
           : '';
       return '${board.label} allows $limit per search, including rating and excluded tags.$hint';
@@ -1027,4 +1584,166 @@ class AppState extends ChangeNotifier {
     }
     return 'Unable to load ${board?.label ?? 'the selected board'}. Check your connection and search tag limits. If this website needs an API key, reconnect in Settings.';
   }
+}
+
+/// The feed as it was before a search, from [AppState.snapshotFeed].
+class FeedSnapshot {
+  const FeedSnapshot._({
+    required this.board,
+    required this.tags,
+    required this.posts,
+    required this.page,
+    required this.hasMore,
+    required this.randomSeed,
+  });
+  final Board board;
+  final List<String> tags;
+  final List<MediaPost> posts;
+  final int page;
+  final bool hasMore;
+  final int? randomSeed;
+}
+
+/// What [AppState.downloadPosts] saved.
+class DownloadSummary {
+  const DownloadSummary({
+    required this.saved,
+    required this.failed,
+    this.folderLost = false,
+  });
+  final int saved, failed;
+
+  /// The download folder must be chosen again; the rest were not tried.
+  final bool folderLost;
+}
+
+/// One search on several websites at once, merged into a single feed.
+/// Each website keeps its own page, tag budget, and error, and a newer
+/// search discards responses from an older one. It never sends `feed`, so
+/// it does not cancel the main feed's requests.
+class MultiSiteSearch extends ChangeNotifier {
+  MultiSiteSearch._(this._app);
+  final AppState _app;
+  static const _pageSize = 40;
+
+  List<String> _tags = const [];
+  List<Board> _boards = const [];
+  List<SavedPost> _results = const [];
+  final Map<Board, int> _pages = {};
+  final Set<Board> _exhausted = {};
+  final Map<Board, String> _errors = {};
+  final Set<String> _seen = {};
+  int _generation = 0;
+  bool _loading = false;
+  bool _disposed = false;
+
+  List<String> get tags => _tags;
+  List<Board> get boards => _boards;
+  List<SavedPost> get results => _results;
+  bool get loading => _loading;
+
+  /// Why a website stopped returning results, by website.
+  Map<Board, String> get errors => Map.unmodifiable(_errors);
+  bool get hasMore => _boards.any(_active);
+  bool _active(Board board) =>
+      !_exhausted.contains(board) && !_errors.containsKey(board);
+
+  Future<void> search(List<String> tags, Iterable<Board> boards) async {
+    _generation++;
+    _tags = List.unmodifiable(
+      tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty),
+    );
+    _boards = List.unmodifiable(boards);
+    _results = const [];
+    _pages.clear();
+    _exhausted.clear();
+    _errors.clear();
+    _seen.clear();
+    _loading = false;
+    _notify();
+    await loadMore();
+  }
+
+  Future<void> loadMore() async {
+    final boards = _boards.where(_active).toList(growable: false);
+    if (_loading || boards.isEmpty) return;
+    final generation = _generation;
+    _loading = true;
+    _notify();
+    final batches = await Future.wait(
+      boards.map((board) => _fetch(board, generation)),
+    );
+    if (generation != _generation || _disposed) return;
+    // Interleave so every website's newest posts appear near the top.
+    final merged = <SavedPost>[];
+    for (var i = 0; ; i++) {
+      var added = false;
+      for (final batch in batches) {
+        if (i < batch.length) {
+          merged.add(batch[i]);
+          added = true;
+        }
+      }
+      if (!added) break;
+    }
+    _results = [..._results, ...merged];
+    _loading = false;
+    _notify();
+  }
+
+  Future<List<SavedPost>> _fetch(Board board, int generation) async {
+    final page = (_pages[board] ?? -1) + 1;
+    try {
+      final raw = await _app._withSession(
+        board,
+        (credentials) => _app._repository.fetch(
+          board: board,
+          tags: _app._queryTagsFor(board, _tags, signedIn: credentials != null),
+          limit: _pageSize,
+          page: page,
+          random: false,
+          credentials: credentials,
+        ),
+      );
+      if (generation != _generation) return const [];
+      _pages[board] = page;
+      if (raw.isEmpty) {
+        _exhausted.add(board);
+        return const [];
+      }
+      return raw
+          .map(MediaPost.fromMap)
+          .where((post) => _app._allowedOn(post, board))
+          .map((post) => SavedPost(board: board, post: post))
+          .where((saved) => _seen.add(saved.identity))
+          .toList(growable: false);
+    } catch (error) {
+      if (generation == _generation) {
+        _errors[board] = _app._friendlyFor(board, error);
+      }
+      return const [];
+    }
+  }
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _generation++;
+    super.dispose();
+  }
+}
+
+/// What [AppState.importBackup] restored.
+class BackupSummary {
+  const BackupSummary({
+    required this.settings,
+    required this.favorites,
+    required this.hidden,
+  });
+  final bool settings;
+  final int favorites, hidden;
 }

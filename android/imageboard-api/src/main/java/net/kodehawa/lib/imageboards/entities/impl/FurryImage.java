@@ -37,6 +37,11 @@ public class FurryImage implements BoardImage {
     private int uploader_id;
     private List<String> sources;
     private Preview preview;
+    // BooruPlus patch: parent/children and pools for related-post navigation.
+    @JsonProperty("relationships")
+    private Relationships relationships;
+    @JsonProperty("pools")
+    private List<Integer> pools;
     // Kept untyped: e621 has shipped more than one alternates layout.
     private Map<String, Object> sample;
     @JsonProperty("created_at")
@@ -190,6 +195,13 @@ public class FurryImage implements BoardImage {
         private int size;
         @JsonProperty("url")
         private String url;
+        // BooruPlus patch: file hash for md5 lookups.
+        @JsonProperty("md5")
+        private String md5;
+
+        public String getMd5() {
+            return md5;
+        }
 
         public int getWidth() {
             return width;
@@ -256,5 +268,25 @@ public class FurryImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return ZonedDateTime.parse(created_at).toInstant().toEpochMilli();
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() { return file == null ? null : file.getMd5(); }
+    public Integer getParent_id() { return relationships == null ? null : relationships.parent_id; }
+    public boolean getHas_active_children() { return relationships != null && relationships.has_active_children; }
+    public List<Integer> getPools() { return pools; }
+    public String getSample_url() {
+        Object url = sample == null ? null : sample.get("url");
+        return url instanceof String ? (String) url : null;
+    }
+
+    static class Relationships {
+        @JsonProperty("parent_id")
+        private Integer parent_id;
+        @JsonProperty("has_active_children")
+        private boolean has_active_children;
+
+        public Integer getParent_id() { return parent_id; }
+        public boolean isHas_active_children() { return has_active_children; }
     }
 }

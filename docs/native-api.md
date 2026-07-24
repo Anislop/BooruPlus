@@ -6,6 +6,17 @@ The bridge uses the exact Apache-2.0 licensed upstream `imageboard-api` 3.0.0 so
 
 The vendored model classes include a small project patch, documented in their source comments, to expose provider fields omitted by the upstream common interface: Rule34 id, preview URL, source, and owner; e621/e926 id, uploader id, sources, preview URL, and the raw `sample` object (for video alternates). This keeps the upstream implementation intact while making the Flutter map metadata complete.
 
+A later patch (each change commented `BooruPlus patch`) adds the fields behind parent/child links, pools, md5 lookups, and the data saver's sample images:
+
+- `DanbooruImage`: `id` (Danbooru posts previously had no ID in the map), `md5`, `parent_id`.
+- `GelbooruImage`: `md5` (falling back to `hash`), `parent_id`, `sample_url`.
+- `Rule34Image`: `hash` (as `getMd5`), `parent_id`, `sample_url`.
+- `SafebooruImage`: `hash`, `parent_id`, and `sample`; `getSample_url` builds the `samples/{dir}/sample_{name}.jpg` URL when the post has one.
+- `KonachanImage`: `md5`, `parent_id`. `YandereImage`: getters for its existing `md5` and `parent_id`.
+- `FurryImage`/`SafeFurryImage` (e621/e926): `file.md5`, `relationships.parent_id`/`has_active_children`, `pools`, and the sample URL (`SafeFurryImage` gained the `sample` map).
+
+Jackson only binds private fields that have a getter or `@JsonProperty`, and unknown properties are ignored, so posts from older responses still parse. `MainActivity.mapImage` reads the new getters reflectively and omits a sample equal to the original or the preview.
+
 ## `fetch`
 
 Arguments are `board`, `tags` (`List<String>`), `limit`, `page`, `random`, and optional `apiKey` and `userId`. `page` is zero based. Limits up to 200 are supported; the bridge fetches successive provider pages in batches of at most 100 and combines them before applying random ordering. Supported board ids are `rule34`, `e621`, `konachan`, `yandere`, `danbooru`, `safebooru`, `gelbooru`, and `e926`.

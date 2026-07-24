@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/models.dart';
+import 'theme.dart';
 
 /// Presentation settings for each supported imageboard.
 ///
@@ -147,7 +148,7 @@ class SiteLogo extends StatelessWidget {
     final fallback = Icon(
       appearance.icon,
       size: showBorder ? size * .55 : size * .75,
-      color: colored ? appearance.accent : Colors.white70,
+      color: colored ? appearance.accent : ink(.70),
     );
     final image = appearance.logoAsset?.isNotEmpty == true
         ? Image.asset(
@@ -175,14 +176,12 @@ class SiteLogo extends StatelessWidget {
         height: size,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: colored
-              ? appearance.surface
-              : Colors.white.withValues(alpha: .04),
+          color: colored ? appearance.surface : ink(.04),
           borderRadius: BorderRadius.circular(size * .24),
           border: Border.all(
             color: colored
                 ? appearance.accent.withValues(alpha: .32)
-                : Colors.white12,
+                : ink(.12),
           ),
         ),
         clipBehavior: Clip.antiAlias,
