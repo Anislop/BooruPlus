@@ -28,6 +28,14 @@ import java.util.List;
  * @author Kodehawa
  */
 public class SafebooruImage implements BoardImage {
+    // BooruPlus patch: file hash, parent, and sample flag for md5 lookups, related posts, and data saver.
+    @JsonProperty("hash")
+    private String hash;
+    @JsonProperty("parent_id")
+    private Integer parent_id;
+    // Sent as a boolean or a number depending on the API version.
+    @JsonProperty("sample")
+    private Object sample;
     private String directory;
     private String image;
     private int height;
@@ -98,5 +106,25 @@ public class SafebooruImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return change * 1000;
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() {
+        return hash;
+    }
+
+    public Integer getParent_id() {
+        return parent_id;
+    }
+
+    /** The resized sample's URL, or null when the post has no sample. */
+    public String getSample_url() {
+        boolean hasSample = Boolean.TRUE.equals(sample)
+                || (sample instanceof Number && ((Number) sample).intValue() != 0)
+                || "1".equals(String.valueOf(sample)) || "true".equals(String.valueOf(sample));
+        if (!hasSample || directory == null || image == null) return null;
+        int dot = image.lastIndexOf('.');
+        String base = dot > 0 ? image.substring(0, dot) : image;
+        return "https://safebooru.org/samples/" + directory + "/sample_" + base + ".jpg";
     }
 }

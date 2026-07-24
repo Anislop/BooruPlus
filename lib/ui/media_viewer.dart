@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:chewie/chewie.dart';
@@ -13,12 +14,29 @@ import 'media_image.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
 
-/// Returned when a tag is tapped, so the caller can search it and later
+/// How a tag chosen in the viewer changes the search.
+enum TagBrowseMode {
+  /// Search the tag on its own.
+  replace,
+
+  /// Add the tag to the current search.
+  add,
+
+  /// Exclude the tag from the current search.
+  exclude,
+}
+
+/// Returned when a tag is chosen, so the caller can search it and later
 /// reopen the viewer on the post the user left from.
 class ViewerTagBrowse {
-  const ViewerTagBrowse(this.tag, this.index);
+  const ViewerTagBrowse(
+    this.tag,
+    this.index, {
+    this.mode = TagBrowseMode.replace,
+  });
   final String tag;
   final int index;
+  final TagBrowseMode mode;
 }
 
 class MediaViewer extends StatefulWidget {
@@ -47,6 +65,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   late final PageController _pages;
   String? _videoError;
   bool _downloading = false;
+  bool _sharing = false;
   bool _details = false;
   bool _muted = false;
   late int _index;
@@ -58,8 +77,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   int _videoGeneration = 0;
   int _streamQuality = 0;
   bool _revealed = false;
-  final _downloads = DownloadService();
+  // Slideshow: advances after the interval, or when a video ends.
+  bool _slideshow = false;
+  Timer? _slideshowTimer;
+  // Data saver: whether the network is metered, and the pages whose
+  // original was asked for anyway.
+  bool _metered = false;
+  final Set<int> _originalsRequested = {};
+  bool _findingElsewhere = false;
   final _screenAwake = ScreenAwakeService();
+  final _device = DeviceService();
   AppLifecycleState _lifecycle =
       WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
 
@@ -76,7 +103,104 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       _screenAwake.setEnabled(true);
     }
     widget.state.recordBrowsedTags(_post.tags);
+    HardwareKeyboard.instance.addHandler(_handleKey);
+    if (widget.state.settings.dataSaver == DataSaverMode.mobileData) {
+      _device.isMeteredNetwork().then((metered) {
+        if (mounted && metered != _metered) setState(() => _metered = metered);
+      });
+    }
     _ensureVideo();
+  }
+
+  /// Volume keys page between posts when that setting is on. Handled keys
+  /// do not change the volume.
+  bool _handleKey(KeyEvent event) {
+    if (!widget.state.settings.volumeKeyPaging || !mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent != true) return false;
+    final key = event.logicalKey;
+    final down = key == LogicalKeyboardKey.audioVolumeDown;
+    if (!down && key != LogicalKeyboardKey.audioVolumeUp) return false;
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      _turnPage(down ? 1 : -1);
+    }
+    return true;
+  }
+
+  void _turnPage(int delta) {
+    final target = _index + delta;
+    if (_zoomed || target < 0 || target >= _pageCount) return;
+    _pages.animateToPage(
+      target,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  /// Whether the viewer shows the website's sample for [post] at [index].
+  bool _savesData(MediaPost post, int index) {
+    if (post.isVideo ||
+        post.sampleUrl.isEmpty ||
+        _originalsRequested.contains(index)) {
+      return false;
+    }
+    return switch (widget.state.settings.dataSaver) {
+      DataSaverMode.off => false,
+      DataSaverMode.mobileData => _metered,
+      DataSaverMode.always => true,
+    };
+  }
+
+  void _toggleSlideshow() {
+    setState(() => _slideshow = !_slideshow);
+    _video?.setLooping(!_slideshow);
+    _scheduleSlide();
+    _notify(_slideshow ? 'Slideshow started.' : 'Slideshow stopped.');
+  }
+
+  /// Images advance after the interval; videos when they finish (see
+  /// [_watchVideoEnd]).
+  void _scheduleSlide() {
+    _slideshowTimer?.cancel();
+    _slideshowTimer = null;
+    if (!_slideshow) return;
+    // A playable video moves on when it ends instead.
+    final post = _post;
+    if (post.isVideo &&
+        _videoError == null &&
+        !(_shouldBlur(post) && !_revealed)) {
+      return;
+    }
+    _slideshowTimer = Timer(
+      Duration(seconds: widget.state.settings.slideshowSeconds),
+      _advanceSlide,
+    );
+  }
+
+  void _advanceSlide() {
+    if (!mounted || !_slideshow) return;
+    if (_index + 1 >= _pageCount) {
+      setState(() => _slideshow = false);
+      _notify('Slideshow finished.');
+      return;
+    }
+    // Wait while a gesture holds the page; try again after the interval.
+    if (_zoomed || _pointers > 0 || _lifecycle != AppLifecycleState.resumed) {
+      _scheduleSlide();
+      return;
+    }
+    _turnPage(1);
+  }
+
+  void _watchVideoEnd() {
+    final video = _video;
+    if (!_slideshow || video == null) return;
+    final value = video.value;
+    if (value.isInitialized &&
+        !value.isPlaying &&
+        value.duration > Duration.zero &&
+        value.position >= value.duration - const Duration(milliseconds: 300)) {
+      _advanceSlide();
+    }
   }
 
   int get _itemCount => widget.savedPosts.isNotEmpty
@@ -119,8 +243,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   void _handlePointerDown(PointerDownEvent event) {
     if (_pointers == 0) _multiTouch = false;
     _updatePointers(1);
-    _pointerDown =
-        widget.state.settings.gesturesEnabled && !_multiTouch
+    _pointerDown = widget.state.settings.gesturesEnabled && !_multiTouch
         ? event.position
         : null;
   }
@@ -161,6 +284,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     player?.dispose();
     final video = _video;
     _video = null;
+    video?.removeListener(_watchVideoEnd);
     video?.dispose();
   }
 
@@ -175,6 +299,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       _zoomed = false;
     });
     widget.state.recordBrowsedTags(_post.tags);
+    _scheduleSlide();
   }
 
   // Video starts once paging settles so fast swipes past videos do not
@@ -241,7 +366,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       final player = ChewieController(
         videoPlayerController: video,
         autoPlay: false,
-        looping: true,
+        // A slideshow moves on when the video ends instead of looping.
+        looping: !_slideshow,
         allowFullScreen: true,
         allowMuting: true,
         showControls: true,
@@ -268,6 +394,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         return;
       }
       _player = player;
+      video.addListener(_watchVideoEnd);
       await video.setVolume(_muted ? 0 : 1);
       if (stale()) {
         player.dispose();
@@ -295,9 +422,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         return;
       }
       setState(
-        () => _videoError =
-            'Unable to stream this video. The server or this device may not support its format.',
+        () => _videoError = 'Unable to stream this video. The server or this device may not support its format.',
       );
+      _scheduleSlide();
     }
   }
 
@@ -310,6 +437,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKey);
+    _slideshowTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _screenAwake.setEnabled(false);
     _videoGeneration++;
@@ -323,19 +452,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     setState(() => _downloading = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final url = _mediaUrl(_post);
-      if (url.isEmpty) throw StateError('Missing media URL');
-      final path = Uri.parse(url).path;
-      final extension = path.contains('.')
-          ? path.split('.').last.replaceAll(RegExp('[^a-zA-Z0-9]'), '')
-          : 'jpg';
-      await _downloads.download(
-        url: url,
-        name: '${_currentBoard.name}_${_post.displayId}.$extension',
-        directory: widget.state.settings.downloadDirectory,
-      );
+      await widget.state.downloadPost(_post, board: _currentBoard);
       messenger.showSnackBar(
-        const SnackBar(content: Text('Media saved to your download folder.')),
+        SnackBar(
+          content: Text(
+            widget.state.settings.autoFavoriteOnDownload
+                ? 'Media saved to your download folder and favorited.'
+                : 'Media saved to your download folder.',
+          ),
+        ),
       );
     } on PlatformException catch (e) {
       messenger.showSnackBar(
@@ -390,17 +515,358 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
   }
 
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _copy(String text, String message) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    _notify(message);
+  }
+
+  Future<void> _shareMedia() async {
+    final post = _post;
+    final url = _mediaUrl(post);
+    if (url.isEmpty || _sharing) return;
+    setState(() => _sharing = true);
+    _notify('Preparing to share…');
+    try {
+      await _device.shareMedia(
+        url: url,
+        name: mediaFileName(
+          _currentBoard,
+          post,
+          url,
+          template: widget.state.settings.filenameTemplate,
+        ),
+      );
+      if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    } catch (_) {
+      _notify('Unable to share this media. Check your connection.');
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  Future<void> _postAction(String action) async {
+    final post = _post;
+    final link = _postBrowserUrl(_currentBoard, post);
+    switch (action) {
+      case 'share_link':
+        try {
+          await _device.shareText(link);
+        } catch (_) {
+          _notify('No app can share this link.');
+        }
+      case 'share_media':
+        await _shareMedia();
+      case 'copy_link':
+        await _copy(link, 'Post link copied.');
+      case 'copy_source':
+        await _copy(post.source, 'Source copied.');
+      case 'copy_tags':
+        await _copy(post.tags.join(' '), 'Tags copied.');
+    }
+  }
+
+  Widget _moreMenu(MediaPost post, String link) => PopupMenuButton<String>(
+    tooltip: 'Share or copy',
+    icon: _sharing
+        ? const SizedBox.square(
+            dimension: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : const Icon(Icons.more_vert_rounded),
+    onSelected: _postAction,
+    itemBuilder: (_) => [
+      if (link.isNotEmpty)
+        const PopupMenuItem(
+          value: 'share_link',
+          child: ListTile(
+            leading: Icon(Icons.share_outlined),
+            title: Text('Share link'),
+          ),
+        ),
+      if (_mediaUrl(post).isNotEmpty)
+        PopupMenuItem(
+          value: 'share_media',
+          enabled: !_sharing,
+          child: ListTile(
+            leading: const Icon(Icons.ios_share_rounded),
+            title: Text(post.isVideo ? 'Share video' : 'Share image'),
+          ),
+        ),
+      if (link.isNotEmpty)
+        const PopupMenuItem(
+          value: 'copy_link',
+          child: ListTile(
+            leading: Icon(Icons.link_rounded),
+            title: Text('Copy post link'),
+          ),
+        ),
+      if (post.source.trim().isNotEmpty)
+        const PopupMenuItem(
+          value: 'copy_source',
+          child: ListTile(
+            leading: Icon(Icons.content_copy_rounded),
+            title: Text('Copy source'),
+          ),
+        ),
+      if (post.tags.isNotEmpty)
+        const PopupMenuItem(
+          value: 'copy_tags',
+          child: ListTile(
+            leading: Icon(Icons.sell_outlined),
+            title: Text('Copy tags'),
+          ),
+        ),
+    ],
+  );
+
+  /// Opens the related posts search ([query] such as `parent:123`) in the
+  /// feed, or tells the user it is only available from the feed.
+  void _browseQuery(String query) {
+    if (widget.savedPosts.isNotEmpty) {
+      _copy(query, 'Search copied: $query');
+      return;
+    }
+    Navigator.pop(context, ViewerTagBrowse(query, _index));
+  }
+
+  Future<void> _showPools() async {
+    final post = _post;
+    final board = _currentBoard;
+    List<PostPool> pools;
+    try {
+      pools = await _device.pools(board: board, post: post);
+    } catch (_) {
+      _notify('Could not load pools. Check your connection.');
+      return;
+    }
+    if (!mounted) return;
+    if (pools.isEmpty) {
+      _notify('This post is not in any pool.');
+      return;
+    }
+    final pool = await showModalBottomSheet<PostPool>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              leading: Icon(Icons.collections_bookmark_outlined),
+              title: Text('Pools'),
+            ),
+            for (final pool in pools)
+              ListTile(
+                title: Text(pool.name),
+                subtitle: pool.postCount > 0
+                    ? Text('${pool.postCount} posts')
+                    : null,
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.pop(context, pool),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (pool == null || !mounted) return;
+    // Danbooru's ordpool: keeps the pool's reading order.
+    _browseQuery(
+      board == Board.danbooru ? 'ordpool:${pool.id}' : 'pool:${pool.id}',
+    );
+  }
+
+  Future<void> _findElsewhere() async {
+    final post = _post;
+    final board = _currentBoard;
+    if (_findingElsewhere) return;
+    setState(() => _findingElsewhere = true);
+    _notify('Searching other websites…');
+    List<SavedPost> found;
+    try {
+      found = await widget.state.findOnOtherSites(post, board: board);
+    } finally {
+      if (mounted) setState(() => _findingElsewhere = false);
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    if (found.isEmpty) {
+      _notify('No other website has this file.');
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.travel_explore_rounded),
+              title: const Text('Also on'),
+              subtitle: Text(
+                '${found.length} match${found.length == 1 ? '' : 'es'} by file hash',
+              ),
+            ),
+            for (final (index, saved) in found.indexed)
+              ListTile(
+                leading: SiteLogo(saved.board, size: 28, colored: true),
+                title: Text(saved.board.label),
+                subtitle: Text(
+                  '#${saved.post.displayId} · ${saved.post.width} × ${saved.post.height}',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => MediaViewer(
+                        post: saved.post,
+                        board: saved.board,
+                        state: widget.state,
+                        savedPosts: found,
+                        initialIndex: index,
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _hideUploader(String uploader) async {
+    final board = _currentBoard;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Hide posts by $uploader?'),
+        content: Text(
+          'Their posts on ${board.label} will no longer appear in feeds. Undo this in Settings › Hidden uploaders.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Hide'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.state.hideUploader(uploader, board: board);
+      _notify('Posts by $uploader are hidden on ${board.label}.');
+    } catch (_) {
+      _notify('Could not hide this uploader. Please try again.');
+    }
+  }
+
+  Future<void> _toggleFavorite(MediaPost post, Board board) async {
+    await widget.state.toggleFavorite(post, board: board);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _showTagActions(String tag) async {
+    final board = _currentBoard;
+    // Adding to or excluding from the search only applies to the feed the
+    // viewer was opened from.
+    final fromFeed = widget.savedPosts.isEmpty;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: Text(
+                  tag,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                subtitle: Text(board.label),
+              ),
+              ListTile(
+                leading: const Icon(Icons.search_rounded),
+                title: const Text('Search this tag'),
+                onTap: () => Navigator.pop(context, 'search'),
+              ),
+              if (fromFeed) ...[
+                ListTile(
+                  leading: const Icon(Icons.add_circle_outline_rounded),
+                  title: const Text('Add to current search'),
+                  onTap: () => Navigator.pop(context, 'add'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.remove_circle_outline_rounded),
+                  title: const Text('Exclude from current search'),
+                  onTap: () => Navigator.pop(context, 'exclude'),
+                ),
+              ],
+              ListTile(
+                leading: const Icon(Icons.block_rounded),
+                title: Text('Block on ${board.label}'),
+                onTap: () => Navigator.pop(context, 'block'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.public_off_rounded),
+                title: const Text('Block on all websites'),
+                onTap: () => Navigator.pop(context, 'block_all'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_copy_rounded),
+                title: const Text('Copy tag'),
+                onTap: () => Navigator.pop(context, 'copy'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'search':
+        _browseTag(tag);
+      case 'add':
+        _browseTag(tag, mode: TagBrowseMode.add);
+      case 'exclude':
+        _browseTag(tag, mode: TagBrowseMode.exclude);
+      case 'block':
+      case 'block_all':
+        final everywhere = action == 'block_all';
+        try {
+          await widget.state.blockTag(tag, board: everywhere ? null : board);
+          _notify(
+            'Blocked $tag on ${everywhere ? 'all websites' : board.label}. Manage it in Settings › Blocked tags.',
+          );
+        } catch (_) {
+          _notify('Could not block this tag. Please try again.');
+        }
+      case 'copy':
+        await _copy(tag, 'Tag copied.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final post = _post;
     final board = _currentBoard;
-    final site = appearanceFor(board);
     final browserUrl = _postBrowserUrl(board, post);
     final favorited = widget.state.isFavorite(post, board: board);
     return Scaffold(
       backgroundColor: post.isVideo ? Colors.black : canvas,
       appBar: AppBar(
-        backgroundColor: site.surface,
+        backgroundColor: appBarSurface(board),
         title: Row(
           children: [
             SiteLogo(board, size: 26, colored: true),
@@ -417,12 +883,24 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 ),
                 Text(
                   '#${post.displayId}',
-                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                  style: TextStyle(color: ink(.38), fontSize: 11),
                 ),
               ],
             ),
           ],
         ),
+        actions: [
+          if (_pageCount > 1)
+            IconButton(
+              tooltip: _slideshow ? 'Stop slideshow' : 'Start slideshow',
+              onPressed: _toggleSlideshow,
+              icon: Icon(
+                _slideshow
+                    ? Icons.stop_circle_outlined
+                    : Icons.slideshow_rounded,
+              ),
+            ),
+        ],
       ),
       body: SafeArea(
         top: false,
@@ -522,15 +1000,22 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 // chosen even when the original fails to load.
                 if (post.isVideo && post.videoVariants.isNotEmpty)
                   _qualityMenu(post),
+                _moreMenu(post, browserUrl),
                 IconButton(
-                  tooltip: 'Download original media',
+                  tooltip: widget.state.isDownloaded(post, board: board)
+                      ? 'Downloaded · download again'
+                      : 'Download original media',
                   onPressed: _downloading ? null : _download,
                   icon: _downloading
                       ? const SizedBox.square(
                           dimension: 20,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.download_outlined),
+                      : Icon(
+                          widget.state.isDownloaded(post, board: board)
+                              ? Icons.download_done_rounded
+                              : Icons.download_outlined,
+                        ),
                 ),
                 IconButton(
                   tooltip: _details ? 'Hide details' : 'Show details',
@@ -590,13 +1075,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                           tooltip: favorited
                               ? 'Remove from favorites'
                               : 'Add to favorites',
-                          onPressed: () async {
-                            await widget.state.toggleFavorite(
-                              post,
-                              board: board,
-                            );
-                            if (mounted) setState(() {});
-                          },
+                          onPressed: () => _toggleFavorite(post, board),
                           icon: Icon(
                             favorited
                                 ? Icons.favorite_rounded
@@ -604,16 +1083,13 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                             size: 19,
                             color: favorited
                                 ? const Color(0xFFFF77A8)
-                                : Colors.white38,
+                                : ink(.38),
                           ),
                         ),
                         const SizedBox(width: 5),
                         Text(
                           '${post.score}',
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
-                          ),
+                          style: TextStyle(color: ink(.54), fontSize: 12),
                         ),
                         const SizedBox(width: 12),
                       ],
@@ -654,17 +1130,89 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                           const Divider(),
                           Text(
                             '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'}',
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 12,
-                            ),
+                            style: TextStyle(color: ink(.54), fontSize: 12),
                           ),
                           const SectionLabel('Uploaded by'),
-                          SelectableText(
-                            post.uploader.isEmpty
-                                ? 'Not supplied by this website'
-                                : post.uploader,
+                          Row(
+                            children: [
+                              Expanded(
+                                child: SelectableText(
+                                  post.uploader.isEmpty
+                                      ? 'Not supplied by this website'
+                                      : post.uploader,
+                                ),
+                              ),
+                              if (post.uploader.trim().isNotEmpty)
+                                TextButton.icon(
+                                  onPressed: () => _hideUploader(post.uploader),
+                                  icon: const Icon(
+                                    Icons.person_off_outlined,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Hide uploader'),
+                                ),
+                            ],
                           ),
+                          if (post.parentId != null ||
+                              post.hasChildren ||
+                              _hasPools(board, post) ||
+                              post.md5.isNotEmpty) ...[
+                            const SectionLabel('Related'),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 4,
+                              children: [
+                                if (post.parentId != null)
+                                  ActionChip(
+                                    avatar: const Icon(
+                                      Icons.north_west_rounded,
+                                      size: 16,
+                                    ),
+                                    label: const Text('Parent post'),
+                                    onPressed: () =>
+                                        _browseQuery('id:${post.parentId}'),
+                                  ),
+                                if (post.hasChildren && post.hasId)
+                                  ActionChip(
+                                    avatar: const Icon(
+                                      Icons.account_tree_outlined,
+                                      size: 16,
+                                    ),
+                                    label: const Text('Child posts'),
+                                    onPressed: () => _browseQuery(
+                                      'parent:${post.displayId}',
+                                    ),
+                                  ),
+                                if (_hasPools(board, post))
+                                  ActionChip(
+                                    avatar: const Icon(
+                                      Icons.collections_bookmark_outlined,
+                                      size: 16,
+                                    ),
+                                    label: const Text('Pools'),
+                                    onPressed: _showPools,
+                                  ),
+                                if (post.md5.isNotEmpty)
+                                  ActionChip(
+                                    avatar: _findingElsewhere
+                                        ? const SizedBox.square(
+                                            dimension: 14,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.travel_explore_rounded,
+                                            size: 16,
+                                          ),
+                                    label: const Text('Find on other sites'),
+                                    onPressed: _findingElsewhere
+                                        ? null
+                                        : _findElsewhere,
+                                  ),
+                              ],
+                            ),
+                          ],
                           if (post.description.isNotEmpty) ...[
                             const SectionLabel('Description'),
                             SelectableText(post.description),
@@ -683,9 +1231,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                             ),
                           const SectionLabel('Original source'),
                           if (post.source.isEmpty)
-                            const Text(
+                            Text(
                               'Not supplied by this website',
-                              style: TextStyle(color: Colors.white38),
+                              style: TextStyle(color: ink(.38)),
                             )
                           else
                             Wrap(
@@ -698,14 +1246,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                 ),
                                 SelectableText(
                                   post.source,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 12,
-                                    color: Colors.white54,
+                                    color: ink(.54),
                                   ),
                                 ),
                               ],
                             ),
-                          const SectionLabel('Tags · tap to search'),
+                          const SectionLabel(
+                            'Tags · tap to search, hold for more',
+                          ),
                           for (final entry in _groupedTags(post).entries) ...[
                             Text(
                               _categoryLabel(entry.key),
@@ -721,17 +1271,20 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                               runSpacing: 4,
                               children: [
                                 for (final tag in entry.value)
-                                  ActionChip(
-                                    label: Text(
-                                      tag.name,
-                                      style: const TextStyle(fontSize: 12),
+                                  GestureDetector(
+                                    onLongPress: () =>
+                                        _showTagActions(tag.name),
+                                    child: ActionChip(
+                                      label: Text(
+                                        tag.name,
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                      side: BorderSide(
+                                        color: _tagColor(tag.category)
+                                            .withValues(alpha: .6),
+                                      ),
+                                      onPressed: () => _browseTag(tag.name),
                                     ),
-                                    side: BorderSide(
-                                      color: _tagColor(tag.category)
-                                          .withValues(alpha: .6),
-                                    ),
-                                    onPressed: () =>
-                                        _browseTag(tag.name),
                                   ),
                               ],
                             ),
@@ -749,9 +1302,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     );
   }
 
-  void _browseTag(String tag) {
-    widget.state.recordBrowsedTags([tag]);
-    Navigator.pop(context, ViewerTagBrowse(tag, _index));
+  void _browseTag(String tag, {TagBrowseMode mode = TagBrowseMode.replace}) {
+    if (mode != TagBrowseMode.exclude) widget.state.recordBrowsedTags([tag]);
+    Navigator.pop(context, ViewerTagBrowse(tag, _index, mode: mode));
   }
 
   Widget _buildPage(BuildContext context, int index) {
@@ -770,16 +1323,46 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         ),
       );
     }
-    return _ZoomableMedia(
-      active: active,
-      onZoomChanged: _setZoomed,
-      child: _viewerImage(post, board, active: active),
+    final sample = _savesData(post, index);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _ZoomableMedia(
+          active: active,
+          onZoomChanged: _setZoomed,
+          onDoubleTap: widget.state.settings.doubleTapFavorite
+              ? () => _doubleTapFavorite(post, board)
+              : null,
+          child: _viewerImage(post, board, active: active, sample: sample),
+        ),
+        if (sample && active)
+          Positioned(
+            left: 12,
+            bottom: 12,
+            child: FilledButton.tonalIcon(
+              onPressed: () => setState(() => _originalsRequested.add(index)),
+              icon: const Icon(Icons.hd_outlined, size: 18),
+              label: const Text('Load original'),
+            ),
+          ),
+      ],
     );
   }
 
-  Widget _viewerImage(MediaPost post, Board board, {required bool active}) {
+  Future<void> _doubleTapFavorite(MediaPost post, Board board) async {
+    final adding = !widget.state.isFavorite(post, board: board);
+    await _toggleFavorite(post, board);
+    _notify(adding ? 'Added to favorites.' : 'Removed from favorites.');
+  }
+
+  Widget _viewerImage(
+    MediaPost post,
+    Board board, {
+    required bool active,
+    bool sample = false,
+  }) {
     final image = MediaImage(
-      url: _mediaUrl(post),
+      url: sample ? post.sampleUrl : _mediaUrl(post),
       board: board,
       fit: BoxFit.contain,
       // Bounded decoding keeps huge originals under common GPU texture
@@ -881,6 +1464,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
             onPressed: () {
               setState(() => _revealed = true);
               _ensureVideo();
+              _scheduleSlide();
             },
             icon: const Icon(Icons.visibility),
             label: const Text('Reveal media'),
@@ -906,9 +1490,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         CheckedPopupMenuItem(
           value: 0,
           checked: _streamQuality == 0,
-          child: Text(
-            original > 0 ? 'Original · ${original}p' : 'Original',
-          ),
+          child: Text(original > 0 ? 'Original · ${original}p' : 'Original'),
         ),
         for (final variant in options)
           CheckedPopupMenuItem(
@@ -973,16 +1555,24 @@ String _postBrowserUrl(Board board, MediaPost post) {
   };
 }
 
+/// Pools are listed for Danbooru (looked up by post) and e621/e926 (when
+/// the post names any).
+bool _hasPools(Board board, MediaPost post) =>
+    post.hasId &&
+    (board == Board.danbooru ||
+        ((board == Board.e621 || board == Board.e926) &&
+            post.pools.isNotEmpty));
+
 String _categoryLabel(TagCategory category) => category.label;
 
 Color _tagColor(TagCategory category) => switch (category) {
-  TagCategory.artist => const Color(0xFFE8A0FF),
-  TagCategory.character => const Color(0xFF8BC8FF),
-  TagCategory.copyright => const Color(0xFFFFA56B),
-  TagCategory.species => const Color(0xFF91D99B),
-  TagCategory.meta => const Color(0xFFFFD166),
-  TagCategory.lore => const Color(0xFFC1A7FF),
-  _ => Colors.white70,
+  TagCategory.artist => tagTone(const Color(0xFFE8A0FF)),
+  TagCategory.character => tagTone(const Color(0xFF8BC8FF)),
+  TagCategory.copyright => tagTone(const Color(0xFFFFA56B)),
+  TagCategory.species => tagTone(const Color(0xFF91D99B)),
+  TagCategory.meta => tagTone(const Color(0xFFFFD166)),
+  TagCategory.lore => tagTone(const Color(0xFFC1A7FF)),
+  _ => ink(.70),
 };
 
 Map<TagCategory, List<TagInfo>> _groupedTags(MediaPost post) {
@@ -1005,10 +1595,14 @@ class _ZoomableMedia extends StatefulWidget {
     required this.active,
     required this.onZoomChanged,
     required this.child,
+    this.onDoubleTap,
   });
   final bool active;
   final ValueChanged<bool> onZoomChanged;
   final Widget child;
+
+  /// Replaces double-tap zoom (pinching still zooms).
+  final VoidCallback? onDoubleTap;
 
   @override
   State<_ZoomableMedia> createState() => _ZoomableMediaState();
@@ -1058,7 +1652,7 @@ class _ZoomableMediaState extends State<_ZoomableMedia> {
   @override
   Widget build(BuildContext context) => GestureDetector(
     onDoubleTapDown: (details) => _doubleTapAt = details.localPosition,
-    onDoubleTap: _toggleZoom,
+    onDoubleTap: widget.onDoubleTap ?? _toggleZoom,
     child: InteractiveViewer(
       transformationController: _transform,
       minScale: .5,

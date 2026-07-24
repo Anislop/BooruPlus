@@ -6,8 +6,11 @@ import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
 import '../core/models.dart';
+import '../core/services.dart';
+import 'downloads.dart';
 import 'media_viewer.dart';
 import 'media_image.dart';
+import 'multi_search.dart';
 import 'search_guide.dart';
 import 'settings.dart';
 import 'saved_posts.dart';
@@ -31,15 +34,28 @@ class _ViewerSnapshot {
 }
 
 class _HistoryEntry {
-  const _HistoryEntry(this.tags, this.viewer);
+  _HistoryEntry(this.tags, this.viewer, {this.feed, this.offset = 0});
   final List<String> tags;
   final _ViewerSnapshot? viewer;
+
+  /// The loaded feed and scroll position, so back restores them instead of
+  /// searching again. Only the newest entries keep one.
+  FeedSnapshot? feed;
+  final double offset;
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const _restorableEntries = 5;
   final _scroll = ScrollController();
   final _searchHistory = <_HistoryEntry>[];
+  final _device = DeviceService();
+  StreamSubscription<AppShortcut>? _shortcutSubscription;
   bool _drawerOpen = false;
+  // Feed multi-select: identities of the selected posts, with the posts.
+  bool _selecting = false;
+  final Map<String, SavedPost> _selected = {};
+  String? _batchProgress;
+
   @override
   void initState() {
     super.initState();
@@ -49,13 +65,175 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
     widget.state.addListener(_showNotice);
+    _shortcutSubscription = _device.shortcuts.listen((shortcut) {
+      // Clears the native copy kept for a cold start, so it is not reopened.
+      _device.takeShortcut();
+      _openShortcut(shortcut);
+    });
+    _device.takeShortcut().then((shortcut) {
+      if (shortcut != null) _openShortcut(shortcut);
+    });
   }
 
   @override
   void dispose() {
+    _shortcutSubscription?.cancel();
     widget.state.removeListener(_showNotice);
     _scroll.dispose();
     super.dispose();
+  }
+
+  /// Opens favorites or runs the saved search a launcher shortcut names.
+  Future<void> _openShortcut(AppShortcut shortcut) async {
+    if (!mounted) return;
+    final state = widget.state;
+    final board = shortcut.board;
+    if (board == null) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      Navigator.push(
+        context,
+        MaterialPageRoute<void>(builder: (_) => SavedPostsScreen(state: state)),
+      );
+      return;
+    }
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    _endSelection();
+    if (state.board == board) {
+      _search(shortcut.tags);
+    } else {
+      setState(_searchHistory.clear);
+      await state.chooseBoard(board, tags: shortcut.tags);
+    }
+  }
+
+  void _scrollToTop() {
+    if (!_scroll.hasClients || _scroll.offset == 0) return;
+    // Long feeds jump most of the way first so the animation stays short.
+    if (_scroll.offset > 4000) _scroll.jumpTo(2000);
+    _scroll.animateTo(
+      0,
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _endSelection() {
+    if (!_selecting && _selected.isEmpty) return;
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+    });
+  }
+
+  void _toggleSelected(MediaPost post, Board board) {
+    final saved = SavedPost(board: board, post: post);
+    setState(() {
+      if (_selected.remove(saved.identity) == null) {
+        _selected[saved.identity] = saved;
+      }
+    });
+  }
+
+  Future<void> _favoriteSelected() async {
+    final state = widget.state;
+    final posts = _selected.values.toList();
+    var added = 0;
+    for (final saved in posts) {
+      if (state.isFavorite(saved.post, board: saved.board)) continue;
+      await state.favoritePost(saved.post, board: saved.board);
+      added++;
+    }
+    if (!mounted) return;
+    _endSelection();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          added == 0
+              ? 'Those posts are already favorites.'
+              : 'Added ${_postCount(added)} to favorites.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _downloadSelected() async {
+    if (_batchProgress != null || _selected.isEmpty) return;
+    final posts = _selected.values.toList();
+    setState(() => _batchProgress = 'Downloading 1 of ${posts.length}…');
+    final result = await widget.state.downloadPosts(
+      posts,
+      onProgress: (index, total) {
+        if (mounted) {
+          setState(
+            () => _batchProgress = 'Downloading ${index + 1} of $total…',
+          );
+        }
+      },
+    );
+    if (!mounted) return;
+    setState(() => _batchProgress = null);
+    _endSelection();
+    final summary = result.failed == 0
+        ? 'Saved ${_postCount(result.saved)} to your download folder.'
+        : 'Saved ${_postCount(result.saved)}; ${_postCount(result.failed)} failed.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.folderLost
+              ? '$summary Choose your download folder again in Settings, then retry.'
+              : summary,
+        ),
+      ),
+    );
+  }
+
+  static String _postCount(int count) => '$count post${count == 1 ? '' : 's'}';
+
+  PreferredSizeWidget _selectionBar(Board board) {
+    final state = widget.state;
+    final busy = _batchProgress != null;
+    return AppBar(
+      backgroundColor: appBarSurface(board),
+      leading: IconButton(
+        tooltip: 'Cancel selection',
+        icon: const Icon(Icons.close_rounded),
+        onPressed: busy ? null : _endSelection,
+      ),
+      title: Text(_batchProgress ?? '${_selected.length} selected'),
+      actions: [
+        IconButton(
+          tooltip: 'Select all loaded posts',
+          icon: const Icon(Icons.select_all_rounded),
+          onPressed: busy
+              ? null
+              : () => setState(() {
+                  for (final post in state.posts) {
+                    final saved = SavedPost(
+                      board: board,
+                      post: state.displayPost(post, board: board),
+                    );
+                    _selected[saved.identity] = saved;
+                  }
+                }),
+        ),
+        IconButton(
+          tooltip: 'Favorite selected',
+          icon: const Icon(Icons.favorite_border_rounded),
+          onPressed: busy || _selected.isEmpty ? null : _favoriteSelected,
+        ),
+        IconButton(
+          tooltip: 'Download selected',
+          icon: busy
+              ? const SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.download_outlined),
+          onPressed: busy || _selected.isEmpty ? null : _downloadSelected,
+        ),
+        const SizedBox(width: 8),
+      ],
+    );
   }
 
   void _showNotice() {
@@ -75,11 +253,21 @@ class _HomeScreenState extends State<HomeScreen> {
         (changed &&
             (_searchHistory.isEmpty ||
                 !_sameQuery(_searchHistory.last.tags, current)))) {
-      setState(
-        () => _searchHistory.add(
-          _HistoryEntry(List<String>.unmodifiable(current), viewer),
-        ),
-      );
+      setState(() {
+        _searchHistory.add(
+          _HistoryEntry(
+            List<String>.unmodifiable(current),
+            viewer,
+            feed: changed ? widget.state.snapshotFeed() : null,
+            offset: _scroll.hasClients ? _scroll.offset : 0,
+          ),
+        );
+        // Older entries search again instead of holding their posts.
+        final stale = _searchHistory.length - _restorableEntries;
+        for (var i = 0; i < stale; i++) {
+          _searchHistory[i].feed = null;
+        }
+      });
     }
     if (!changed) return;
     if (_scroll.hasClients) _scroll.jumpTo(0);
@@ -108,7 +296,21 @@ class _HomeScreenState extends State<HomeScreen> {
     // The board may have changed while the viewer was open; its posts and
     // index then no longer belong to the feed.
     if (state.board != board) return;
-    _search([result.tag], viewer: _ViewerSnapshot(posts, board, result.index));
+    final tag = result.tag;
+    bool sameTag(String value) {
+      final bare = value.startsWith('-') ? value.substring(1) : value;
+      return bare.toLowerCase() == tag.toLowerCase();
+    }
+
+    final next = switch (result.mode) {
+      TagBrowseMode.replace => [tag],
+      TagBrowseMode.add => [...state.tags.where((t) => !sameTag(t)), tag],
+      TagBrowseMode.exclude => [
+        ...state.tags.where((t) => !sameTag(t)),
+        '-$tag',
+      ],
+    };
+    _search(next, viewer: _ViewerSnapshot(posts, board, result.index));
   }
 
   bool _sameQuery(List<String> a, List<String> b) {
@@ -124,8 +326,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final previous = _searchHistory.last;
     setState(() => _searchHistory.removeLast());
     if (!_sameQuery(widget.state.tags, previous.tags)) {
-      if (_scroll.hasClients) _scroll.jumpTo(0);
-      widget.state.search(previous.tags);
+      final feed = previous.feed;
+      if (feed != null &&
+          _sameQuery(feed.tags, previous.tags) &&
+          widget.state.restoreFeed(feed)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_scroll.hasClients) return;
+          _scroll.jumpTo(
+            previous.offset.clamp(0.0, _scroll.position.maxScrollExtent),
+          );
+        });
+      } else {
+        if (_scroll.hasClients) _scroll.jumpTo(0);
+        widget.state.search(previous.tags);
+      }
     }
     final viewer = previous.viewer;
     if (viewer != null && widget.state.board == viewer.board) {
@@ -141,10 +355,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showSavedQueries() async {
+    final queries = widget.state.savedQueries;
     await _showQueryPopup(
       title: 'Saved searches',
       headerIcon: Icons.bookmarks_outlined,
-      queries: widget.state.savedQueries,
+      queries: queries,
+      newCounts: {
+        for (final query in queries)
+          query.join(' '): widget.state.newPostCount(query),
+      },
       emptyMessage: 'No saved searches yet. Search tags, then tap the bookmark to save them.',
       deleteTooltip: 'Delete saved search',
       onDelete: widget.state.removeSavedQuery,
@@ -170,6 +389,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required String emptyMessage,
     required String deleteTooltip,
     required Future<void> Function(List<String>) onDelete,
+    Map<String, Future<int?>> newCounts = const {},
   }) async {
     await showModalBottomSheet<void>(
       context: context,
@@ -188,13 +408,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         Navigator.pop(context);
                         _search(query);
                       },
-                      trailing: IconButton(
-                        tooltip: deleteTooltip,
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () async {
-                          await onDelete(query);
-                          if (context.mounted) Navigator.pop(context);
-                        },
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (newCounts[query.join(' ')] case final count?)
+                            _NewPostsBadge(count: count),
+                          IconButton(
+                            tooltip: deleteTooltip,
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () async {
+                              await onDelete(query);
+                              if (context.mounted) Navigator.pop(context);
+                            },
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -357,19 +584,27 @@ class _HomeScreenState extends State<HomeScreen> {
       post: post,
       board: board,
       hidePostTags: hidePostTags,
-      onTap: () => _openViewer(posts, board, index),
+      onTap: _selecting
+          ? () => _toggleSelected(post, board)
+          : () => _openViewer(posts, board, index),
       isFavorite: state.isFavorite(post, board: board),
+      isDownloaded: state.isDownloaded(post, board: board),
+      selected: _selecting
+          ? _selected.containsKey(SavedPost(board: board, post: post).identity)
+          : null,
       blur: _shouldBlur(state, post),
       onLongPress: null,
-      onLongPressOrigin: (origin, controller) => showQuickPostActions(
-        context,
-        post: post,
-        board: board,
-        state: state,
-        isFavorite: state.isFavorite(post, board: board),
-        controller: controller,
-        origin: origin,
-      ),
+      onLongPressOrigin: _selecting
+          ? null
+          : (origin, controller) => showQuickPostActions(
+              context,
+              post: post,
+              board: board,
+              state: state,
+              isFavorite: state.isFavorite(post, board: board),
+              controller: controller,
+              origin: origin,
+            ),
     );
   }
 
@@ -454,9 +689,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final hidePostTags = state.settings.hidePostTags;
     final posts = state.posts;
     return PopScope<void>(
-      canPop: _searchHistory.isEmpty || _drawerOpen,
+      canPop: !_selecting && (_searchHistory.isEmpty || _drawerOpen),
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && !_drawerOpen) _handleBack();
+        if (didPop || _drawerOpen) return;
+        if (_selecting) {
+          if (_batchProgress == null) _endSelection();
+        } else {
+          _handleBack();
+        }
       },
       child: Scaffold(
         onDrawerChanged: (open) {
@@ -468,47 +708,64 @@ class _HomeScreenState extends State<HomeScreen> {
         drawerEdgeDragWidth: state.settings.gesturesEnabled
             ? MediaQuery.sizeOf(context).width
             : null,
-        appBar: AppBar(
-          backgroundColor: site.surface,
-          title: Row(
-            children: [
-              SiteLogo(board, size: 28, colored: true),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  site.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+        appBar: _selecting
+            ? _selectionBar(board)
+            : AppBar(
+                backgroundColor: appBarSurface(board),
+                // Tapping the title returns to the top of the feed.
+                title: Semantics(
+                  button: true,
+                  label: 'Scroll to top',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _scrollToTop,
+                    child: Row(
+                      children: [
+                        SiteLogo(board, size: 28, colored: true),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            site.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
+                actions: [
+                  if (posts.isNotEmpty)
+                    IconButton(
+                      tooltip: 'Select posts',
+                      onPressed: () => setState(() => _selecting = true),
+                      icon: const Icon(Icons.checklist_rounded),
+                    ),
+                  IconButton(
+                    tooltip: state.tags.isEmpty
+                        ? 'Saved searches'
+                        : 'Save and open saved searches',
+                    onPressed: _saveAndShowQueries,
+                    icon: Icon(
+                      state.tags.isEmpty
+                          ? Icons.bookmarks_outlined
+                          : Icons.bookmark_add_outlined,
+                    ),
+                  ),
+                  if (state.recentSearches.isNotEmpty)
+                    IconButton(
+                      tooltip: 'Open recent searches',
+                      onPressed: _showRecentSearches,
+                      icon: const Icon(Icons.history_rounded),
+                    ),
+                  IconButton(
+                    tooltip: 'Refresh feed',
+                    onPressed: state.refresh,
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ),
-            ],
-          ),
-          actions: [
-            IconButton(
-              tooltip: state.tags.isEmpty
-                  ? 'Saved searches'
-                  : 'Save and open saved searches',
-              onPressed: _saveAndShowQueries,
-              icon: Icon(
-                state.tags.isEmpty
-                    ? Icons.bookmarks_outlined
-                    : Icons.bookmark_add_outlined,
-              ),
-            ),
-            if (state.recentSearches.isNotEmpty)
-              IconButton(
-                tooltip: 'Open recent searches',
-                onPressed: _showRecentSearches,
-                icon: const Icon(Icons.history_rounded),
-              ),
-            IconButton(
-              tooltip: 'Refresh feed',
-              onPressed: state.refresh,
-              icon: const Icon(Icons.refresh_rounded),
-            ),
-            const SizedBox(width: 8),
-          ],
-        ),
         drawer: Drawer(
           child: SafeArea(
             child: Column(
@@ -519,7 +776,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Row(
                     children: [
                       Image(
-                        image: AssetImage('assets/LogoFullColorWhite.png'),
+                        image: AssetImage(logoAsset),
                         height: 38,
                         fit: BoxFit.contain,
                       ),
@@ -530,7 +787,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
                   child: Text(
                     'Browsing ${board.label}',
-                    style: const TextStyle(color: Colors.white54),
+                    style: TextStyle(color: ink(.54)),
                   ),
                 ),
                 ListTile(
@@ -546,6 +803,17 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   },
                 ),
+                SwitchListTile(
+                  secondary: Icon(
+                    state.settings.incognito
+                        ? Icons.visibility_off_rounded
+                        : Icons.visibility_outlined,
+                  ),
+                  title: const Text('Incognito'),
+                  subtitle: const Text("Don't record searches or tags"),
+                  value: state.settings.incognito,
+                  onChanged: state.setIncognito,
+                ),
                 ListTile(
                   leading: const Icon(Icons.favorite_rounded),
                   title: const Text('Favorites'),
@@ -559,15 +827,44 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   },
                 ),
+                ListTile(
+                  leading: const Icon(Icons.download_done_rounded),
+                  title: const Text('Downloads'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => DownloadsScreen(state: state),
+                      ),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.travel_explore_rounded),
+                  title: const Text('Search all sites'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (_) => MultiSearchScreen(
+                          state: state,
+                          initialTags: state.tags,
+                        ),
+                      ),
+                    );
+                  },
+                ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
                   child: Row(
                     children: [
-                      const Expanded(
+                      Expanded(
                         child: Text(
                           'Websites',
                           style: TextStyle(
-                            color: Colors.white54,
+                            color: ink(.54),
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -575,7 +872,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       IconButton(
                         tooltip: 'Reorder or hide websites',
                         visualDensity: VisualDensity.compact,
-                        color: Colors.white54,
+                        color: ink(.54),
                         icon: const Icon(Icons.tune_rounded, size: 20),
                         onPressed: _editBoardLayout,
                       ),
@@ -601,6 +898,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 : () async {
                                     Navigator.pop(context);
                                     _searchHistory.clear();
+                                    _endSelection();
                                     await state.chooseBoard(option);
                                   },
                           ),
@@ -624,12 +922,12 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           );
                         },
-                        child: const Padding(
+                        child: Padding(
                           padding: EdgeInsets.symmetric(vertical: 4),
                           child: Text(
                             'Learn to search',
                             style: TextStyle(
-                              color: Colors.white70,
+                              color: ink(.70),
                               decoration: TextDecoration.underline,
                               fontWeight: FontWeight.w600,
                               fontSize: 14,
@@ -638,9 +936,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(height: 2),
-                      const Text(
+                      Text(
                         'BooruPlus · Android',
-                        style: TextStyle(color: Colors.white38, fontSize: 12),
+                        style: TextStyle(color: ink(.38), fontSize: 12),
                       ),
                     ],
                   ),
@@ -662,6 +960,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       tags: state.tags,
                       onChanged: _search,
                       autocomplete: state.autocomplete,
+                      postCount: state.postCountFor,
                     ),
                   ),
                 ),
@@ -705,10 +1004,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     const Spacer(),
                     Text(
                       '${posts.length} posts',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white38,
-                      ),
+                      style: TextStyle(fontSize: 12, color: ink(.38)),
                     ),
                   ],
                 ),
@@ -764,33 +1060,37 @@ class _HomeScreenState extends State<HomeScreen> {
                                     : state.error != null
                                     ? Column(
                                         children: [
-                                          const Icon(
+                                          Icon(
                                             Icons.cloud_off_outlined,
                                             size: 32,
-                                            color: Colors.white54,
+                                            color: ink(.54),
                                           ),
                                           const SizedBox(height: 12),
                                           Text(
                                             state.error!,
                                             textAlign: TextAlign.center,
-                                            style: const TextStyle(
-                                              color: Colors.white60,
-                                            ),
+                                            style: TextStyle(color: ink(.60)),
                                           ),
                                           const SizedBox(height: 12),
-                                          OutlinedButton(
-                                            onPressed: state.loadMore,
-                                            child: const Text('Try again'),
-                                          ),
+                                          if (state.retryAt case final at?)
+                                            _RetryCountdown(
+                                              retryAt: at,
+                                              onRetry: state.loadMore,
+                                            )
+                                          else
+                                            OutlinedButton(
+                                              onPressed: state.loadMore,
+                                              child: const Text('Try again'),
+                                            ),
                                         ],
                                       )
                                     : posts.isEmpty
                                     ? Column(
                                         children: [
-                                          const Icon(
+                                          Icon(
                                             Icons.image_search_rounded,
                                             size: 42,
-                                            color: Colors.white38,
+                                            color: ink(.38),
                                           ),
                                           const SizedBox(height: 16),
                                           const Text(
@@ -801,12 +1101,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                             ),
                                           ),
                                           const SizedBox(height: 8),
-                                          const Text(
+                                          Text(
                                             'Try different tags or review your blacklist.',
                                             textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: Colors.white54,
-                                            ),
+                                            style: TextStyle(color: ink(.54)),
                                           ),
                                           TextButton(
                                             onPressed: state.refresh,
@@ -820,9 +1118,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                         icon: const Icon(Icons.expand_more),
                                         label: const Text('Load more'),
                                       )
-                                    : const Text(
+                                    : Text(
                                         'You’re all caught up',
-                                        style: TextStyle(color: Colors.white38),
+                                        style: TextStyle(color: ink(.38)),
                                       ),
                               ),
                             ),
@@ -837,6 +1135,110 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// "N new" beside a saved search once its count arrives.
+class _NewPostsBadge extends StatelessWidget {
+  const _NewPostsBadge({required this.count});
+  final Future<int?> count;
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<int?>(
+    future: count,
+    builder: (context, snapshot) {
+      final value = snapshot.data;
+      if (value == null || value == 0) return const SizedBox.shrink();
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: accent,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          value >= 100 ? '99+ new' : '$value new',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Counts down a rate limit, then retries once by itself.
+class _RetryCountdown extends StatefulWidget {
+  const _RetryCountdown({required this.retryAt, required this.onRetry});
+  final DateTime retryAt;
+  final VoidCallback onRetry;
+
+  @override
+  State<_RetryCountdown> createState() => _RetryCountdownState();
+}
+
+class _RetryCountdownState extends State<_RetryCountdown> {
+  Timer? _timer;
+  bool _retried = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  @override
+  void didUpdateWidget(_RetryCountdown old) {
+    super.didUpdateWidget(old);
+    if (old.retryAt != widget.retryAt) _start();
+  }
+
+  void _start() {
+    _retried = false;
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  void _tick() {
+    if (!mounted) return;
+    if (_remaining <= 0 && !_retried) {
+      _retried = true;
+      _timer?.cancel();
+      widget.onRetry();
+    }
+    setState(() {});
+  }
+
+  int get _remaining =>
+      (widget.retryAt.difference(DateTime.now()).inMilliseconds / 1000).ceil();
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = _remaining;
+    return Column(
+      children: [
+        Text(
+          remaining > 0 ? 'Retrying in ${remaining}s' : 'Retrying…',
+          style: TextStyle(color: ink(.54), fontSize: 13),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton(
+          onPressed: () {
+            _timer?.cancel();
+            _retried = true;
+            widget.onRetry();
+          },
+          child: const Text('Try now'),
+        ),
+      ],
     );
   }
 }
@@ -924,9 +1326,7 @@ class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
                           child: Text(
                             appearanceFor(board).name,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: visible ? null : Colors.white38,
-                            ),
+                            style: TextStyle(color: visible ? null : ink(.38)),
                           ),
                         ),
                       ],
@@ -957,6 +1357,8 @@ class MediaTile extends StatefulWidget {
     required this.onTap,
     this.hidePostTags = false,
     this.isFavorite = false,
+    this.isDownloaded = false,
+    this.selected,
     this.blur = false,
     this.onLongPress,
     this.onLongPressOrigin,
@@ -969,6 +1371,10 @@ class MediaTile extends StatefulWidget {
   final VoidCallback onTap;
   final bool hidePostTags;
   final bool isFavorite;
+  final bool isDownloaded;
+
+  /// Whether the post is selected; null outside selection mode.
+  final bool? selected;
   final bool blur;
   final VoidCallback? onLongPress;
   final void Function(Rect, QuickActionOverlayController)? onLongPressOrigin;
@@ -997,11 +1403,8 @@ class _MediaTileState extends State<MediaTile> {
         ? post.previewUrl
         : _displayUrl(post);
     final media = url.isEmpty
-        ? const Center(
-            child: Icon(
-              Icons.image_not_supported_outlined,
-              color: Colors.white24,
-            ),
+        ? Center(
+            child: Icon(Icons.image_not_supported_outlined, color: ink(.24)),
           )
         : board == Board.gelbooru || MediaImage.fetchesNatively(board, url)
         ? MediaImage(
@@ -1009,14 +1412,12 @@ class _MediaTileState extends State<MediaTile> {
             board: board,
             fit: BoxFit.cover,
             cacheWidth: 480,
-            errorWidget: const Center(
-              child: Icon(Icons.broken_image_outlined, color: Colors.white24),
+            errorWidget: Center(
+              child: Icon(Icons.broken_image_outlined, color: ink(.24)),
             ),
             loadingWidget: board == Board.gelbooru
                 ? null
-                : const Center(
-                    child: Icon(Icons.image_outlined, color: Colors.white12),
-                  ),
+                : Center(child: Icon(Icons.image_outlined, color: ink(.12))),
           )
         : Image.network(
             url,
@@ -1024,11 +1425,9 @@ class _MediaTileState extends State<MediaTile> {
             cacheWidth: 480,
             loadingBuilder: (context, child, progress) => progress == null
                 ? child
-                : const Center(
-                    child: Icon(Icons.image_outlined, color: Colors.white12),
-                  ),
-            errorBuilder: (_, _, _) => const Center(
-              child: Icon(Icons.broken_image_outlined, color: Colors.white24),
+                : Center(child: Icon(Icons.image_outlined, color: ink(.12))),
+            errorBuilder: (_, _, _) => Center(
+              child: Icon(Icons.broken_image_outlined, color: ink(.24)),
             ),
           );
     final ratingColor = _ratingColor(post.rating);
@@ -1122,12 +1521,56 @@ class _MediaTileState extends State<MediaTile> {
                         size: 20,
                       ),
                     ),
+                  if (widget.isDownloaded)
+                    Positioned(
+                      left: 7,
+                      bottom: 7,
+                      child: Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.download_done_rounded,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                      ),
+                    ),
                   if (widget.blur)
                     const Center(
                       child: Icon(
                         Icons.visibility_off_outlined,
                         color: Colors.white70,
                         size: 25,
+                      ),
+                    ),
+                  if (widget.selected case final selected?)
+                    IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? accent.withValues(alpha: .22)
+                              : Colors.transparent,
+                          border: selected
+                              ? Border.all(color: accent, width: 3)
+                              : null,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Align(
+                          alignment: Alignment.topRight,
+                          child: Padding(
+                            padding: const EdgeInsets.all(8),
+                            child: Icon(
+                              selected
+                                  ? Icons.check_circle_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              color: selected ? accent : Colors.white70,
+                              size: 24,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                 ],
@@ -1223,6 +1666,9 @@ String _peekVideoUrl(MediaPost post, int preferredHeight) {
       : 720;
   return post.videoVariantFor(limit)?.url ?? _originalUrl(post);
 }
+
+/// Whether [post] is covered by the blur settings.
+bool shouldBlurPost(AppState state, MediaPost post) => _shouldBlur(state, post);
 
 bool _shouldBlur(AppState state, MediaPost post) {
   final rating = post.rating.trim().toLowerCase();
@@ -1388,6 +1834,17 @@ Future<void> showQuickPostActions(
     await state.toggleFavorite(post, board: board);
   } else if (action == 'hide') {
     await state.hidePost(post, board: board);
+  } else if (action == 'uploader' && post.uploader.trim().isNotEmpty) {
+    await state.hideUploader(post.uploader, board: board);
+    if (context.mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Posts by ${post.uploader} are hidden on ${board.label}.',
+          ),
+        ),
+      );
+    }
   }
 }
 
@@ -1425,6 +1882,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   static const _gap = 10.0;
   final _favoriteKey = GlobalKey();
   final _hideKey = GlobalKey();
+  final _uploaderKey = GlobalKey();
   late final AnimationController _animationController;
   late final CurvedAnimation _positionAnimation;
   VideoPlayerController? _video;
@@ -1497,6 +1955,8 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
         ? 'favorite'
         : _contains(_hideKey, position)
         ? 'hide'
+        : _contains(_uploaderKey, position)
+        ? 'uploader'
         : null;
     if (next != _armed && mounted) setState(() => _armed = next);
   }
@@ -1768,6 +2228,17 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
                                     label: 'Hide',
                                   ),
                                 ),
+                                if (widget.post.uploader.trim().isNotEmpty) ...[
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: _actionButton(
+                                      key: _uploaderKey,
+                                      action: 'uploader',
+                                      icon: Icons.person_off_rounded,
+                                      label: 'Uploader',
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ],
@@ -1798,7 +2269,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       padding: const EdgeInsets.symmetric(vertical: 13),
     ),
     icon: Icon(icon),
-    label: Text(label),
+    label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
   );
 }
 

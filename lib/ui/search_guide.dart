@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../core/models.dart';
 import 'site_catalog.dart';
+import 'theme.dart';
 
 class SearchGuideScreen extends StatefulWidget {
   const SearchGuideScreen({super.key, required this.board});
@@ -66,7 +67,7 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
     final site = appearanceFor(widget.board);
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: site.surface,
+        backgroundColor: appBarSurface(widget.board),
         title: Row(
           children: [
             SiteLogo(widget.board, size: 28, colored: true),
@@ -123,11 +124,11 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
             padding: const EdgeInsets.only(top: 8, bottom: 12),
             child: Text(
               line.substring(2).trim(),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.w800,
                 letterSpacing: -0.5,
-                color: Colors.white,
+                color: ink(1),
               ),
             ),
           ),
@@ -152,10 +153,10 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
             padding: const EdgeInsets.only(top: 16, bottom: 8),
             child: Text(
               line.substring(4).trim(),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 15,
                 fontWeight: FontWeight.w700,
-                color: Colors.white,
+                color: ink(1),
               ),
             ),
           ),
@@ -184,10 +185,10 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
                     TextSpan(
                       children: _parseInlineSpans(
                         content,
-                        const TextStyle(
+                        TextStyle(
                           fontSize: 14.5,
                           height: 1.45,
-                          color: Colors.white70,
+                          color: ink(.70),
                         ),
                       ),
                     ),
@@ -205,11 +206,7 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
               TextSpan(
                 children: _parseInlineSpans(
                   line,
-                  const TextStyle(
-                    fontSize: 14.5,
-                    height: 1.5,
-                    color: Colors.white70,
-                  ),
+                  TextStyle(fontSize: 14.5, height: 1.5, color: ink(.70)),
                 ),
               ),
             ),
@@ -247,7 +244,7 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
             style: baseStyle.copyWith(
               fontWeight: FontWeight.bold,
               fontStyle: FontStyle.italic,
-              color: Colors.white,
+              color: ink(1),
             ),
           ),
         );
@@ -259,7 +256,7 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
             text: content,
             style: baseStyle.copyWith(
               fontWeight: FontWeight.bold,
-              color: Colors.white,
+              color: ink(1),
             ),
           ),
         );
@@ -282,12 +279,9 @@ class _SearchGuideScreenState extends State<SearchGuideScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               margin: const EdgeInsets.symmetric(horizontal: 2),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: .08),
+                color: ink(.08),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: .15),
-                  width: 0.8,
-                ),
+                border: Border.all(color: ink(.15), width: 0.8),
               ),
               child: Text(
                 content,

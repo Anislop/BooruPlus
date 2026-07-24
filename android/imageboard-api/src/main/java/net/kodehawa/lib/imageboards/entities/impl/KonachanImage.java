@@ -29,6 +29,11 @@ import java.util.List;
  * @author Kodehawa
  */
 public class KonachanImage implements BoardImage {
+    // BooruPlus patch: file hash and parent for md5 lookups and related posts.
+    @JsonProperty("md5")
+    private String md5;
+    @JsonProperty("parent_id")
+    private Integer parent_id;
     private String author;
     @JsonProperty("created_at")
     private long created_at;
@@ -194,5 +199,14 @@ public class KonachanImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return created_at * 1000;
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() {
+        return md5;
+    }
+
+    public Integer getParent_id() {
+        return parent_id;
     }
 }

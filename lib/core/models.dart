@@ -74,6 +74,29 @@ enum TagCategory {
 
 enum Rating { general, questionable, explicit }
 
+/// The app palette: the BooruPlus dark theme, a white theme, or pure black
+/// for OLED screens.
+enum ThemeChoice { standard, white, amoled }
+
+extension ThemeChoiceInfo on ThemeChoice {
+  String get label => switch (this) {
+    ThemeChoice.standard => 'Default',
+    ThemeChoice.white => 'White',
+    ThemeChoice.amoled => 'AMOLED',
+  };
+}
+
+/// When the viewer loads a website's smaller sample instead of the original.
+enum DataSaverMode { off, mobileData, always }
+
+extension DataSaverModeInfo on DataSaverMode {
+  String get label => switch (this) {
+    DataSaverMode.off => 'Off',
+    DataSaverMode.mobileData => 'On mobile data',
+    DataSaverMode.always => 'Always',
+  };
+}
+
 extension RatingInfo on Rating {
   String get label => switch (this) {
     Rating.general => 'General',
@@ -276,6 +299,11 @@ class MediaPost {
     this.tagDetails = const [],
     this.postUrl,
     this.videoVariants = const [],
+    this.md5 = '',
+    this.parentId,
+    this.hasChildren = false,
+    this.sampleUrl = '',
+    this.pools = const [],
   });
 
   factory MediaPost.fromMap(Map<dynamic, dynamic> map) {
@@ -320,6 +348,9 @@ class MediaPost {
               .toList(growable: false)
         : const <VideoVariant>[];
     final id = _int(map['id']);
+    final md5 = '${map['md5'] ?? ''}'.trim().toLowerCase();
+    final parent = '${map['parentId'] ?? ''}'.trim();
+    final poolsValue = map['pools'];
     return MediaPost(
       id: id,
       providerId: id > 0 ? null : _providerId(map['id']),
@@ -340,6 +371,18 @@ class MediaPost {
       tagDetails: List.unmodifiable(details),
       postUrl: _stringOrNull(map['postUrl'] ?? map['post_url']),
       videoVariants: variants,
+      md5: RegExp(r'^[0-9a-f]{32}$').hasMatch(md5) ? md5 : '',
+      parentId: RegExp(r'^[A-Za-z0-9]{1,32}$').hasMatch(parent) && parent != '0'
+          ? parent
+          : null,
+      hasChildren: _bool(map['hasChildren']),
+      sampleUrl: '${map['sampleUrl'] ?? ''}',
+      pools: poolsValue is List
+          ? poolsValue
+                .map((pool) => '$pool'.trim())
+                .where((pool) => RegExp(r'^\d{1,12}$').hasMatch(pool))
+                .toList(growable: false)
+          : const [],
     );
   }
 
@@ -362,6 +405,19 @@ class MediaPost {
   final int width, height, score;
   final bool isVideo;
   final List<VideoVariant> videoVariants;
+
+  /// The file's MD5 hash (lowercase hex), or empty when not supplied.
+  final String md5;
+
+  /// The parent post's ID, when this post has one.
+  final String? parentId;
+  final bool hasChildren;
+
+  /// A resized image for the viewer's data saver, or empty.
+  final String sampleUrl;
+
+  /// IDs of the pools this post belongs to, when the website lists them.
+  final List<String> pools;
 
   bool get hasId => id > 0 || providerId != null;
 
@@ -387,26 +443,34 @@ class MediaPost {
     return videoVariants.reduce((a, b) => a.quality <= b.quality ? a : b);
   }
 
-  MediaPost withUrls({required String url, required String previewUrl}) =>
-      MediaPost(
-        id: id,
-        providerId: providerId,
-        url: url,
-        previewUrl: previewUrl,
-        tags: tags,
-        rating: rating,
-        uploader: uploader,
-        source: source,
-        width: width,
-        height: height,
-        score: score,
-        description: description,
-        isVideo: isVideo,
-        extension: extension,
-        tagDetails: tagDetails,
-        postUrl: postUrl,
-        videoVariants: videoVariants,
-      );
+  MediaPost withUrls({
+    required String url,
+    required String previewUrl,
+    String? sampleUrl,
+  }) => MediaPost(
+    id: id,
+    providerId: providerId,
+    url: url,
+    previewUrl: previewUrl,
+    tags: tags,
+    rating: rating,
+    uploader: uploader,
+    source: source,
+    width: width,
+    height: height,
+    score: score,
+    description: description,
+    isVideo: isVideo,
+    extension: extension,
+    tagDetails: tagDetails,
+    postUrl: postUrl,
+    videoVariants: videoVariants,
+    md5: md5,
+    parentId: parentId,
+    hasChildren: hasChildren,
+    sampleUrl: sampleUrl ?? this.sampleUrl,
+    pools: pools,
+  );
 
   Map<String, dynamic> toMap() => {
     'id': providerId ?? id,
@@ -428,6 +492,11 @@ class MediaPost {
       'videoVariants': videoVariants
           .map((variant) => variant.toMap())
           .toList(growable: false),
+    if (md5.isNotEmpty) 'md5': md5,
+    if (parentId != null) 'parentId': parentId,
+    if (hasChildren) 'hasChildren': true,
+    if (sampleUrl.isNotEmpty) 'sampleUrl': sampleUrl,
+    if (pools.isNotEmpty) 'pools': pools,
   };
 
   static int _int(dynamic value) =>
@@ -460,9 +529,17 @@ class SavedPost {
   final Board board;
   final MediaPost post;
 
-  String get identity => post.hasId
-      ? '${board.name}:id:${post.displayId}'
-      : '${board.name}:url:${_withoutCredentials(post.url)}|preview:${_withoutCredentials(post.previewUrl)}|tags:${post.tags.join(' ')}|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
+  String get identity =>
+      post.hasId ? '${board.name}:id:${post.displayId}' : _urlIdentity;
+
+  /// The identity this post had before its website reported post IDs
+  /// (Danbooru before 2026-10), so earlier favorites and hidden posts still
+  /// match it. Null when there is no older form.
+  String? get legacyIdentity =>
+      board == Board.danbooru && post.hasId ? _urlIdentity : null;
+
+  String get _urlIdentity =>
+      '${board.name}:url:${_withoutCredentials(post.url)}|preview:${_withoutCredentials(post.previewUrl)}|tags:${post.tags.join(' ')}|source:${post.source}|size:${post.width}x${post.height}|description:${post.description}';
 
   SavedPost authorized(Credentials? credentials) {
     if (board != Board.gelbooru ||
@@ -472,20 +549,20 @@ class SavedPost {
     }
     return SavedPost(
       board: board,
-      post: _withUrls(
-        post,
-        _authorizeUrl(post.url, credentials),
-        _authorizeUrl(post.previewUrl, credentials),
+      post: post.withUrls(
+        url: _authorizeUrl(post.url, credentials),
+        previewUrl: _authorizeUrl(post.previewUrl, credentials),
+        sampleUrl: _authorizeUrl(post.sampleUrl, credentials),
       ),
     );
   }
 
   SavedPost sanitized() => SavedPost(
     board: board,
-    post: _withUrls(
-      post,
-      _withoutCredentials(post.url),
-      _withoutCredentials(post.previewUrl),
+    post: post.withUrls(
+      url: _withoutCredentials(post.url),
+      previewUrl: _withoutCredentials(post.previewUrl),
+      sampleUrl: _withoutCredentials(post.sampleUrl),
     ),
   );
 
@@ -527,9 +604,85 @@ class SavedPost {
       ..remove('user_id');
     return uri.replace(queryParameters: query).toString();
   }
+}
 
-  static MediaPost _withUrls(MediaPost value, String url, String previewUrl) =>
-      value.withUrls(url: url, previewUrl: previewUrl);
+/// A post saved to the device, for the downloaded marker and history.
+class DownloadRecord {
+  const DownloadRecord({
+    required this.saved,
+    required this.savedAt,
+    this.location = '',
+  });
+
+  /// The post, without credentials.
+  final SavedPost saved;
+  final DateTime savedAt;
+
+  /// The content URI the file was written to.
+  final String location;
+
+  Map<String, dynamic> toMap() => {
+    ...saved.sanitized().toMap(),
+    'savedAt': savedAt.millisecondsSinceEpoch,
+    if (location.isNotEmpty) 'location': location,
+  };
+
+  factory DownloadRecord.fromMap(Map<dynamic, dynamic> map) => DownloadRecord(
+    saved: SavedPost.fromMap(map).sanitized(),
+    savedAt: DateTime.fromMillisecondsSinceEpoch(
+      map['savedAt'] is num ? (map['savedAt'] as num).toInt() : 0,
+    ),
+    location: '${map['location'] ?? ''}',
+  );
+}
+
+/// The default [AppSettings.filenameTemplate].
+const defaultFilenameTemplate = '{site}_{id}';
+
+/// The name [post]'s media is saved or shared under: [template] with
+/// `{site}`, `{id}`, `{md5}`, `{artist}`, `{character}`, `{copyright}`,
+/// `{rating}`, `{width}`, and `{height}` filled in, made safe for a file
+/// name, plus the media's extension from [url].
+String mediaFileName(
+  Board board,
+  MediaPost post,
+  String url, {
+  String template = defaultFilenameTemplate,
+}) {
+  final path = Uri.tryParse(url)?.path ?? '';
+  final extension = path.contains('.')
+      ? path.split('.').last.replaceAll(RegExp('[^a-zA-Z0-9]'), '')
+      : '';
+  String tagOf(TagCategory category) =>
+      post.tagDetails
+          .where((tag) => tag.category == category)
+          .map((tag) => tag.name)
+          .firstOrNull ??
+      '';
+  final values = {
+    'site': board.name,
+    'id': post.hasId ? post.displayId : '',
+    'md5': post.md5,
+    'artist': tagOf(TagCategory.artist),
+    'character': tagOf(TagCategory.character),
+    'copyright': tagOf(TagCategory.copyright),
+    'rating': post.rating.toLowerCase(),
+    'width': post.width > 0 ? '${post.width}' : '',
+    'height': post.height > 0 ? '${post.height}' : '',
+  };
+  String expand(String pattern) => pattern.replaceAllMapped(
+    RegExp(r'\{(\w+)\}'),
+    (match) => values[match[1]!.toLowerCase()] ?? match[0]!,
+  );
+  String clean(String value) => value
+      .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(RegExp(r'_{2,}'), '_')
+      .replaceAll(RegExp(r'^[\s._-]+|[\s._-]+$'), '');
+  var base = clean(expand(template));
+  if (base.isEmpty) base = clean(expand(defaultFilenameTemplate));
+  if (base.length > 150) base = base.substring(0, 150);
+  return '$base.${extension.isEmpty ? 'jpg' : extension}';
 }
 
 class AppSettings {
@@ -560,6 +713,18 @@ class AppSettings {
     this.boardBlacklists = const {},
     this.boardSavedQueries = const {},
     this.globalSavedQueries = false,
+    this.theme = ThemeChoice.standard,
+    this.secureScreen = false,
+    this.appLock = false,
+    this.incognito = false,
+    this.dataSaver = DataSaverMode.off,
+    this.slideshowSeconds = 5,
+    this.doubleTapFavorite = false,
+    this.volumeKeyPaging = false,
+    this.filenameTemplate = defaultFilenameTemplate,
+    this.autoFavoriteOnDownload = false,
+    this.boardHiddenUploaders = const {},
+    this.savedSearchMarks = const {},
   });
   final int columns, rows, batchSize;
 
@@ -599,6 +764,57 @@ class AppSettings {
   final Map<Board, List<List<String>>> boardSavedQueries;
   final bool globalSavedQueries;
 
+  /// The palette: default dark, white, or pure black (AMOLED).
+  final ThemeChoice theme;
+
+  /// Hides the app's content from the recent-apps screen and screenshots.
+  final bool secureScreen;
+
+  /// Asks for the device's screen lock (or biometrics) when the app opens or
+  /// returns from the background.
+  final bool appLock;
+
+  /// Pauses recent searches and searched/browsed tag counts.
+  final bool incognito;
+
+  /// When the viewer shows the website's smaller sample image instead of
+  /// the original. Downloads always save the original.
+  final DataSaverMode dataSaver;
+
+  /// Seconds each image stays on screen during a slideshow.
+  final int slideshowSeconds;
+
+  /// Double-tapping an image in the viewer favorites it instead of zooming.
+  final bool doubleTapFavorite;
+
+  /// The volume keys move between posts in the viewer.
+  final bool volumeKeyPaging;
+
+  /// Download file name pattern; see [mediaFileName].
+  final String filenameTemplate;
+
+  /// Downloading a post also adds it to favorites.
+  final bool autoFavoriteOnDownload;
+
+  /// Uploaders whose posts are hidden, per website (lowercase names).
+  final Map<Board, List<String>> boardHiddenUploaders;
+
+  /// The highest post ID seen per saved search, keyed by
+  /// [savedSearchKey], for the new-posts count.
+  final Map<String, int> savedSearchMarks;
+
+  /// The [savedSearchMarks] key for [query] on [board].
+  static String savedSearchKey(Board board, List<String> query) =>
+      '${board.name}|${_normalizedTags(query).join(' ')}';
+
+  /// Whether [uploader] is hidden on [board].
+  bool hidesUploader(Board? board, String uploader) {
+    if (board == null) return false;
+    final name = _normalizeTag(uploader);
+    return name.isNotEmpty &&
+        (boardHiddenUploaders[board]?.contains(name) ?? false);
+  }
+
   /// Every tag blocked on [board]: the shared list, then its own.
   List<String> blacklistFor(Board? board) {
     final own = board == null ? null : boardBlacklists[board];
@@ -635,6 +851,22 @@ class AppSettings {
     boardBlacklists: _normalizedBoardTags(boardBlacklists),
     boardSavedQueries: _normalizedBoardQueries(boardSavedQueries),
     globalSavedQueries: globalSavedQueries,
+    theme: theme,
+    secureScreen: secureScreen,
+    appLock: appLock,
+    incognito: incognito,
+    dataSaver: dataSaver,
+    slideshowSeconds: slideshowSeconds.clamp(2, 60),
+    doubleTapFavorite: doubleTapFavorite,
+    volumeKeyPaging: volumeKeyPaging,
+    filenameTemplate: filenameTemplate.trim().isEmpty
+        ? defaultFilenameTemplate
+        : filenameTemplate.trim().length > 120
+        ? filenameTemplate.trim().substring(0, 120)
+        : filenameTemplate.trim(),
+    autoFavoriteOnDownload: autoFavoriteOnDownload,
+    boardHiddenUploaders: _normalizedBoardTags(boardHiddenUploaders),
+    savedSearchMarks: _normalizedMarks(savedSearchMarks),
   );
 
   AppSettings copyWith({
@@ -660,6 +892,18 @@ class AppSettings {
     Map<Board, List<String>>? boardBlacklists,
     Map<Board, List<List<String>>>? boardSavedQueries,
     bool? globalSavedQueries,
+    ThemeChoice? theme,
+    bool? secureScreen,
+    bool? appLock,
+    bool? incognito,
+    DataSaverMode? dataSaver,
+    int? slideshowSeconds,
+    bool? doubleTapFavorite,
+    bool? volumeKeyPaging,
+    String? filenameTemplate,
+    bool? autoFavoriteOnDownload,
+    Map<Board, List<String>>? boardHiddenUploaders,
+    Map<String, int>? savedSearchMarks,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -685,6 +929,19 @@ class AppSettings {
     boardBlacklists: boardBlacklists ?? this.boardBlacklists,
     boardSavedQueries: boardSavedQueries ?? this.boardSavedQueries,
     globalSavedQueries: globalSavedQueries ?? this.globalSavedQueries,
+    theme: theme ?? this.theme,
+    secureScreen: secureScreen ?? this.secureScreen,
+    appLock: appLock ?? this.appLock,
+    incognito: incognito ?? this.incognito,
+    dataSaver: dataSaver ?? this.dataSaver,
+    slideshowSeconds: slideshowSeconds ?? this.slideshowSeconds,
+    doubleTapFavorite: doubleTapFavorite ?? this.doubleTapFavorite,
+    volumeKeyPaging: volumeKeyPaging ?? this.volumeKeyPaging,
+    filenameTemplate: filenameTemplate ?? this.filenameTemplate,
+    autoFavoriteOnDownload:
+        autoFavoriteOnDownload ?? this.autoFavoriteOnDownload,
+    boardHiddenUploaders: boardHiddenUploaders ?? this.boardHiddenUploaders,
+    savedSearchMarks: savedSearchMarks ?? this.savedSearchMarks,
   ).normalized();
   static const _unset = Object();
 
@@ -716,6 +973,21 @@ class AppSettings {
         entry.key.name: entry.value,
     },
     'globalSavedQueries': globalSavedQueries,
+    'theme': theme.name,
+    'secureScreen': secureScreen,
+    'appLock': appLock,
+    'incognito': incognito,
+    'dataSaver': dataSaver.name,
+    'slideshowSeconds': slideshowSeconds,
+    'doubleTapFavorite': doubleTapFavorite,
+    'volumeKeyPaging': volumeKeyPaging,
+    'filenameTemplate': filenameTemplate,
+    'autoFavoriteOnDownload': autoFavoriteOnDownload,
+    'boardHiddenUploaders': {
+      for (final entry in boardHiddenUploaders.entries)
+        entry.key.name: entry.value,
+    },
+    'savedSearchMarks': savedSearchMarks,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -748,6 +1020,30 @@ class AppSettings {
       (value) => value is List ? _queriesFromMap(value) : null,
     ),
     globalSavedQueries: _asBool(map['globalSavedQueries'], false),
+    // Settings saved before the theme choice stored an AMOLED switch.
+    theme:
+        ThemeChoice.values.asNameMap()['${map['theme']}'] ??
+        (_asBool(map['amoledTheme'], false)
+            ? ThemeChoice.amoled
+            : ThemeChoice.standard),
+    secureScreen: _asBool(map['secureScreen'], false),
+    appLock: _asBool(map['appLock'], false),
+    incognito: _asBool(map['incognito'], false),
+    dataSaver:
+        DataSaverMode.values.asNameMap()['${map['dataSaver']}'] ??
+        DataSaverMode.off,
+    slideshowSeconds: _asInt(map['slideshowSeconds'], 5),
+    doubleTapFavorite: _asBool(map['doubleTapFavorite'], false),
+    volumeKeyPaging: _asBool(map['volumeKeyPaging'], false),
+    filenameTemplate: map['filenameTemplate'] is String
+        ? map['filenameTemplate'] as String
+        : defaultFilenameTemplate,
+    autoFavoriteOnDownload: _asBool(map['autoFavoriteOnDownload'], false),
+    boardHiddenUploaders: _boardMapFrom(
+      map['boardHiddenUploaders'],
+      (value) => value is List ? value.map((name) => '$name').toList() : null,
+    ),
+    savedSearchMarks: _countsFromMap(map['savedSearchMarks']),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -864,6 +1160,17 @@ class AppSettings {
       ? value.map((key, count) => MapEntry('$key', _asInt(count, 0)))
       : const {};
 
+  // Keys keep their case-sensitive board prefix; only the newest 200 stay.
+  static Map<String, int> _normalizedMarks(Map<String, int> values) {
+    final entries = values.entries
+        .where((entry) => entry.key.contains('|') && entry.value > 0)
+        .toList();
+    final kept = entries.length > 200
+        ? entries.sublist(entries.length - 200)
+        : entries;
+    return Map.unmodifiable(Map.fromEntries(kept));
+  }
+
   static Map<String, int> _normalizedCounts(Map<String, int> values) {
     final result = <String, int>{};
     for (final entry in values.entries) {
@@ -898,6 +1205,18 @@ class AppSettings {
         !_sameBoards(other.boardOrder, boardOrder) ||
         !_sameBoards(other.hiddenBoards, hiddenBoards) ||
         other.globalSavedQueries != globalSavedQueries ||
+        other.theme != theme ||
+        other.secureScreen != secureScreen ||
+        other.appLock != appLock ||
+        other.incognito != incognito ||
+        other.dataSaver != dataSaver ||
+        other.slideshowSeconds != slideshowSeconds ||
+        other.doubleTapFavorite != doubleTapFavorite ||
+        other.volumeKeyPaging != volumeKeyPaging ||
+        other.filenameTemplate != filenameTemplate ||
+        other.autoFavoriteOnDownload != autoFavoriteOnDownload ||
+        !_sameBoardTags(other.boardHiddenUploaders, boardHiddenUploaders) ||
+        !_sameCounts(other.savedSearchMarks, savedSearchMarks) ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -978,6 +1297,22 @@ class AppSettings {
     Object.hashAll(boardOrder),
     Object.hashAll(hiddenBoards),
     globalSavedQueries,
+    theme,
+    secureScreen,
+    appLock,
+    incognito,
+    dataSaver,
+    slideshowSeconds,
+    doubleTapFavorite,
+    volumeKeyPaging,
+    filenameTemplate,
+    autoFavoriteOnDownload,
+    _countsHash(savedSearchMarks),
+    Object.hashAll(
+      boardHiddenUploaders.entries.map(
+        (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),
+      ),
+    ),
     Object.hashAll(
       boardBlacklists.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),

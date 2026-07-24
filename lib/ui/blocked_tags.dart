@@ -77,7 +77,7 @@ class _BlockedTagsScreenState extends State<BlockedTagsScreen> {
                   ),
                   Text(
                     subtitle,
-                    style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    style: TextStyle(color: ink(.54), fontSize: 12),
                   ),
                 ],
               ),
@@ -109,10 +109,10 @@ class _BlockedTagsScreenState extends State<BlockedTagsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
+                  Text(
                     'Blocked tags are added to every query and filtered from returned posts. Enter a tag, then press space.',
                     style: TextStyle(
-                      color: Colors.white54,
+                      color: ink(.54),
                       fontSize: 13,
                       height: 1.6,
                     ),

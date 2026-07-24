@@ -9,6 +9,13 @@ import java.util.Collections;
 import java.util.List;
 
 public class GelbooruImage implements BoardImage {
+    // BooruPlus patch: file hash, parent, and sample for md5 lookups, related posts, and data saver.
+    @JsonProperty("md5")
+    private String md5;
+    @JsonProperty("parent_id")
+    private Integer parent_id;
+    @JsonProperty("sample_url")
+    private String sample_url;
     private String source;
     private String hash;
     private int height;
@@ -110,5 +117,18 @@ public class GelbooruImage implements BoardImage {
     @Override
     public long getCreationMillis() {
         return change * 1000;
+    }
+
+    // BooruPlus patch accessors.
+    public String getMd5() {
+        return md5 != null && !md5.isEmpty() ? md5 : hash;
+    }
+
+    public Integer getParent_id() {
+        return parent_id;
+    }
+
+    public String getSample_url() {
+        return sample_url;
     }
 }

@@ -16,6 +16,7 @@ class TagInput extends StatefulWidget {
     this.onSubmit,
     this.onDraftChanged,
     this.autocomplete,
+    this.postCount,
     this.searchStyle = true,
   });
   final List<String> tags;
@@ -23,6 +24,9 @@ class TagInput extends StatefulWidget {
   final VoidCallback? onSubmit;
   final ValueChanged<String>? onDraftChanged;
   final Future<List<TagSuggestion>> Function(String query)? autocomplete;
+
+  /// The post count last reported for a tag, shown on its chip.
+  final int? Function(String tag)? postCount;
   final String hint;
   final bool enabled;
 
@@ -117,6 +121,12 @@ class TagInputState extends State<TagInput> {
     super.dispose();
   }
 
+  /// Counts are shown for plain included tags only.
+  int? _chipCount(String tag) {
+    if (tag.startsWith('-') || tag.contains(':')) return null;
+    return widget.postCount?.call(tag);
+  }
+
   void _submit() {
     _commit(all: true);
     widget.onSubmit?.call();
@@ -154,7 +164,18 @@ class TagInputState extends State<TagInput> {
         children: [
           for (final tag in widget.tags)
             InputChip(
-              label: Text(tag),
+              label: Text.rich(
+                TextSpan(
+                  text: tag,
+                  children: [
+                    if (_chipCount(tag) case final count?)
+                      TextSpan(
+                        text: '  ${compactCount(count)}',
+                        style: TextStyle(color: ink(.54), fontSize: 11),
+                      ),
+                  ],
+                ),
+              ),
               deleteIcon: const Icon(Icons.close, size: 16),
               onDeleted: widget.enabled
                   ? () => widget.onChanged(
@@ -230,10 +251,7 @@ class TagInputState extends State<TagInput> {
                       ? null
                       : Text(
                           '${suggestion.postCount}',
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 11,
-                          ),
+                          style: TextStyle(color: ink(.54), fontSize: 11),
                         ),
                 ),
               );
@@ -246,12 +264,22 @@ class TagInputState extends State<TagInput> {
 
 String _categoryLabel(TagCategory category) => category.label;
 
+/// 1234 → 1.2k, 2500000 → 2.5M.
+String compactCount(int count) {
+  String scaled(double value, String unit) =>
+      '${value >= 10 ? value.round() : (value * 10).round() / 10}$unit'
+          .replaceFirst('.0$unit', unit);
+  if (count >= 1000000) return scaled(count / 1000000, 'M');
+  if (count >= 1000) return scaled(count / 1000, 'k');
+  return '$count';
+}
+
 Color _categoryColor(TagCategory category) => switch (category) {
-  TagCategory.artist => const Color(0xFFE8A0FF),
-  TagCategory.character => const Color(0xFF8BC8FF),
-  TagCategory.copyright => const Color(0xFFFFA56B),
-  TagCategory.species => const Color(0xFF91D99B),
-  TagCategory.meta => const Color(0xFFFFD166),
-  TagCategory.lore => const Color(0xFFC1A7FF),
-  _ => Colors.white70,
+  TagCategory.artist => tagTone(const Color(0xFFE8A0FF)),
+  TagCategory.character => tagTone(const Color(0xFF8BC8FF)),
+  TagCategory.copyright => tagTone(const Color(0xFFFFA56B)),
+  TagCategory.species => tagTone(const Color(0xFF91D99B)),
+  TagCategory.meta => tagTone(const Color(0xFFFFD166)),
+  TagCategory.lore => tagTone(const Color(0xFFC1A7FF)),
+  _ => ink(.70),
 };

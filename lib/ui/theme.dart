@@ -6,26 +6,86 @@ import 'site_catalog.dart';
 // Default palette sampled from the supplied BooruPlus app icon. Per-site
 // accents and dark surfaces live in site_catalog.dart.
 const accent = Color(0xFFF20B3D);
-const canvas = Color(0xFF2A2227);
-const panel = Color(0xFF352A30);
+const _darkCanvas = Color(0xFF2A2227);
+const _darkPanel = Color(0xFF352A30);
+const _amoledPanel = Color(0xFF141114);
+const _lightCanvas = Color(0xFFF6F2F4);
+
+ThemeChoice _palette = ThemeChoice.standard;
+
+/// The active palette.
+ThemeChoice get palette => _palette;
+
+/// Whether the white palette is active, so text and icons are dark.
+bool get lightPalette => _palette == ThemeChoice.white;
+
+/// Switches the palette read by [canvas], [panel], [appBarSurface], [ink],
+/// and [tagTone]. Widgets read it directly, so the caller rebuilds the whole
+/// tree.
+void setPalette(ThemeChoice choice) => _palette = choice;
+
+/// Page background: the BooruPlus dark tone, near-white, or black for AMOLED
+/// screens.
+Color get canvas => switch (_palette) {
+  ThemeChoice.standard => _darkCanvas,
+  ThemeChoice.white => _lightCanvas,
+  ThemeChoice.amoled => Colors.black,
+};
+
+/// Raised surfaces such as cards, sheets, and the viewer's details panel.
+Color get panel => switch (_palette) {
+  ThemeChoice.standard => _darkPanel,
+  ThemeChoice.white => Colors.white,
+  ThemeChoice.amoled => _amoledPanel,
+};
+
+/// The app bar color for [board]: its site tone, a pale tint of its accent
+/// in the white theme, or black for AMOLED.
+Color appBarSurface(Board board) => switch (_palette) {
+  ThemeChoice.standard => appearanceFor(board).surface,
+  ThemeChoice.white => Color.lerp(
+    appearanceFor(board).accent,
+    Colors.white,
+    .8,
+  )!,
+  ThemeChoice.amoled => Colors.black,
+};
+
+/// Secondary text and icons over [canvas] or [panel] at [opacity]: white
+/// on the dark palettes, black on the white one.
+Color ink(double opacity) =>
+    (lightPalette ? Colors.black : Colors.white).withValues(alpha: opacity);
+
+/// [color] (a pastel tag-category color) darkened enough to read on the
+/// white palette.
+Color tagTone(Color color) =>
+    lightPalette ? Color.lerp(color, Colors.black, .45)! : color;
+
+/// The full BooruPlus logo for the current palette.
+String get logoAsset =>
+    lightPalette ? 'assets/LogoFullColor.png' : 'assets/LogoFullColorWhite.png';
 
 ThemeData buildAppTheme({Board? board}) {
-  final appearance = board == null ? null : appearanceFor(board);
   // Site colors belong to the app bar. Keep the rest of the application on
   // the BooruPlus palette so switching boards does not recolor every tab.
   const primary = accent;
-  const background = canvas;
-  final appBarColor = appearance?.surface ?? canvas;
-  final surface = Color.lerp(background, Colors.white, .055)!;
+  final background = canvas;
+  final appBarColor = board == null ? canvas : appBarSurface(board);
+  final brightness = lightPalette ? Brightness.light : Brightness.dark;
+  final surface = Color.lerp(
+    background,
+    lightPalette ? Colors.black : Colors.white,
+    lightPalette ? .045 : .055,
+  )!;
   final scheme = ColorScheme.fromSeed(
     seedColor: primary,
-    brightness: Brightness.dark,
+    brightness: brightness,
     surface: background,
     primary: primary,
   );
   return ThemeData(
     useMaterial3: true,
-    brightness: Brightness.dark,
+    brightness: brightness,
     scaffoldBackgroundColor: background,
     colorScheme: scheme,
     appBarTheme: AppBarTheme(
@@ -33,7 +93,9 @@ ThemeData buildAppTheme({Board? board}) {
       surfaceTintColor: Colors.transparent,
       foregroundColor: scheme.onSurface,
     ),
-    drawerTheme: const DrawerThemeData(backgroundColor: canvas),
+    drawerTheme: DrawerThemeData(backgroundColor: canvas),
+    bottomSheetTheme: BottomSheetThemeData(backgroundColor: panel),
+    dialogTheme: DialogThemeData(backgroundColor: panel),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: surface,

@@ -339,8 +339,16 @@ internal fun parseSankakuPost(
         "score" to post.optInt("total_score"),
         "description" to "",
         "videoVariants" to emptyList<Map<String, Any?>>(),
+        "md5" to (jsonString(post, "md5")?.lowercase()?.takeIf { MD5_HASH.matches(it) } ?: ""),
+        "parentId" to jsonString(post, "parent_id")?.takeIf { SANKAKU_ID.matches(it) && it != "0" },
+        "hasChildren" to post.optBoolean("has_children"),
+        // The full sample, for the viewer's data saver; the preview may be it already.
+        "sampleUrl" to (sankakuMediaUrl(jsonString(post, "sample_url"))?.takeIf { extension(it) in IMAGE_EXTENSIONS && it != url } ?: ""),
     )
 }
+
+/** A lowercase hexadecimal MD5 file hash, used for cross-site lookups. */
+internal val MD5_HASH = Regex("^[0-9a-f]{32}$")
 
 internal fun parseSankakuSuggestions(array: JSONArray, limit: Int): List<Map<String, Any?>> {
     val result = ArrayList<Map<String, Any?>>()
