@@ -97,6 +97,17 @@ extension DataSaverModeInfo on DataSaverMode {
   };
 }
 
+/// The hand that holds the phone in one-handed mode; the floating button
+/// and the bottom action order follow it.
+enum Handedness { right, left }
+
+extension HandednessInfo on Handedness {
+  String get label => switch (this) {
+    Handedness.right => 'Right hand',
+    Handedness.left => 'Left hand',
+  };
+}
+
 extension RatingInfo on Rating {
   String get label => switch (this) {
     Rating.general => 'General',
@@ -721,6 +732,9 @@ class AppSettings {
     this.slideshowSeconds = 5,
     this.doubleTapFavorite = false,
     this.volumeKeyPaging = false,
+    this.oneHanded = false,
+    this.handedness = Handedness.right,
+    this.classicDrawer = false,
     this.filenameTemplate = defaultFilenameTemplate,
     this.autoFavoriteOnDownload = false,
     this.boardHiddenUploaders = const {},
@@ -789,6 +803,17 @@ class AppSettings {
 
   /// The volume keys move between posts in the viewer.
   final bool volumeKeyPaging;
+
+  /// Search, filters, and feed actions sit at the bottom of the screen
+  /// within thumb reach.
+  final bool oneHanded;
+
+  /// The hand used in [oneHanded] mode.
+  final Handedness handedness;
+
+  /// The navigation drawer uses its original layout: a long list of
+  /// entries above a short website list.
+  final bool classicDrawer;
 
   /// Download file name pattern; see [mediaFileName].
   final String filenameTemplate;
@@ -859,6 +884,9 @@ class AppSettings {
     slideshowSeconds: slideshowSeconds.clamp(2, 60),
     doubleTapFavorite: doubleTapFavorite,
     volumeKeyPaging: volumeKeyPaging,
+    oneHanded: oneHanded,
+    handedness: handedness,
+    classicDrawer: classicDrawer,
     filenameTemplate: filenameTemplate.trim().isEmpty
         ? defaultFilenameTemplate
         : filenameTemplate.trim().length > 120
@@ -900,6 +928,9 @@ class AppSettings {
     int? slideshowSeconds,
     bool? doubleTapFavorite,
     bool? volumeKeyPaging,
+    bool? oneHanded,
+    Handedness? handedness,
+    bool? classicDrawer,
     String? filenameTemplate,
     bool? autoFavoriteOnDownload,
     Map<Board, List<String>>? boardHiddenUploaders,
@@ -937,6 +968,9 @@ class AppSettings {
     slideshowSeconds: slideshowSeconds ?? this.slideshowSeconds,
     doubleTapFavorite: doubleTapFavorite ?? this.doubleTapFavorite,
     volumeKeyPaging: volumeKeyPaging ?? this.volumeKeyPaging,
+    oneHanded: oneHanded ?? this.oneHanded,
+    handedness: handedness ?? this.handedness,
+    classicDrawer: classicDrawer ?? this.classicDrawer,
     filenameTemplate: filenameTemplate ?? this.filenameTemplate,
     autoFavoriteOnDownload:
         autoFavoriteOnDownload ?? this.autoFavoriteOnDownload,
@@ -981,6 +1015,9 @@ class AppSettings {
     'slideshowSeconds': slideshowSeconds,
     'doubleTapFavorite': doubleTapFavorite,
     'volumeKeyPaging': volumeKeyPaging,
+    'oneHanded': oneHanded,
+    'handedness': handedness.name,
+    'classicDrawer': classicDrawer,
     'filenameTemplate': filenameTemplate,
     'autoFavoriteOnDownload': autoFavoriteOnDownload,
     'boardHiddenUploaders': {
@@ -1035,6 +1072,11 @@ class AppSettings {
     slideshowSeconds: _asInt(map['slideshowSeconds'], 5),
     doubleTapFavorite: _asBool(map['doubleTapFavorite'], false),
     volumeKeyPaging: _asBool(map['volumeKeyPaging'], false),
+    oneHanded: _asBool(map['oneHanded'], false),
+    handedness:
+        Handedness.values.asNameMap()['${map['handedness']}'] ??
+        Handedness.right,
+    classicDrawer: _asBool(map['classicDrawer'], false),
     filenameTemplate: map['filenameTemplate'] is String
         ? map['filenameTemplate'] as String
         : defaultFilenameTemplate,
@@ -1213,6 +1255,9 @@ class AppSettings {
         other.slideshowSeconds != slideshowSeconds ||
         other.doubleTapFavorite != doubleTapFavorite ||
         other.volumeKeyPaging != volumeKeyPaging ||
+        other.oneHanded != oneHanded ||
+        other.handedness != handedness ||
+        other.classicDrawer != classicDrawer ||
         other.filenameTemplate != filenameTemplate ||
         other.autoFavoriteOnDownload != autoFavoriteOnDownload ||
         !_sameBoardTags(other.boardHiddenUploaders, boardHiddenUploaders) ||
@@ -1305,6 +1350,9 @@ class AppSettings {
     slideshowSeconds,
     doubleTapFavorite,
     volumeKeyPaging,
+    oneHanded,
+    handedness,
+    classicDrawer,
     filenameTemplate,
     autoFavoriteOnDownload,
     _countsHash(savedSearchMarks),

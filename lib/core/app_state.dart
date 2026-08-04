@@ -550,6 +550,164 @@ class AppState extends ChangeNotifier {
     return [for (final posts in found) ...posts];
   }
 
+  /// Fetches one page of [tags] on [board] for a lookup outside the feed
+  /// (never sent as a feed request, so it cannot cancel the feed), keeping
+  /// only posts the local filters allow. Failures are rethrown so callers
+  /// can offer a retry rather than report no posts.
+  Future<List<MediaPost>> _lookup(
+    Board board,
+    List<String> tags, {
+    int limit = 40,
+  }) async {
+    final raw = await _withSession(
+      board,
+      (credentials) => _repository.fetch(
+        board: board,
+        tags: _queryTagsFor(board, tags, signedIn: credentials != null),
+        limit: limit,
+        page: 0,
+        random: false,
+        credentials: credentials,
+      ),
+    );
+    return raw
+        .map(MediaPost.fromMap)
+        .where((post) => _allowedOn(post, board))
+        .toList(growable: false);
+  }
+
+  /// The parent of [post] and its child posts, when the website reports
+  /// them. Either part is empty when missing; throws when a lookup fails.
+  Future<({MediaPost? parent, List<MediaPost> children})> postFamily(
+    MediaPost post, {
+    required Board board,
+  }) async {
+    final parentId = post.parentId;
+    final results = await Future.wait([
+      parentId == null
+          ? Future.value(const <MediaPost>[])
+          : _lookup(board, ['id:$parentId'], limit: 5),
+      post.hasChildren && post.hasId
+          ? _lookup(board, ['parent:${post.displayId}'])
+          : Future.value(const <MediaPost>[]),
+    ]);
+    final self = SavedPost(board: board, post: post).identity;
+    bool other(MediaPost candidate) =>
+        SavedPost(board: board, post: candidate).identity != self;
+    return (
+      parent: results[0]
+          .where(
+            (candidate) =>
+                candidate.displayId == parentId ||
+                '${candidate.id}' == parentId,
+          )
+          .firstOrNull,
+      children: results[1]
+          .where(
+            (candidate) => other(candidate) && candidate.displayId != parentId,
+          )
+          .toList(growable: false),
+    );
+  }
+
+  /// How much a shared tag of each category says two posts are related:
+  /// the same artist or character counts most.
+  static double _relatedWeight(TagCategory category) => switch (category) {
+    TagCategory.artist => 4,
+    TagCategory.character => 3,
+    TagCategory.copyright => 2,
+    TagCategory.species || TagCategory.lore => 1.5,
+    TagCategory.meta => 0,
+    _ => 1,
+  };
+
+  // Placeholder or catch-all names that do not identify a creator or work.
+  static const _vagueRelatedTags = {
+    'original',
+    'unknown_artist',
+    'anonymous_artist',
+    'artist_request',
+    'character_request',
+    'copyright_request',
+    'conditional_dnp',
+    'avoid_posting',
+    'sound_warning',
+    'third-party_edit',
+  };
+
+  /// Posts related to [post] on [board], best first: posts by its artists
+  /// and of its characters are searched, then ranked by the tags they share
+  /// with [post], where artist and character tags weigh most. Websites
+  /// without tag categories fall back to its first general tags.
+  Future<List<MediaPost>> relatedPosts(
+    MediaPost post, {
+    required Board board,
+    int limit = 24,
+  }) async {
+    final details = post.tagDetails.isEmpty
+        ? [
+            for (final name in post.tags)
+              TagInfo(name: name, category: TagCategory.general),
+          ]
+        : post.tagDetails;
+    final weights = <String, double>{
+      for (final tag in details)
+        if (tag.name.isNotEmpty) tag.name: _relatedWeight(tag.category),
+    };
+    String? strongest(TagCategory category) => details
+        .where(
+          (tag) =>
+              tag.category == category &&
+              tag.name.isNotEmpty &&
+              !_vagueRelatedTags.contains(tag.name),
+        )
+        .firstOrNull
+        ?.name;
+    final queries = <List<String>>[
+      for (final category in [TagCategory.artist, TagCategory.character])
+        if (strongest(category) case final tag?) [tag],
+    ];
+    if (queries.isEmpty) {
+      final copyright = strongest(TagCategory.copyright);
+      final general = details
+          .where(
+            (tag) =>
+                tag.category == TagCategory.general &&
+                !_vagueRelatedTags.contains(tag.name),
+          )
+          .map((tag) => tag.name)
+          .take(2)
+          .toList();
+      if (copyright != null) {
+        queries.add([copyright]);
+      } else if (general.isNotEmpty) {
+        queries.add(general);
+      }
+    }
+    if (queries.isEmpty) return const [];
+    final batches = await Future.wait(
+      queries.map((query) => _lookup(board, query)),
+    );
+    final self = SavedPost(board: board, post: post).identity;
+    final scored = <String, (MediaPost, double)>{};
+    for (final candidate in batches.expand((batch) => batch)) {
+      final identity = SavedPost(board: board, post: candidate).identity;
+      if (identity == self || scored.containsKey(identity)) continue;
+      if (post.md5.isNotEmpty && candidate.md5 == post.md5) continue;
+      final score = candidate.tags.fold<double>(
+        0,
+        (total, tag) => total + (weights[tag] ?? 0),
+      );
+      scored[identity] = (candidate, score);
+    }
+    final ranked = scored.values.toList()
+      ..sort((a, b) {
+        final byScore = b.$2.compareTo(a.$2);
+        return byScore != 0 ? byScore : b.$1.id.compareTo(a.$1.id);
+      });
+    return [for (final (candidate, _) in ranked.take(limit)) candidate];
+  }
+
   /// A search across several websites at once; see [MultiSiteSearch].
   MultiSiteSearch multiSiteSearch() => MultiSiteSearch._(this);
 
@@ -1628,7 +1786,10 @@ class MultiSiteSearch extends ChangeNotifier {
 
   List<String> _tags = const [];
   List<Board> _boards = const [];
+  // Websites switched on; results from the others stay fetched but hidden.
+  Set<Board> _enabled = const {};
   List<SavedPost> _results = const [];
+  List<SavedPost>? _visible;
   final Map<Board, int> _pages = {};
   final Set<Board> _exhausted = {};
   final Map<Board, String> _errors = {};
@@ -1639,14 +1800,23 @@ class MultiSiteSearch extends ChangeNotifier {
 
   List<String> get tags => _tags;
   List<Board> get boards => _boards;
-  List<SavedPost> get results => _results;
+
+  /// Fetched results from the websites currently switched on.
+  List<SavedPost> get results => _visible ??= List.unmodifiable(
+    _results.where((saved) => _enabled.contains(saved.board)),
+  );
   bool get loading => _loading;
 
-  /// Why a website stopped returning results, by website.
-  Map<Board, String> get errors => Map.unmodifiable(_errors);
+  /// Why a switched-on website stopped returning results, by website.
+  Map<Board, String> get errors => Map.unmodifiable({
+    for (final entry in _errors.entries)
+      if (_enabled.contains(entry.key)) entry.key: entry.value,
+  });
   bool get hasMore => _boards.any(_active);
   bool _active(Board board) =>
-      !_exhausted.contains(board) && !_errors.containsKey(board);
+      _enabled.contains(board) &&
+      !_exhausted.contains(board) &&
+      !_errors.containsKey(board);
 
   Future<void> search(List<String> tags, Iterable<Board> boards) async {
     _generation++;
@@ -1654,7 +1824,9 @@ class MultiSiteSearch extends ChangeNotifier {
       tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty),
     );
     _boards = List.unmodifiable(boards);
+    _enabled = _boards.toSet();
     _results = const [];
+    _visible = null;
     _pages.clear();
     _exhausted.clear();
     _errors.clear();
@@ -1687,8 +1859,34 @@ class MultiSiteSearch extends ChangeNotifier {
       if (!added) break;
     }
     _results = [..._results, ...merged];
+    _visible = null;
     _loading = false;
     _notify();
+    // A website switched on while this page loaded has not been asked yet.
+    if (_boards.any((board) => _active(board) && !_pages.containsKey(board))) {
+      await loadMore();
+    }
+  }
+
+  /// Switches websites on or off for the current search without starting
+  /// over. Results already fetched from a website switched off are hidden
+  /// (and come back if it is switched on again); loading more asks only the
+  /// websites switched on. A website not yet in the search joins it from
+  /// its first page.
+  Future<void> setEnabled(Iterable<Board> boards) async {
+    final enabled = boards.toSet();
+    _enabled = enabled;
+    final added = enabled.where((board) => !_boards.contains(board));
+    if (added.isNotEmpty) _boards = List.unmodifiable([..._boards, ...added]);
+    _visible = null;
+    _notify();
+    if (_tags.isEmpty) return;
+    // Fetch when a website has not been asked yet, or when hiding left
+    // nothing to show.
+    final unasked = _boards.any(
+      (board) => _active(board) && !_pages.containsKey(board),
+    );
+    if (unasked || results.isEmpty) await loadMore();
   }
 
   Future<List<SavedPost>> _fetch(Board board, int generation) async {

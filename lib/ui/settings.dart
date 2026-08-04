@@ -228,7 +228,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     try {
       await widget.state.updateSettings(_settings);
-      if (mounted) Navigator.pop(context);
+      // Stay on this screen: popping here raced a back gesture made while
+      // saving, which popped twice and left a black screen.
+      if (!mounted) return;
+      setState(() => _settings = widget.state.settings);
+      if (_filenameTemplate.text != _settings.filenameTemplate) {
+        _filenameTemplate.text = _settings.filenameTemplate;
+      }
+      _notify('Settings saved.');
     } catch (_) {
       if (mounted) {
         setState(() => _error = 'Could not save settings. Please try again.');
@@ -476,7 +483,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final hasUnsaved = _hasUnsavedChanges;
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        // A thin progress bar while settings are being saved.
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: _busy
+              ? const LinearProgressIndicator(
+                  key: ValueKey('settings_saving_bar'),
+                  minHeight: 2,
+                )
+              : const SizedBox(height: 2),
+        ),
+      ),
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
@@ -858,6 +877,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      _switchCard(
+                        value: _settings.classicDrawer,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            classicDrawer: value,
+                          ),
+                        ),
+                        icon: Icons.view_sidebar_outlined,
+                        title: 'Classic side menu',
+                        subtitle: 'Use the original side menu layout with every entry listed above the websites.',
+                      ),
+                      _switchCard(
+                        value: _settings.oneHanded,
+                        onChanged: (value) => setState(
+                          () =>
+                              _settings = _settings.copyWith(oneHanded: value),
+                        ),
+                        icon: Icons.back_hand_outlined,
+                        title: 'One-handed mode',
+                        subtitle: 'Move search, filters, and feed actions to the bottom of the screen, with a button to jump back to the top.',
+                      ),
+                      if (_settings.oneHanded)
+                        _choiceCard<Handedness>(
+                          icon: Icons.pan_tool_alt_outlined,
+                          title: 'Preferred hand',
+                          subtitle: 'The jump-to-top button and the most-used actions sit on this side.',
+                          // Left first, matching the sides they stand for.
+                          values: const [Handedness.left, Handedness.right],
+                          label: (hand) => hand.label,
+                          selected: _settings.handedness,
+                          onChanged: (hand) => setState(
+                            () => _settings = _settings.copyWith(
+                              handedness: hand,
+                            ),
+                          ),
+                        ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
                         child: Material(
