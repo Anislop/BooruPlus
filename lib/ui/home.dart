@@ -47,6 +47,7 @@ class _HistoryEntry {
 class _HomeScreenState extends State<HomeScreen> {
   static const _restorableEntries = 5;
   final _scroll = ScrollController();
+  final _showScrollTop = ValueNotifier(false);
   final _searchHistory = <_HistoryEntry>[];
   final _device = DeviceService();
   StreamSubscription<AppShortcut>? _shortcutSubscription;
@@ -60,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _scroll.addListener(() {
+      _showScrollTop.value = _scroll.offset > 600;
       if (_scroll.position.extentAfter < 700 && widget.state.error == null) {
         widget.state.loadMore();
       }
@@ -80,6 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _shortcutSubscription?.cancel();
     widget.state.removeListener(_showNotice);
     _scroll.dispose();
+    _showScrollTop.dispose();
     super.dispose();
   }
 
@@ -189,52 +192,201 @@ class _HomeScreenState extends State<HomeScreen> {
 
   static String _postCount(int count) => '$count post${count == 1 ? '' : 's'}';
 
-  PreferredSizeWidget _selectionBar(Board board) {
+  PreferredSizeWidget _selectionBar(Board board) => AppBar(
+    backgroundColor: appBarSurface(board),
+    leading: _cancelSelectionButton(),
+    title: Text(_selectionTitle),
+    actions: [..._selectionActions(board), const SizedBox(width: 8)],
+  );
+
+  String get _selectionTitle =>
+      _batchProgress ?? '${_selected.length} selected';
+
+  Widget _cancelSelectionButton() => IconButton(
+    tooltip: 'Cancel selection',
+    icon: const Icon(Icons.close_rounded),
+    onPressed: _batchProgress != null ? null : _endSelection,
+  );
+
+  List<Widget> _selectionActions(Board board) {
     final state = widget.state;
     final busy = _batchProgress != null;
-    return AppBar(
-      backgroundColor: appBarSurface(board),
-      leading: IconButton(
-        tooltip: 'Cancel selection',
-        icon: const Icon(Icons.close_rounded),
-        onPressed: busy ? null : _endSelection,
+    return [
+      IconButton(
+        tooltip: 'Select all loaded posts',
+        icon: const Icon(Icons.select_all_rounded),
+        onPressed: busy
+            ? null
+            : () => setState(() {
+                for (final post in state.posts) {
+                  final saved = SavedPost(
+                    board: board,
+                    post: state.displayPost(post, board: board),
+                  );
+                  _selected[saved.identity] = saved;
+                }
+              }),
       ),
-      title: Text(_batchProgress ?? '${_selected.length} selected'),
-      actions: [
+      IconButton(
+        tooltip: 'Favorite selected',
+        icon: const Icon(Icons.favorite_border_rounded),
+        onPressed: busy || _selected.isEmpty ? null : _favoriteSelected,
+      ),
+      IconButton(
+        tooltip: 'Download selected',
+        icon: busy
+            ? const SizedBox.square(
+                dimension: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.download_outlined),
+        onPressed: busy || _selected.isEmpty ? null : _downloadSelected,
+      ),
+    ];
+  }
+
+  List<Widget> _feedActions() {
+    final state = widget.state;
+    return [
+      if (state.posts.isNotEmpty)
         IconButton(
-          tooltip: 'Select all loaded posts',
-          icon: const Icon(Icons.select_all_rounded),
-          onPressed: busy
-              ? null
-              : () => setState(() {
-                  for (final post in state.posts) {
-                    final saved = SavedPost(
-                      board: board,
-                      post: state.displayPost(post, board: board),
-                    );
-                    _selected[saved.identity] = saved;
-                  }
-                }),
+          tooltip: 'Select posts',
+          onPressed: () => setState(() => _selecting = true),
+          icon: const Icon(Icons.checklist_rounded),
         ),
+      IconButton(
+        tooltip: state.tags.isEmpty
+            ? 'Saved searches'
+            : 'Save and open saved searches',
+        onPressed: _saveAndShowQueries,
+        icon: Icon(
+          state.tags.isEmpty
+              ? Icons.bookmarks_outlined
+              : Icons.bookmark_add_outlined,
+        ),
+      ),
+      if (state.recentSearches.isNotEmpty)
         IconButton(
-          tooltip: 'Favorite selected',
-          icon: const Icon(Icons.favorite_border_rounded),
-          onPressed: busy || _selected.isEmpty ? null : _favoriteSelected,
+          tooltip: 'Open recent searches',
+          onPressed: _showRecentSearches,
+          icon: const Icon(Icons.history_rounded),
         ),
-        IconButton(
-          tooltip: 'Download selected',
-          icon: busy
-              ? const SizedBox.square(
-                  dimension: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.download_outlined),
-          onPressed: busy || _selected.isEmpty ? null : _downloadSelected,
+      IconButton(
+        tooltip: 'Refresh feed',
+        onPressed: state.refresh,
+        icon: const Icon(Icons.refresh_rounded),
+      ),
+    ];
+  }
+
+  /// One-handed mode's bottom panel: filters, the search field, and the
+  /// feed or selection actions, nearest the thumb.
+  Widget _bottomPanel(Board board, Widget search, Widget filters) {
+    final left = widget.state.settings.handedness == Handedness.left;
+    // The hand's side gets the actions; for the left hand they also run
+    // in reverse so the most-used one stays at the edge.
+    List<Widget> sided(List<Widget> actions) =>
+        left ? actions.reversed.toList() : actions;
+    final Widget actions;
+    if (_selecting) {
+      final title = Expanded(
+        child: Text(
+          _selectionTitle,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: left ? TextAlign.end : TextAlign.start,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
         ),
-        const SizedBox(width: 8),
-      ],
+      );
+      actions = Row(
+        key: const ValueKey('one_handed_selection_bar'),
+        children: sided([
+          _cancelSelectionButton(),
+          const SizedBox(width: 4),
+          title,
+          ..._selectionActions(board),
+        ]),
+      );
+    } else {
+      actions = Row(
+        key: const ValueKey('one_handed_feed_actions'),
+        mainAxisAlignment: left
+            ? MainAxisAlignment.start
+            : MainAxisAlignment.end,
+        children: sided(_feedActions()),
+      );
+    }
+    return Material(
+      key: const ValueKey('one_handed_panel'),
+      color: appBarSurface(board),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Hidden rather than removed while selecting, so unfinished
+            // search text survives.
+            Visibility(
+              visible: !_selecting,
+              maintainState: true,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Sort, date, and ratings sit on the holding hand's side.
+                  Align(
+                    alignment: left
+                        ? Alignment.centerLeft
+                        : Alignment.centerRight,
+                    child: filters,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                    // Reversed so a long tag list or the suggestions scroll
+                    // while the text being typed stays in view.
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 260),
+                      child: SingleChildScrollView(
+                        reverse: true,
+                        child: search,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: actions,
+            ),
+          ],
+        ),
+      ),
     );
   }
+
+  /// One-handed mode's jump-to-top button on the preferred hand's side,
+  /// shown once the feed is scrolled.
+  Widget _scrollTopButton() => Positioned(
+    bottom: 16,
+    left: widget.state.settings.handedness == Handedness.left ? 16 : null,
+    right: widget.state.settings.handedness == Handedness.left ? null : 16,
+    child: ValueListenableBuilder<bool>(
+      valueListenable: _showScrollTop,
+      builder: (context, visible, _) => AnimatedScale(
+        scale: visible ? 1 : 0,
+        duration: const Duration(milliseconds: 160),
+        child: FloatingActionButton.small(
+          key: const ValueKey('scroll_to_top'),
+          heroTag: null,
+          tooltip: 'Scroll to top',
+          onPressed: visible ? _scrollToTop : null,
+          child: const Icon(Icons.vertical_align_top_rounded),
+        ),
+      ),
+    ),
+  );
 
   void _showNotice() {
     if (!mounted) return;
@@ -680,6 +832,344 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _openFromDrawer(WidgetBuilder builder) {
+    Navigator.pop(context);
+    Navigator.push(context, MaterialPageRoute<void>(builder: builder));
+  }
+
+  Future<void> _chooseBoardFromDrawer(Board option) async {
+    Navigator.pop(context);
+    _searchHistory.clear();
+    _endSelection();
+    await widget.state.chooseBoard(option);
+  }
+
+  /// The navigation drawer: a compact header and a row of shortcuts, so
+  /// the website list gets most of the height. Settings can switch back to
+  /// [_classicDrawer].
+  Widget _drawer(Board board) {
+    final state = widget.state;
+    final incognito = state.settings.incognito;
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
+              child: Row(
+                children: [
+                  Image(
+                    image: AssetImage(logoAsset),
+                    height: 30,
+                    fit: BoxFit.contain,
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: 'Learn to search',
+                    color: ink(.70),
+                    icon: const Icon(Icons.help_outline_rounded),
+                    onPressed: () =>
+                        _openFromDrawer((_) => SearchGuideScreen(board: board)),
+                  ),
+                  IconButton(
+                    key: const ValueKey('drawer_settings'),
+                    tooltip: 'Settings',
+                    color: ink(.70),
+                    icon: const Icon(Icons.tune_rounded),
+                    onPressed: () =>
+                        _openFromDrawer((_) => SettingsScreen(state: state)),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
+              child: Text(
+                'Browsing ${board.label}',
+                style: TextStyle(color: ink(.54), fontSize: 13),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  _DrawerShortcut(
+                    icon: Icons.favorite_rounded,
+                    label: 'Favorites',
+                    onTap: () =>
+                        _openFromDrawer((_) => SavedPostsScreen(state: state)),
+                  ),
+                  _DrawerShortcut(
+                    icon: Icons.download_done_rounded,
+                    label: 'Downloads',
+                    onTap: () =>
+                        _openFromDrawer((_) => DownloadsScreen(state: state)),
+                  ),
+                  _DrawerShortcut(
+                    icon: Icons.travel_explore_rounded,
+                    label: 'All sites',
+                    onTap: () => _openFromDrawer(
+                      (_) => MultiSearchScreen(
+                        state: state,
+                        initialTags: state.tags,
+                      ),
+                    ),
+                  ),
+                  _DrawerShortcut(
+                    key: const ValueKey('drawer_incognito'),
+                    icon: incognito
+                        ? Icons.visibility_off_rounded
+                        : Icons.visibility_outlined,
+                    label: 'Incognito',
+                    active: incognito,
+                    onTap: () => state.setIncognito(!incognito),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Websites',
+                      style: TextStyle(
+                        color: ink(.54),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Reorder or hide websites',
+                    visualDensity: VisualDensity.compact,
+                    color: ink(.54),
+                    icon: const Icon(Icons.tune_rounded, size: 20),
+                    onPressed: _editBoardLayout,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                children: [
+                  // The current website stays listed even when hidden
+                  // so the drawer always shows where you are.
+                  for (final option in state.settings.boardOrder)
+                    if (option == board ||
+                        !state.settings.hiddenBoards.contains(option))
+                      ListTile(
+                        selected: option == board,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        leading: SiteLogo(option, size: 36),
+                        title: Text(appearanceFor(option).name),
+                        trailing: option == board
+                            ? const Icon(Icons.check_rounded, size: 20)
+                            : null,
+                        onTap: option == board
+                            ? null
+                            : () => _chooseBoardFromDrawer(option),
+                      ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _classicDrawer(Board board) {
+    final state = widget.state;
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: EdgeInsets.all(24),
+              child: Row(
+                children: [
+                  Image(
+                    image: AssetImage(logoAsset),
+                    height: 38,
+                    fit: BoxFit.contain,
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+              child: Text(
+                'Browsing ${board.label}',
+                style: TextStyle(color: ink(.54)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.tune_rounded),
+              title: const Text('Settings'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => SettingsScreen(state: state),
+                  ),
+                );
+              },
+            ),
+            SwitchListTile(
+              secondary: Icon(
+                state.settings.incognito
+                    ? Icons.visibility_off_rounded
+                    : Icons.visibility_outlined,
+              ),
+              title: const Text('Incognito'),
+              subtitle: const Text("Don't record searches or tags"),
+              value: state.settings.incognito,
+              onChanged: state.setIncognito,
+            ),
+            ListTile(
+              leading: const Icon(Icons.favorite_rounded),
+              title: const Text('Favorites'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => SavedPostsScreen(state: state),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.download_done_rounded),
+              title: const Text('Downloads'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => DownloadsScreen(state: state),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.travel_explore_rounded),
+              title: const Text('Search all sites'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => MultiSearchScreen(
+                      state: state,
+                      initialTags: state.tags,
+                    ),
+                  ),
+                );
+              },
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Websites',
+                      style: TextStyle(
+                        color: ink(.54),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Reorder or hide websites',
+                    visualDensity: VisualDensity.compact,
+                    color: ink(.54),
+                    icon: const Icon(Icons.tune_rounded, size: 20),
+                    onPressed: _editBoardLayout,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  // The current website stays listed even when hidden
+                  // so the drawer always shows where you are.
+                  for (final option in state.settings.boardOrder)
+                    if (option == board ||
+                        !state.settings.hiddenBoards.contains(option))
+                      ListTile(
+                        dense: true,
+                        selected: option == board,
+                        leading: SiteLogo(option, size: 32),
+                        title: Text(appearanceFor(option).name),
+                        onTap: option == board
+                            ? null
+                            : () async {
+                                Navigator.pop(context);
+                                _searchHistory.clear();
+                                _endSelection();
+                                await state.chooseBoard(option);
+                              },
+                      ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  InkWell(
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => SearchGuideScreen(board: board),
+                        ),
+                      );
+                    },
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        'Learn to search',
+                        style: TextStyle(
+                          color: ink(.70),
+                          decoration: TextDecoration.underline,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'BooruPlus · Android',
+                    style: TextStyle(color: ink(.38), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _build(BuildContext context) {
     final state = widget.state;
     final board = state.board;
@@ -688,6 +1178,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final hierarchicalGrid = state.settings.hierarchicalGrid;
     final hidePostTags = state.settings.hidePostTags;
     final posts = state.posts;
+    final oneHanded = state.settings.oneHanded;
+    final search = TagInput(
+      tags: state.tags,
+      onChanged: _search,
+      autocomplete: state.autocomplete,
+      postCount: state.postCountFor,
+      suggestionsAbove: oneHanded,
+    );
+    final filters = FilterBar(
+      board: board,
+      tags: state.tags,
+      selectedRatings: state.selectedRatings,
+      onFilter: _chooseFilter,
+      onDate: _pickDate,
+      onRatings: _chooseRatings,
+    );
     return PopScope<void>(
       canPop: !_selecting && (_searchHistory.isEmpty || _drawerOpen),
       onPopInvokedWithResult: (didPop, _) {
@@ -708,7 +1214,7 @@ class _HomeScreenState extends State<HomeScreen> {
         drawerEdgeDragWidth: state.settings.gesturesEnabled
             ? MediaQuery.sizeOf(context).width
             : null,
-        appBar: _selecting
+        appBar: _selecting && !oneHanded
             ? _selectionBar(board)
             : AppBar(
                 backgroundColor: appBarSurface(board),
@@ -734,250 +1240,37 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                actions: [
-                  if (posts.isNotEmpty)
-                    IconButton(
-                      tooltip: 'Select posts',
-                      onPressed: () => setState(() => _selecting = true),
-                      icon: const Icon(Icons.checklist_rounded),
-                    ),
-                  IconButton(
-                    tooltip: state.tags.isEmpty
-                        ? 'Saved searches'
-                        : 'Save and open saved searches',
-                    onPressed: _saveAndShowQueries,
-                    icon: Icon(
-                      state.tags.isEmpty
-                          ? Icons.bookmarks_outlined
-                          : Icons.bookmark_add_outlined,
-                    ),
-                  ),
-                  if (state.recentSearches.isNotEmpty)
-                    IconButton(
-                      tooltip: 'Open recent searches',
-                      onPressed: _showRecentSearches,
-                      icon: const Icon(Icons.history_rounded),
-                    ),
-                  IconButton(
-                    tooltip: 'Refresh feed',
-                    onPressed: state.refresh,
-                    icon: const Icon(Icons.refresh_rounded),
-                  ),
-                  const SizedBox(width: 8),
-                ],
+                // One-handed mode keeps these in the bottom panel.
+                actions: oneHanded
+                    ? null
+                    : [..._feedActions(), const SizedBox(width: 8)],
               ),
-        drawer: Drawer(
-          child: SafeArea(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Row(
-                    children: [
-                      Image(
-                        image: AssetImage(logoAsset),
-                        height: 38,
-                        fit: BoxFit.contain,
-                      ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                  child: Text(
-                    'Browsing ${board.label}',
-                    style: TextStyle(color: ink(.54)),
-                  ),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.tune_rounded),
-                  title: const Text('Settings'),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => SettingsScreen(state: state),
-                      ),
-                    );
-                  },
-                ),
-                SwitchListTile(
-                  secondary: Icon(
-                    state.settings.incognito
-                        ? Icons.visibility_off_rounded
-                        : Icons.visibility_outlined,
-                  ),
-                  title: const Text('Incognito'),
-                  subtitle: const Text("Don't record searches or tags"),
-                  value: state.settings.incognito,
-                  onChanged: state.setIncognito,
-                ),
-                ListTile(
-                  leading: const Icon(Icons.favorite_rounded),
-                  title: const Text('Favorites'),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => SavedPostsScreen(state: state),
-                      ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.download_done_rounded),
-                  title: const Text('Downloads'),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => DownloadsScreen(state: state),
-                      ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.travel_explore_rounded),
-                  title: const Text('Search all sites'),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => MultiSearchScreen(
-                          state: state,
-                          initialTags: state.tags,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Websites',
-                          style: TextStyle(
-                            color: ink(.54),
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Reorder or hide websites',
-                        visualDensity: VisualDensity.compact,
-                        color: ink(.54),
-                        icon: const Icon(Icons.tune_rounded, size: 20),
-                        onPressed: _editBoardLayout,
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: ListView(
-                    padding: EdgeInsets.zero,
-                    children: [
-                      // The current website stays listed even when hidden
-                      // so the drawer always shows where you are.
-                      for (final option in state.settings.boardOrder)
-                        if (option == board ||
-                            !state.settings.hiddenBoards.contains(option))
-                          ListTile(
-                            dense: true,
-                            selected: option == board,
-                            leading: SiteLogo(option, size: 32),
-                            title: Text(appearanceFor(option).name),
-                            onTap: option == board
-                                ? null
-                                : () async {
-                                    Navigator.pop(context);
-                                    _searchHistory.clear();
-                                    _endSelection();
-                                    await state.chooseBoard(option);
-                                  },
-                          ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      InkWell(
-                        borderRadius: BorderRadius.circular(4),
-                        onTap: () {
-                          Navigator.pop(context);
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute<void>(
-                              builder: (_) => SearchGuideScreen(board: board),
-                            ),
-                          );
-                        },
-                        child: Padding(
-                          padding: EdgeInsets.symmetric(vertical: 4),
-                          child: Text(
-                            'Learn to search',
-                            style: TextStyle(
-                              color: ink(.70),
-                              decoration: TextDecoration.underline,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'BooruPlus · Android',
-                        style: TextStyle(color: ink(.38), fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+        drawer: state.settings.classicDrawer
+            ? _classicDrawer(board)
+            : _drawer(board),
         body: SafeArea(
           top: false,
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 180),
-                  child: SingleChildScrollView(
-                    child: TagInput(
-                      tags: state.tags,
-                      onChanged: _search,
-                      autocomplete: state.autocomplete,
-                      postCount: state.postCountFor,
-                    ),
+              // A thin red line under the app bar while incognito is on.
+              if (state.settings.incognito)
+                Container(
+                  key: const ValueKey('incognito_line'),
+                  height: 2,
+                  color: const Color(0xFFE53935),
+                ),
+              if (!oneHanded) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 180),
+                    child: SingleChildScrollView(child: search),
                   ),
                 ),
-              ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilterBar(
-                  board: board,
-                  tags: state.tags,
-                  selectedRatings: state.selectedRatings,
-                  onFilter: _chooseFilter,
-                  onDate: _pickDate,
-                  onRatings: _chooseRatings,
-                ),
-              ),
+                Align(alignment: Alignment.centerLeft, child: filters),
+              ],
               Padding(
-                padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+                padding: EdgeInsets.fromLTRB(18, oneHanded ? 12 : 0, 18, 12),
                 child: Row(
                   children: [
                     Icon(
@@ -1027,7 +1320,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ((bounds.maxHeight - 8 * (state.settings.rows - 1)) /
                                 state.settings.rows)
                             .clamp(88.0, 600.0);
-                    return RefreshIndicator(
+                    final feed = RefreshIndicator(
                       onRefresh: state.refresh,
                       child: CustomScrollView(
                         controller: _scroll,
@@ -1128,9 +1421,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     );
+                    if (!oneHanded) return feed;
+                    return Stack(children: [feed, _scrollTopButton()]);
                   },
                 ),
               ),
+              if (oneHanded) _bottomPanel(board, search, filters),
             ],
           ),
         ),
@@ -1140,6 +1436,60 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 /// "N new" beside a saved search once its count arrives.
+/// One of the drawer's shortcut buttons: an icon above a short label.
+/// [active] tints it, for a mode that is on.
+class _DrawerShortcut extends StatelessWidget {
+  const _DrawerShortcut({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.active = false,
+  });
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? Theme.of(context).colorScheme.primary : ink(.70);
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: Material(
+          color: active ? color.withValues(alpha: .14) : ink(.05),
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 22, color: color),
+                  const SizedBox(height: 4),
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _NewPostsBadge extends StatelessWidget {
   const _NewPostsBadge({required this.count});
   final Future<int?> count;

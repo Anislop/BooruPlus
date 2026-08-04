@@ -10,6 +10,7 @@ import 'package:video_player/video_player.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'home.dart';
 import 'media_image.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
@@ -85,6 +86,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   bool _metered = false;
   final Set<int> _originalsRequested = {};
   bool _findingElsewhere = false;
+  // Parent/child and related post lookups, by post, loaded when the
+  // details open.
+  final Map<String, Future<({MediaPost? parent, List<MediaPost> children})>>
+  _families = {};
+  final Map<String, Future<List<MediaPost>>> _related = {};
   final _screenAwake = ScreenAwakeService();
   final _device = DeviceService();
   AppLifecycleState _lifecycle =
@@ -1020,283 +1026,579 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 IconButton(
                   tooltip: _details ? 'Hide details' : 'Show details',
                   onPressed: () => setState(() => _details = !_details),
-                  icon: Icon(
-                    _details
-                        ? Icons.keyboard_arrow_down
-                        : Icons.keyboard_arrow_up,
+                  icon: AnimatedRotation(
+                    turns: _details ? .5 : 0,
+                    duration: const Duration(milliseconds: 240),
+                    curve: Curves.easeOutCubic,
+                    child: const Icon(Icons.keyboard_arrow_up),
                   ),
                 ),
               ],
             ),
-            GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onVerticalDragUpdate: (drag) {
-                if (_details && (drag.primaryDelta ?? 0) > 8) {
-                  setState(() => _details = false);
-                }
-              },
-              child: Material(
-                color: panel,
-                child: InkWell(
-                  onTap: () => setState(() => _details = !_details),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 16,
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
-                          ),
-                          decoration: BoxDecoration(
-                            color: accent.withValues(alpha: .12),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            post.rating.toUpperCase(),
-                            style: const TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              color: accent,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text(
-                            'Tags & details',
-                            style: TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: favorited
-                              ? 'Remove from favorites'
-                              : 'Add to favorites',
-                          onPressed: () => _toggleFavorite(post, board),
-                          icon: Icon(
-                            favorited
-                                ? Icons.favorite_rounded
-                                : Icons.favorite_border,
-                            size: 19,
-                            color: favorited
-                                ? const Color(0xFFFF77A8)
-                                : ink(.38),
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          '${post.score}',
-                          style: TextStyle(color: ink(.54), fontSize: 12),
-                        ),
-                        const SizedBox(width: 12),
-                      ],
-                    ),
+            _detailsHeader(post, board, favorited),
+            // Details slide up from the header when opened by a tap, the
+            // arrow button, or a swipe, and slide back down when closed.
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 280),
+              reverseDuration: const Duration(milliseconds: 200),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) => ClipRect(
+                child: SizeTransition(
+                  sizeFactor: animation,
+                  alignment: Alignment.topCenter,
+                  child: SlideTransition(
+                    position: Tween(
+                      begin: const Offset(0, .2),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: FadeTransition(opacity: animation, child: child),
                   ),
                 ),
               ),
+              child: _details
+                  ? KeyedSubtree(
+                      key: const ValueKey('post_details'),
+                      child: _detailsBody(post, board, browserUrl),
+                    )
+                  : const SizedBox(
+                      key: ValueKey('post_details_closed'),
+                      width: double.infinity,
+                    ),
             ),
-            if (_details)
-              ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.sizeOf(context).height * .42,
-                ),
-                child: Container(
-                  color: panel,
-                  width: double.infinity,
-                  child: NotificationListener<ScrollNotification>(
-                    onNotification: (notification) {
-                      if (notification is OverscrollNotification &&
-                          notification.overscroll < -6) {
-                        setState(() => _details = false);
-                        return true;
-                      }
-                      if (notification is ScrollUpdateNotification &&
-                          notification.metrics.pixels <= 0 &&
-                          (notification.scrollDelta ?? 0) < -6) {
-                        setState(() => _details = false);
-                        return true;
-                      }
-                      return false;
-                    },
-                    child: SingleChildScrollView(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Divider(),
-                          Text(
-                            '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'}',
-                            style: TextStyle(color: ink(.54), fontSize: 12),
-                          ),
-                          const SectionLabel('Uploaded by'),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: SelectableText(
-                                  post.uploader.isEmpty
-                                      ? 'Not supplied by this website'
-                                      : post.uploader,
-                                ),
-                              ),
-                              if (post.uploader.trim().isNotEmpty)
-                                TextButton.icon(
-                                  onPressed: () => _hideUploader(post.uploader),
-                                  icon: const Icon(
-                                    Icons.person_off_outlined,
-                                    size: 16,
-                                  ),
-                                  label: const Text('Hide uploader'),
-                                ),
-                            ],
-                          ),
-                          if (post.parentId != null ||
-                              post.hasChildren ||
-                              _hasPools(board, post) ||
-                              post.md5.isNotEmpty) ...[
-                            const SectionLabel('Related'),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 4,
-                              children: [
-                                if (post.parentId != null)
-                                  ActionChip(
-                                    avatar: const Icon(
-                                      Icons.north_west_rounded,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Parent post'),
-                                    onPressed: () =>
-                                        _browseQuery('id:${post.parentId}'),
-                                  ),
-                                if (post.hasChildren && post.hasId)
-                                  ActionChip(
-                                    avatar: const Icon(
-                                      Icons.account_tree_outlined,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Child posts'),
-                                    onPressed: () => _browseQuery(
-                                      'parent:${post.displayId}',
-                                    ),
-                                  ),
-                                if (_hasPools(board, post))
-                                  ActionChip(
-                                    avatar: const Icon(
-                                      Icons.collections_bookmark_outlined,
-                                      size: 16,
-                                    ),
-                                    label: const Text('Pools'),
-                                    onPressed: _showPools,
-                                  ),
-                                if (post.md5.isNotEmpty)
-                                  ActionChip(
-                                    avatar: _findingElsewhere
-                                        ? const SizedBox.square(
-                                            dimension: 14,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                            ),
-                                          )
-                                        : const Icon(
-                                            Icons.travel_explore_rounded,
-                                            size: 16,
-                                          ),
-                                    label: const Text('Find on other sites'),
-                                    onPressed: _findingElsewhere
-                                        ? null
-                                        : _findElsewhere,
-                                  ),
-                              ],
-                            ),
-                          ],
-                          if (post.description.isNotEmpty) ...[
-                            const SectionLabel('Description'),
-                            SelectableText(post.description),
-                          ],
-                          if (browserUrl.isNotEmpty)
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: _openPost,
-                                icon: const Icon(
-                                  Icons.open_in_browser,
-                                  size: 16,
-                                ),
-                                label: const Text('Open in browser'),
-                              ),
-                            ),
-                          const SectionLabel('Original source'),
-                          if (post.source.isEmpty)
-                            Text(
-                              'Not supplied by this website',
-                              style: TextStyle(color: ink(.38)),
-                            )
-                          else
-                            Wrap(
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                TextButton.icon(
-                                  onPressed: _openSource,
-                                  icon: const Icon(Icons.open_in_new, size: 16),
-                                  label: const Text('Open original source'),
-                                ),
-                                SelectableText(
-                                  post.source,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: ink(.54),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          const SectionLabel(
-                            'Tags · tap to search, hold for more',
-                          ),
-                          for (final entry in _groupedTags(post).entries) ...[
-                            Text(
-                              _categoryLabel(entry.key),
-                              style: TextStyle(
-                                color: _tagColor(entry.key),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 6,
-                              runSpacing: 4,
-                              children: [
-                                for (final tag in entry.value)
-                                  GestureDetector(
-                                    onLongPress: () =>
-                                        _showTagActions(tag.name),
-                                    child: ActionChip(
-                                      label: Text(
-                                        tag.name,
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                      side: BorderSide(
-                                        color: _tagColor(tag.category)
-                                            .withValues(alpha: .6),
-                                      ),
-                                      onPressed: () => _browseTag(tag.name),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                          ],
-                        ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The bar under the media: rating, size, score, and favorite. Tapping
+  /// or swiping it opens and closes the details.
+  Widget _detailsHeader(
+    MediaPost post,
+    Board board,
+    bool favorited,
+  ) => GestureDetector(
+    behavior: HitTestBehavior.translucent,
+    onVerticalDragUpdate: (drag) {
+      final dy = drag.primaryDelta ?? 0;
+      if (_details && dy > 8) {
+        setState(() => _details = false);
+      } else if (!_details && dy < -8) {
+        setState(() => _details = true);
+      }
+    },
+    child: Material(
+      color: panel,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => setState(() => _details = !_details),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(top: 8),
+              decoration: BoxDecoration(
+                color: ink(.24),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 8, 10),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      post.rating.toUpperCase(),
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: accent,
                       ),
                     ),
                   ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'Tags & details',
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        Text(
+                          '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'} · ${post.tags.length} tag${post.tags.length == 1 ? '' : 's'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: ink(.54), fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.thumb_up_alt_outlined, size: 14, color: ink(.54)),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${post.score}',
+                    style: TextStyle(color: ink(.54), fontSize: 12),
+                  ),
+                  IconButton(
+                    tooltip: favorited
+                        ? 'Remove from favorites'
+                        : 'Add to favorites',
+                    onPressed: () => _toggleFavorite(post, board),
+                    icon: Icon(
+                      favorited
+                          ? Icons.favorite_rounded
+                          : Icons.favorite_border,
+                      size: 19,
+                      color: favorited ? const Color(0xFFFF77A8) : ink(.38),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  /// The opened details: post information, parent and child posts, links,
+  /// tags, and related posts. Pulling down at the top closes them.
+  Widget _detailsBody(MediaPost post, Board board, String browserUrl) =>
+      ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * .5,
+        ),
+        child: Container(
+          color: panel,
+          width: double.infinity,
+          child: NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              // Only the details' own scrolling; the thumbnail rows scroll
+              // sideways.
+              if (notification.depth != 0) return false;
+              if (notification is OverscrollNotification &&
+                  notification.overscroll < -6) {
+                setState(() => _details = false);
+                return true;
+              }
+              if (notification is ScrollUpdateNotification &&
+                  notification.metrics.pixels <= 0 &&
+                  (notification.scrollDelta ?? 0) < -6) {
+                setState(() => _details = false);
+                return true;
+              }
+              return false;
+            },
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _infoCard(post, browserUrl),
+                  _familySection(post, board),
+                  if (_hasPools(board, post) || post.md5.isNotEmpty) ...[
+                    const SectionLabel('More'),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        if (_hasPools(board, post))
+                          ActionChip(
+                            avatar: const Icon(
+                              Icons.collections_bookmark_outlined,
+                              size: 16,
+                            ),
+                            label: const Text('Pools'),
+                            onPressed: _showPools,
+                          ),
+                        if (post.md5.isNotEmpty)
+                          ActionChip(
+                            avatar: _findingElsewhere
+                                ? const SizedBox.square(
+                                    dimension: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.travel_explore_rounded,
+                                    size: 16,
+                                  ),
+                            label: const Text('Find on other sites'),
+                            onPressed: _findingElsewhere
+                                ? null
+                                : _findElsewhere,
+                          ),
+                      ],
+                    ),
+                  ],
+                  if (post.description.isNotEmpty) ...[
+                    const SectionLabel('Description'),
+                    SelectableText(post.description),
+                  ],
+                  const SectionLabel('Tags · tap to search, hold for more'),
+                  for (final entry in _groupedTags(post).entries) ...[
+                    Text(
+                      _categoryLabel(entry.key),
+                      style: TextStyle(
+                        color: _tagColor(entry.key),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final tag in entry.value)
+                          GestureDetector(
+                            onLongPress: () => _showTagActions(tag.name),
+                            child: ActionChip(
+                              label: Text(
+                                tag.name,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              side: BorderSide(
+                                color: _tagColor(tag.category)
+                                    .withValues(alpha: .6),
+                              ),
+                              onPressed: () => _browseTag(tag.name),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  _relatedSection(post, board),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+  /// Uploader, source, and links to the post and its source.
+  Widget _infoCard(MediaPost post, String browserUrl) {
+    Widget row(IconData icon, String label, Widget value, {Widget? action}) =>
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: ink(.54)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(color: ink(.54), fontSize: 11),
+                    ),
+                    const SizedBox(height: 2),
+                    value,
+                  ],
                 ),
               ),
+              ?action,
+            ],
+          ),
+        );
+    final missing = TextStyle(color: ink(.38));
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: ink(.04),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          row(
+            Icons.person_outline_rounded,
+            'Uploaded by',
+            post.uploader.trim().isEmpty
+                ? Text('Not supplied by this website', style: missing)
+                : SelectableText(post.uploader),
+            action: post.uploader.trim().isEmpty
+                ? null
+                : TextButton.icon(
+                    onPressed: () => _hideUploader(post.uploader),
+                    icon: const Icon(Icons.person_off_outlined, size: 16),
+                    label: const Text('Hide uploader'),
+                  ),
+          ),
+          row(
+            Icons.link_rounded,
+            'Original source',
+            post.source.isEmpty
+                ? Text('Not supplied by this website', style: missing)
+                : SelectableText(
+                    post.source,
+                    maxLines: 2,
+                    style: TextStyle(fontSize: 12, color: ink(.70)),
+                  ),
+          ),
+          Wrap(
+            spacing: 4,
+            children: [
+              if (browserUrl.isNotEmpty)
+                TextButton.icon(
+                  onPressed: _openPost,
+                  icon: const Icon(Icons.open_in_browser, size: 16),
+                  label: const Text('Open in browser'),
+                ),
+              if (post.source.isNotEmpty)
+                TextButton.icon(
+                  onPressed: _openSource,
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  label: const Text('Open original source'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _linkKey(MediaPost post, Board board) =>
+      SavedPost(board: board, post: post).identity;
+
+  /// The parent post and child posts as thumbnails that open in the
+  /// viewer, with searches for them below.
+  Widget _familySection(MediaPost post, Board board) {
+    final children = post.hasChildren && post.hasId;
+    if (post.parentId == null && !children) return const SizedBox.shrink();
+    if (_families.length > 40) _families.clear();
+    final future = _families.putIfAbsent(
+      _linkKey(post, board),
+      () => widget.state.postFamily(post, board: board),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SectionLabel('Parent & child posts'),
+        FutureBuilder(
+          future: future,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return _stripPlaceholder();
+            }
+            if (snapshot.hasError) {
+              return _lookupFailed(
+                () => _families.remove(_linkKey(post, board)),
+              );
+            }
+            final family = snapshot.data;
+            final entries = <(MediaPost, String?)>[
+              if (family?.parent case final parent?) (parent, 'Parent'),
+              for (final child in family?.children ?? const <MediaPost>[])
+                (child, 'Child'),
+            ];
+            if (entries.isEmpty) {
+              return Text(
+                'These posts are no longer available.',
+                style: TextStyle(color: ink(.38)),
+              );
+            }
+            return _postStrip(board, entries);
+          },
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: [
+            if (post.parentId != null)
+              ActionChip(
+                avatar: const Icon(Icons.north_west_rounded, size: 16),
+                label: const Text('Parent post'),
+                onPressed: () => _browseQuery('id:${post.parentId}'),
+              ),
+            if (children)
+              ActionChip(
+                avatar: const Icon(Icons.account_tree_outlined, size: 16),
+                label: const Text('Child posts'),
+                onPressed: () => _browseQuery('parent:${post.displayId}'),
+              ),
           ],
+        ),
+      ],
+    );
+  }
+
+  /// Posts sharing this post's artists and characters, best match first.
+  Widget _relatedSection(MediaPost post, Board board) {
+    if (post.tags.isEmpty) return const SizedBox.shrink();
+    if (_related.length > 40) _related.clear();
+    final future = _related.putIfAbsent(
+      _linkKey(post, board),
+      () => widget.state.relatedPosts(post, board: board),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SectionLabel('Related posts'),
+        FutureBuilder(
+          future: future,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return _stripPlaceholder();
+            }
+            if (snapshot.hasError) {
+              return _lookupFailed(
+                () => _related.remove(_linkKey(post, board)),
+              );
+            }
+            final posts = snapshot.data ?? const <MediaPost>[];
+            if (posts.isEmpty) {
+              return Text(
+                'No related posts found.',
+                style: TextStyle(color: ink(.38)),
+              );
+            }
+            return _postStrip(board, [for (final item in posts) (item, null)]);
+          },
+        ),
+      ],
+    );
+  }
+
+  /// A failed lookup, with a retry that forgets the cached failure.
+  Widget _lookupFailed(VoidCallback forget) => Row(
+    children: [
+      Expanded(
+        child: Text(
+          'Could not load these posts.',
+          style: TextStyle(color: ink(.38)),
+        ),
+      ),
+      TextButton.icon(
+        onPressed: () {
+          forget();
+          setState(() {});
+        },
+        icon: const Icon(Icons.refresh_rounded, size: 16),
+        label: const Text('Retry'),
+      ),
+    ],
+  );
+
+  static const _stripHeight = 132.0;
+
+  Widget _stripPlaceholder() => SizedBox(
+    height: _stripHeight,
+    child: Row(
+      children: [
+        for (var i = 0; i < 3; i++)
+          Container(
+            width: 100,
+            margin: const EdgeInsets.only(right: 8),
+            decoration: BoxDecoration(
+              color: ink(.06),
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  /// A horizontal row of post thumbnails, each with an optional label.
+  Widget _postStrip(Board board, List<(MediaPost, String?)> entries) {
+    final state = widget.state;
+    final posts = [for (final (item, _) in entries) item];
+    return SizedBox(
+      height: _stripHeight,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: entries.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final (item, label) = entries[index];
+          final shown = state.displayPost(item, board: board);
+          return SizedBox(
+            width: 100,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  MediaTile(
+                    key: ValueKey(_linkKey(item, board)),
+                    post: shown,
+                    board: board,
+                    hidePostTags: true,
+                    isFavorite: state.isFavorite(shown, board: board),
+                    isDownloaded: state.isDownloaded(shown, board: board),
+                    blur: shouldBlurPost(state, shown),
+                    onTap: () => _openPosts(board, posts, index),
+                  ),
+                  if (label != null)
+                    Positioned(
+                      left: 6,
+                      top: 6,
+                      child: IgnorePointer(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            label,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Opens [posts] in a viewer on top of this one, at [index].
+  void _openPosts(Board board, List<MediaPost> posts, int index) {
+    final saved = [
+      for (final item in posts)
+        widget.state.displayReady(SavedPost(board: board, post: item)),
+    ];
+    _video?.pause();
+    if (_slideshow) _toggleSlideshow();
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => MediaViewer(
+          post: saved[index].post,
+          board: saved[index].board,
+          state: widget.state,
+          savedPosts: saved,
+          initialIndex: index,
         ),
       ),
     );

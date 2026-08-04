@@ -212,7 +212,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Open navigation menu'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Settings'));
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(find.text('Posts per batch'), 250);
     expect(find.text('Posts per batch'), findsOneWidget);
@@ -300,6 +300,15 @@ void main() {
 
       // Settings should be saved in the store
       expect(store.settings.columns, isNot(3));
+
+      // Saving keeps the user on Settings instead of popping the route,
+      // which raced a simultaneous back gesture into a black screen.
+      expect(find.byType(SettingsScreen), findsOneWidget);
+      expect(find.text('Settings saved.'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('unsaved_settings_flair')),
+        findsNothing,
+      );
 
       await tester.pumpWidget(const SizedBox());
       state.dispose();

@@ -18,6 +18,7 @@ class TagInput extends StatefulWidget {
     this.autocomplete,
     this.postCount,
     this.searchStyle = true,
+    this.suggestionsAbove = false,
   });
   final List<String> tags;
   final ValueChanged<List<String>> onChanged;
@@ -33,6 +34,10 @@ class TagInput extends StatefulWidget {
   /// Shows the search icon and the submit arrow; off for tag lists that
   /// are not searches, such as blocked tags.
   final bool searchStyle;
+
+  /// Lists autocomplete suggestions above the field, for a field at the
+  /// bottom of the screen.
+  final bool suggestionsAbove;
   @override
   TagInputState createState() => TagInputState();
 }
@@ -212,53 +217,52 @@ class TagInputState extends State<TagInput> {
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      _field(context),
-      if (_suggestions.isNotEmpty)
-        Container(
-          constraints: const BoxConstraints(maxHeight: 190),
-          margin: const EdgeInsets.only(top: 4),
-          decoration: BoxDecoration(
-            color: panel,
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: _suggestions.length,
-            itemBuilder: (context, index) {
-              final suggestion = _suggestions[index];
-              final color = _categoryColor(suggestion.category);
-              return Material(
-                color: Colors.transparent,
-                child: ListTile(
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  onTap: () => _selectSuggestion(suggestion),
-                  leading: Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: color,
-                      shape: BoxShape.circle,
-                    ),
+    children: widget.suggestionsAbove
+        ? [if (_suggestions.isNotEmpty) _suggestionList(), _field(context)]
+        : [_field(context), if (_suggestions.isNotEmpty) _suggestionList()],
+  );
+
+  Widget _suggestionList() => Container(
+    constraints: const BoxConstraints(maxHeight: 190),
+    margin: widget.suggestionsAbove
+        ? const EdgeInsets.only(bottom: 4)
+        : const EdgeInsets.only(top: 4),
+    decoration: BoxDecoration(
+      color: panel,
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: ListView.builder(
+      shrinkWrap: true,
+      itemCount: _suggestions.length,
+      itemBuilder: (context, index) {
+        final suggestion = _suggestions[index];
+        final color = _categoryColor(suggestion.category);
+        return Material(
+          color: Colors.transparent,
+          child: ListTile(
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            onTap: () => _selectSuggestion(suggestion),
+            leading: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            title: Text(suggestion.name, overflow: TextOverflow.ellipsis),
+            subtitle: Text(
+              _categoryLabel(suggestion.category),
+              style: TextStyle(color: color, fontSize: 11),
+            ),
+            trailing: suggestion.postCount == null
+                ? null
+                : Text(
+                    '${suggestion.postCount}',
+                    style: TextStyle(color: ink(.54), fontSize: 11),
                   ),
-                  title: Text(suggestion.name, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(
-                    _categoryLabel(suggestion.category),
-                    style: TextStyle(color: color, fontSize: 11),
-                  ),
-                  trailing: suggestion.postCount == null
-                      ? null
-                      : Text(
-                          '${suggestion.postCount}',
-                          style: TextStyle(color: ink(.54), fontSize: 11),
-                        ),
-                ),
-              );
-            },
           ),
-        ),
-    ],
+        );
+      },
+    ),
   );
 }
 

@@ -62,6 +62,9 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     _search.search(_tags, _available.where(_chosen.contains));
   }
 
+  /// Switching a website applies to the current results at once: its
+  /// posts are hidden or shown, and loading more asks only the websites
+  /// switched on.
   void _toggle(Board board, bool selected) {
     setState(() {
       if (selected) {
@@ -70,6 +73,9 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
         _chosen.remove(board);
       }
     });
+    if (_search.tags.isNotEmpty) {
+      _search.setEnabled(_available.where(_chosen.contains));
+    }
   }
 
   void _open(List<SavedPost> results, int index) {
@@ -237,7 +243,7 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
             child: Center(
               child: _search.loading
                   ? const CircularProgressIndicator(strokeWidth: 2)
-                  : results.isEmpty
+                  : results.isEmpty && !_search.hasMore
                   ? Text(
                       'No matching media on these websites.',
                       style: TextStyle(color: ink(.54)),
