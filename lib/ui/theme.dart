@@ -1,4 +1,7 @@
+import 'dart:ui' show ImageFilter;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../core/models.dart';
 import 'site_catalog.dart';
@@ -23,6 +26,23 @@ bool get lightPalette => _palette == ThemeChoice.white;
 /// and [tagTone]. Widgets read it directly, so the caller rebuilds the whole
 /// tree.
 void setPalette(ThemeChoice choice) => _palette = choice;
+
+double _surfaceOpacity = .8;
+double _surfaceBlur = 16;
+
+/// Opacity (0-1) of the frosted surfaces drawn over content, from
+/// [AppSettings.surfaceOpacity].
+double get surfaceOpacity => _surfaceOpacity;
+
+/// Blur radius behind the frosted surfaces; 0 turns blurring off.
+double get surfaceBlur => _surfaceBlur;
+
+/// Applies [AppSettings.surfaceOpacity] and [AppSettings.surfaceBlur] to
+/// every [FrostedSurface]. Like [setPalette], widgets read them directly.
+void setSurfaceGlass({required int opacity, required int blur}) {
+  _surfaceOpacity = opacity.clamp(20, 100) / 100;
+  _surfaceBlur = blur.clamp(0, 30).toDouble();
+}
 
 /// Page background: the BooruPlus dark tone, near-white, or black for AMOLED
 /// screens.
@@ -151,4 +171,76 @@ class SectionLabel extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// [color] at the user's surface opacity over a blur of whatever lies
+/// behind, so the feed or the image shows through. Fully opaque surfaces
+/// skip the blur, which would be invisible and still cost a pass. While
+/// [active] is false the surface is transparent and blurs nothing; the
+/// widget tree stays the same so toggling keeps the child's state.
+class FrostedSurface extends StatelessWidget {
+  const FrostedSurface({
+    super.key,
+    required this.color,
+    required this.child,
+    this.borderRadius = BorderRadius.zero,
+    this.active = true,
+  });
+  final Color color;
+  final Widget child;
+  final BorderRadius borderRadius;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final opacity = surfaceOpacity;
+    final blur = surfaceBlur;
+    final frosted = active && opacity < 1 && blur > 0;
+    final rounded = borderRadius != BorderRadius.zero;
+    return ClipRRect(
+      borderRadius: borderRadius,
+      clipBehavior: frosted || rounded ? Clip.antiAlias : Clip.none,
+      child: BackdropFilter(
+        enabled: frosted,
+        filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+        child: Material(
+          color: active
+              ? color.withValues(alpha: color.a * opacity)
+              : Colors.transparent,
+          borderRadius: borderRadius,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Reports its child's height after layout whenever it changes.
+class SizeReporter extends SingleChildRenderObjectWidget {
+  const SizeReporter({super.key, required this.onHeight, required super.child});
+  final ValueChanged<double> onHeight;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderSizeReporter(onHeight);
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) =>
+      (renderObject as _RenderSizeReporter).onHeight = onHeight;
+}
+
+class _RenderSizeReporter extends RenderProxyBox {
+  _RenderSizeReporter(this.onHeight);
+  ValueChanged<double> onHeight;
+  double? _reported;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    final height = size.height;
+    if (height == _reported) return;
+    _reported = height;
+    // Layout cannot rebuild widgets; report once this frame is done.
+    WidgetsBinding.instance.addPostFrameCallback((_) => onHeight(height));
+  }
 }

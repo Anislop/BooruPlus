@@ -78,6 +78,8 @@ void main() {
       250,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.ensureVisible(signIn);
+    await tester.pumpAndSettle();
     expect(find.text('Not signed in (optional)'), findsOneWidget);
     await tester.tap(signIn);
     await tester.pumpAndSettle();
@@ -1126,6 +1128,43 @@ void main() {
       state.dispose();
     },
   );
+
+  testWidgets('opening details overlays the media instead of shrinking it', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(
+          post: MediaPost.fromMap(post(1)),
+          board: Board.danbooru,
+          state: state,
+        ),
+      ),
+    );
+    // The media area takes its size from the measured controls a frame later.
+    await tester.pump();
+    await tester.pump();
+    final closed = tester.getSize(find.byType(PageView));
+
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('post_details')), findsOneWidget);
+    expect(tester.getSize(find.byType(PageView)), closed);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('post_details_panel'))).dy,
+      lessThan(tester.getBottomLeft(find.byType(PageView)).dy),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
 
   testWidgets('video quality menu lists renditions and saves the choice', (
     tester,

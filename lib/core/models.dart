@@ -11,6 +11,9 @@ enum Board {
   rule34,
   sankaku,
   idolcomplex,
+  tbib,
+  aibooru,
+  nozomi,
 }
 
 extension BoardInfo on Board {
@@ -25,6 +28,9 @@ extension BoardInfo on Board {
     Board.rule34 => 'Rule34',
     Board.sankaku => 'Sankaku Complex',
     Board.idolcomplex => 'Idol Complex',
+    Board.tbib => 'TBIB',
+    Board.aibooru => 'AIBooru',
+    Board.nozomi => 'Nozomi',
   };
 
   String get host => switch (this) {
@@ -38,9 +44,25 @@ extension BoardInfo on Board {
     Board.rule34 => 'rule34.xxx',
     Board.sankaku => 'www.sankakucomplex.com',
     Board.idolcomplex => 'www.idolcomplex.com',
+    Board.tbib => 'tbib.org',
+    // aibooru.org is a parked domain; the site and its API live here.
+    Board.aibooru => 'aibooru.online',
+    Board.nozomi => 'nozomi.la',
   };
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
+
+  /// Boards searched with Gelbooru 0.2 syntax: `sort:` ordering, no date
+  /// searches, and ratings filtered locally.
+  bool get usesGelbooruSyntax =>
+      this == Board.gelbooru || this == Board.rule34 || this == Board.tbib;
+
+  /// Whether posts carry a rating. Nozomi does not rate posts, so rating
+  /// filters do not apply there.
+  bool get hasRatings => this != Board.nozomi;
+
+  /// Boards made of AI-generated media, where the no-AI setting is ignored.
+  bool get isAiBoard => this == Board.aibooru;
 
   /// Boards served by Sankaku's API (Sankaku Complex and Idol Complex): the
   /// same search syntax, tag limits, keyset paging, and signed media URLs.
@@ -735,6 +757,8 @@ class AppSettings {
     this.oneHanded = false,
     this.handedness = Handedness.right,
     this.classicDrawer = false,
+    this.surfaceOpacity = 80,
+    this.surfaceBlur = 16,
     this.filenameTemplate = defaultFilenameTemplate,
     this.autoFavoriteOnDownload = false,
     this.boardHiddenUploaders = const {},
@@ -815,6 +839,14 @@ class AppSettings {
   /// entries above a short website list.
   final bool classicDrawer;
 
+  /// Opacity (percent) of the frosted surfaces drawn over the feed or the
+  /// viewer: the one-handed bottom panel, the drawer's website list, and the
+  /// viewer's details panel. One value for the whole app.
+  final int surfaceOpacity;
+
+  /// Blur strength behind those frosted surfaces; 0 turns blurring off.
+  final int surfaceBlur;
+
   /// Download file name pattern; see [mediaFileName].
   final String filenameTemplate;
 
@@ -887,6 +919,8 @@ class AppSettings {
     oneHanded: oneHanded,
     handedness: handedness,
     classicDrawer: classicDrawer,
+    surfaceOpacity: surfaceOpacity.clamp(20, 100),
+    surfaceBlur: surfaceBlur.clamp(0, 30),
     filenameTemplate: filenameTemplate.trim().isEmpty
         ? defaultFilenameTemplate
         : filenameTemplate.trim().length > 120
@@ -931,6 +965,8 @@ class AppSettings {
     bool? oneHanded,
     Handedness? handedness,
     bool? classicDrawer,
+    int? surfaceOpacity,
+    int? surfaceBlur,
     String? filenameTemplate,
     bool? autoFavoriteOnDownload,
     Map<Board, List<String>>? boardHiddenUploaders,
@@ -971,6 +1007,8 @@ class AppSettings {
     oneHanded: oneHanded ?? this.oneHanded,
     handedness: handedness ?? this.handedness,
     classicDrawer: classicDrawer ?? this.classicDrawer,
+    surfaceOpacity: surfaceOpacity ?? this.surfaceOpacity,
+    surfaceBlur: surfaceBlur ?? this.surfaceBlur,
     filenameTemplate: filenameTemplate ?? this.filenameTemplate,
     autoFavoriteOnDownload:
         autoFavoriteOnDownload ?? this.autoFavoriteOnDownload,
@@ -1018,6 +1056,8 @@ class AppSettings {
     'oneHanded': oneHanded,
     'handedness': handedness.name,
     'classicDrawer': classicDrawer,
+    'surfaceOpacity': surfaceOpacity,
+    'surfaceBlur': surfaceBlur,
     'filenameTemplate': filenameTemplate,
     'autoFavoriteOnDownload': autoFavoriteOnDownload,
     'boardHiddenUploaders': {
@@ -1077,6 +1117,8 @@ class AppSettings {
         Handedness.values.asNameMap()['${map['handedness']}'] ??
         Handedness.right,
     classicDrawer: _asBool(map['classicDrawer'], false),
+    surfaceOpacity: _asInt(map['surfaceOpacity'], 80),
+    surfaceBlur: _asInt(map['surfaceBlur'], 16),
     filenameTemplate: map['filenameTemplate'] is String
         ? map['filenameTemplate'] as String
         : defaultFilenameTemplate,
@@ -1258,6 +1300,8 @@ class AppSettings {
         other.oneHanded != oneHanded ||
         other.handedness != handedness ||
         other.classicDrawer != classicDrawer ||
+        other.surfaceOpacity != surfaceOpacity ||
+        other.surfaceBlur != surfaceBlur ||
         other.filenameTemplate != filenameTemplate ||
         other.autoFavoriteOnDownload != autoFavoriteOnDownload ||
         !_sameBoardTags(other.boardHiddenUploaders, boardHiddenUploaders) ||
@@ -1353,6 +1397,8 @@ class AppSettings {
     oneHanded,
     handedness,
     classicDrawer,
+    surfaceOpacity,
+    surfaceBlur,
     filenameTemplate,
     autoFavoriteOnDownload,
     _countsHash(savedSearchMarks),

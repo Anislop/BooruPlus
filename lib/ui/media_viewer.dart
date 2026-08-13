@@ -68,6 +68,12 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   bool _downloading = false;
   bool _sharing = false;
   bool _details = false;
+
+  // Heights of the controls and the details bar below the media. The media
+  // keeps the space they take while the details are closed; opening the
+  // details overlays it instead of shrinking it.
+  double _controlsHeight = 0;
+  double _detailsBarHeight = 0;
   bool _muted = false;
   late int _index;
   late int _quality;
@@ -351,12 +357,18 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: _currentBoard == Board.gelbooru
-          ? const {
-              'Referer': 'https://gelbooru.com/',
-              'User-Agent': 'BooruPlus/1.0',
-            }
-          : const {},
+      httpHeaders: switch (_currentBoard) {
+        Board.gelbooru => const {
+          'Referer': 'https://gelbooru.com/',
+          'User-Agent': 'BooruPlus/1.0',
+        },
+        // Nozomi's media hosts answer 404 without the site as Referer.
+        Board.nozomi => const {
+          'Referer': 'https://nozomi.la/',
+          'User-Agent': 'BooruPlus/1.0',
+        },
+        _ => const {},
+      },
     );
     _video = video;
     _streamQuality = variant?.quality ?? 0;
@@ -910,9 +922,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       ),
       body: SafeArea(
         top: false,
-        child: Column(
+        child: Stack(
           children: [
-            Expanded(
+            Positioned.fill(
+              bottom: _controlsHeight + _detailsBarHeight,
               child: Listener(
                 onPointerDown: _handlePointerDown,
                 onPointerUp: _handlePointerUp,
@@ -936,135 +949,216 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            if (post.isVideo && _player != null)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  IconButton(
-                    tooltip: 'Rewind 10 seconds',
-                    onPressed: () => _video!.seekTo(
-                      Duration(
-                        milliseconds:
-                            (_video!.value.position.inMilliseconds - 10000)
-                                .clamp(
-                                  0,
-                                  _video!.value.duration.inMilliseconds,
+                  SizeReporter(
+                    onHeight: (height) {
+                      if (mounted && height != _controlsHeight) {
+                        setState(() => _controlsHeight = height);
+                      }
+                    },
+                    // Frosted only while the opened details lift these
+                    // controls over the media.
+                    child: FrostedSurface(
+                      color: canvas,
+                      active: _details,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (post.isVideo && _player != null)
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Rewind 10 seconds',
+                                  onPressed: () => _video!.seekTo(
+                                    Duration(
+                                      milliseconds:
+                                          (_video!
+                                                      .value
+                                                      .position
+                                                      .inMilliseconds -
+                                                  10000)
+                                              .clamp(
+                                                0,
+                                                _video!
+                                                    .value
+                                                    .duration
+                                                    .inMilliseconds,
+                                              ),
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.replay_10),
                                 ),
+                                ValueListenableBuilder<VideoPlayerValue>(
+                                  valueListenable: _video!,
+                                  builder: (context, value, _) {
+                                    final isPlaying = value.isPlaying;
+                                    return IconButton(
+                                      tooltip: isPlaying ? 'Pause' : 'Play',
+                                      onPressed: () {
+                                        if (isPlaying) {
+                                          _video!.pause();
+                                        } else {
+                                          _video!.play();
+                                        }
+                                      },
+                                      icon: Icon(
+                                        isPlaying
+                                            ? Icons.pause_rounded
+                                            : Icons.play_arrow_rounded,
+                                      ),
+                                    );
+                                  },
+                                ),
+                                IconButton(
+                                  tooltip: 'Forward 10 seconds',
+                                  onPressed: () => _video!.seekTo(
+                                    Duration(
+                                      milliseconds:
+                                          (_video!
+                                                      .value
+                                                      .position
+                                                      .inMilliseconds +
+                                                  10000)
+                                              .clamp(
+                                                0,
+                                                _video!
+                                                    .value
+                                                    .duration
+                                                    .inMilliseconds,
+                                              ),
+                                    ),
+                                  ),
+                                  icon: const Icon(Icons.forward_10),
+                                ),
+                                IconButton(
+                                  tooltip: 'Mute or unmute',
+                                  onPressed: () {
+                                    setState(() => _muted = !_muted);
+                                    _video!.setVolume(_muted ? 0 : 1);
+                                  },
+                                  icon: Icon(
+                                    _muted ? Icons.volume_off : Icons.volume_up,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              // Outside the player controls so a lower quality can be
+                              // chosen even when the original fails to load.
+                              if (post.isVideo && post.videoVariants.isNotEmpty)
+                                _qualityMenu(post),
+                              _moreMenu(post, browserUrl),
+                              IconButton(
+                                tooltip:
+                                    widget.state.isDownloaded(
+                                      post,
+                                      board: board,
+                                    )
+                                    ? 'Downloaded · download again'
+                                    : 'Download original media',
+                                onPressed: _downloading ? null : _download,
+                                icon: _downloading
+                                    ? const SizedBox.square(
+                                        dimension: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : Icon(
+                                        widget.state.isDownloaded(
+                                              post,
+                                              board: board,
+                                            )
+                                            ? Icons.download_done_rounded
+                                            : Icons.download_outlined,
+                                      ),
+                              ),
+                              IconButton(
+                                tooltip: _details
+                                    ? 'Hide details'
+                                    : 'Show details',
+                                onPressed: () =>
+                                    setState(() => _details = !_details),
+                                icon: AnimatedRotation(
+                                  turns: _details ? .5 : 0,
+                                  duration: const Duration(milliseconds: 240),
+                                  curve: Curves.easeOutCubic,
+                                  child: const Icon(Icons.keyboard_arrow_up),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
-                    icon: const Icon(Icons.replay_10),
                   ),
-                  ValueListenableBuilder<VideoPlayerValue>(
-                    valueListenable: _video!,
-                    builder: (context, value, _) {
-                      final isPlaying = value.isPlaying;
-                      return IconButton(
-                        tooltip: isPlaying ? 'Pause' : 'Play',
-                        onPressed: () {
-                          if (isPlaying) {
-                            _video!.pause();
-                          } else {
-                            _video!.play();
-                          }
-                        },
-                        icon: Icon(
-                          isPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
+                  FrostedSurface(
+                    key: const ValueKey('post_details_panel'),
+                    color: panel,
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(20),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizeReporter(
+                          onHeight: (height) {
+                            if (mounted && height != _detailsBarHeight) {
+                              setState(() => _detailsBarHeight = height);
+                            }
+                          },
+                          child: _detailsHeader(post, board, favorited),
                         ),
-                      );
-                    },
-                  ),
-                  IconButton(
-                    tooltip: 'Forward 10 seconds',
-                    onPressed: () => _video!.seekTo(
-                      Duration(
-                        milliseconds:
-                            (_video!.value.position.inMilliseconds + 10000)
-                                .clamp(
-                                  0,
-                                  _video!.value.duration.inMilliseconds,
+                        // Details slide up from the header when opened by a tap, the
+                        // arrow button, or a swipe, and slide back down when closed.
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 280),
+                          reverseDuration: const Duration(milliseconds: 200),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          transitionBuilder: (child, animation) => ClipRect(
+                            child: SizeTransition(
+                              sizeFactor: animation,
+                              alignment: Alignment.topCenter,
+                              child: SlideTransition(
+                                position: Tween(
+                                  begin: const Offset(0, .2),
+                                  end: Offset.zero,
+                                ).animate(animation),
+                                child: FadeTransition(
+                                  opacity: animation,
+                                  child: child,
                                 ),
-                      ),
+                              ),
+                            ),
+                          ),
+                          child: _details
+                              ? KeyedSubtree(
+                                  key: const ValueKey('post_details'),
+                                  child: _detailsBody(post, board, browserUrl),
+                                )
+                              : const SizedBox(
+                                  key: ValueKey('post_details_closed'),
+                                  width: double.infinity,
+                                ),
+                        ),
+                      ],
                     ),
-                    icon: const Icon(Icons.forward_10),
-                  ),
-                  IconButton(
-                    tooltip: 'Mute or unmute',
-                    onPressed: () {
-                      setState(() => _muted = !_muted);
-                      _video!.setVolume(_muted ? 0 : 1);
-                    },
-                    icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
                   ),
                 ],
               ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                // Outside the player controls so a lower quality can be
-                // chosen even when the original fails to load.
-                if (post.isVideo && post.videoVariants.isNotEmpty)
-                  _qualityMenu(post),
-                _moreMenu(post, browserUrl),
-                IconButton(
-                  tooltip: widget.state.isDownloaded(post, board: board)
-                      ? 'Downloaded · download again'
-                      : 'Download original media',
-                  onPressed: _downloading ? null : _download,
-                  icon: _downloading
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Icon(
-                          widget.state.isDownloaded(post, board: board)
-                              ? Icons.download_done_rounded
-                              : Icons.download_outlined,
-                        ),
-                ),
-                IconButton(
-                  tooltip: _details ? 'Hide details' : 'Show details',
-                  onPressed: () => setState(() => _details = !_details),
-                  icon: AnimatedRotation(
-                    turns: _details ? .5 : 0,
-                    duration: const Duration(milliseconds: 240),
-                    curve: Curves.easeOutCubic,
-                    child: const Icon(Icons.keyboard_arrow_up),
-                  ),
-                ),
-              ],
-            ),
-            _detailsHeader(post, board, favorited),
-            // Details slide up from the header when opened by a tap, the
-            // arrow button, or a swipe, and slide back down when closed.
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 280),
-              reverseDuration: const Duration(milliseconds: 200),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) => ClipRect(
-                child: SizeTransition(
-                  sizeFactor: animation,
-                  alignment: Alignment.topCenter,
-                  child: SlideTransition(
-                    position: Tween(
-                      begin: const Offset(0, .2),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: FadeTransition(opacity: animation, child: child),
-                  ),
-                ),
-              ),
-              child: _details
-                  ? KeyedSubtree(
-                      key: const ValueKey('post_details'),
-                      child: _detailsBody(post, board, browserUrl),
-                    )
-                  : const SizedBox(
-                      key: ValueKey('post_details_closed'),
-                      width: double.infinity,
-                    ),
             ),
           ],
         ),
@@ -1089,9 +1183,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       }
     },
     child: Material(
-      color: panel,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      clipBehavior: Clip.antiAlias,
+      type: MaterialType.transparency,
       child: InkWell(
         onTap: () => setState(() => _details = !_details),
         child: Column(
@@ -1182,8 +1274,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         constraints: BoxConstraints(
           maxHeight: MediaQuery.sizeOf(context).height * .5,
         ),
-        child: Container(
-          color: panel,
+        child: SizedBox(
           width: double.infinity,
           child: NotificationListener<ScrollNotification>(
             onNotification: (notification) {
@@ -1847,7 +1938,8 @@ String _postBrowserUrl(Board board, MediaPost post) {
   }
   if (!post.hasId) return '';
   return switch (board) {
-    Board.danbooru => 'https://${board.host}/posts/${post.id}',
+    Board.danbooru || Board.aibooru => 'https://${board.host}/posts/${post.id}',
+    Board.nozomi => 'https://${board.host}/post/${post.id}.html',
     Board.e621 || Board.e926 => 'https://${board.host}/posts/${post.id}',
     Board.sankaku ||
     Board.idolcomplex => 'https://${board.host}/posts/${post.displayId}',

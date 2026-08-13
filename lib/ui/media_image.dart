@@ -40,7 +40,8 @@ class MediaImage extends StatefulWidget {
   final bool showProgress;
 
   /// Whether [url] is fetched and prepared natively rather than handed to
-  /// [NetworkImage]: authenticated Gelbooru media, and Sankaku AVIF previews.
+  /// [NetworkImage]: authenticated Gelbooru media, Sankaku AVIF previews,
+  /// and Nozomi media (which needs the site as Referer).
   /// Flutter decodes AVIF through Android's ImageDecoder while blocking the
   /// UI thread for the whole decode, so a grid of them freezes the app; the
   /// native side converts them on a background thread instead.
@@ -57,6 +58,7 @@ class MediaImage extends StatefulWidget {
         (host == 'sankakucomplex.com' ||
                 host.endsWith('.sankakucomplex.com')) &&
             uri.path.toLowerCase().endsWith('.avif'),
+      Board.nozomi => host.endsWith('.gold-usergeneratedcontent.net'),
       _ => false,
     };
   }

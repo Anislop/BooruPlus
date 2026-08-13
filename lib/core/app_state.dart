@@ -876,6 +876,7 @@ class AppState extends ChangeNotifier {
           : await _store.loadCredentials(board);
       _settings = settings;
       _board = board;
+      _noteIgnoredAiSetting(board);
       _credentials = credentials;
       if (board != null) _credentialsByBoard[board] = credentials;
       _setFavorites(
@@ -930,6 +931,7 @@ class AppState extends ChangeNotifier {
       await _store.saveBoard(value);
       if (generation != _generation) return;
       _board = value;
+      _noteIgnoredAiSetting(value);
       _credentials = loadedCredentials;
       _credentialsByBoard[value] = loadedCredentials;
       _clearResults();
@@ -1510,7 +1512,7 @@ class AppState extends ChangeNotifier {
   }) {
     final exclusions = [
       ..._settings.blacklistFor(board).map((tag) => '-$tag'),
-      if (_settings.excludeAi) '-${_aiTagFor(board)}',
+      if (_excludesAiOn(board)) '-${_aiTagFor(board)}',
     ];
     final rating = _singleProviderRatingFor(board);
     // Anonymous Sankaku searches allow four counted tags: ordinary tags,
@@ -1539,10 +1541,12 @@ class AppState extends ChangeNotifier {
     // Anonymous Danbooru searches accept only two ordinary tags. Keep the
     // user's search intact and let the local filter enforce any remaining
     // blacklist/no-AI exclusions instead of turning a valid query into a
-    // provider-side "too many tags" error.
-    if (board == Board.danbooru) {
+    // provider-side "too many tags" error. AIBooru runs Danbooru with a
+    // four-tag limit.
+    if (board == Board.danbooru || board == Board.aibooru) {
+      final limit = board == Board.aibooru ? 4 : 2;
       final ordinary = tags.where(_isOrdinaryTag).length;
-      final budget = (2 - ordinary).clamp(0, 2);
+      final budget = (limit - ordinary).clamp(0, limit);
       return [
         ...tags,
         if (rating != null)
@@ -1560,10 +1564,23 @@ class AppState extends ChangeNotifier {
 
   Rating? _singleProviderRatingFor(Board? board) =>
       _settings.selectedRatings.length == 1 &&
-          board != Board.gelbooru &&
-          board != Board.rule34
+          board?.usesGelbooruSyntax != true &&
+          board?.hasRatings != false
       ? _settings.selectedRatings.single
       : null;
+
+  /// Tells the user that [board] ignores the no-AI setting, when it is chosen
+  /// or restored at startup.
+  void _noteIgnoredAiSetting(Board? board) {
+    if (board?.isAiBoard == true && _settings.excludeAi) {
+      _notice =
+          '${board!.label} only hosts AI-generated posts, so the "No AI-generated posts" setting is ignored here.';
+    }
+  }
+
+  /// Whether the no-AI setting applies on [board]; AI-only boards ignore it.
+  bool _excludesAiOn(Board? board) =>
+      _settings.excludeAi && board?.isAiBoard != true;
 
   bool _isOrdinaryTag(String value) {
     final tag = value.startsWith('-') ? value.substring(1) : value;
@@ -1591,7 +1608,7 @@ class AppState extends ChangeNotifier {
   /// for [post] on [board].
   bool _allowedOn(MediaPost post, Board? board) {
     final aiTag = _aiTagFor(board);
-    if (_settings.excludeAi &&
+    if (_excludesAiOn(board) &&
         post.tags.any((tag) => _normalize(tag) == aiTag)) {
       return false;
     }
@@ -1601,7 +1618,8 @@ class AppState extends ChangeNotifier {
       if (blocked.any((tag) => tags.contains(_normalize(tag)))) return false;
     }
     if (_settings.hidesUploader(board, post.uploader)) return false;
-    return _ratingAllowed(post) && !isHidden(post, board: board);
+    return (board?.hasRatings == false || _ratingAllowed(post)) &&
+        !isHidden(post, board: board);
   }
 
   Rating? _postRating(MediaPost post) => RatingInfo.parse(post.rating);

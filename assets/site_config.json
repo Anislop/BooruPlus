@@ -9,6 +9,9 @@
     "gelbooru": { "name": "Gelbooru", "accent": "#B59AE5", "surface": "#2B223A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=gelbooru.com" },
     "rule34": { "name": "Rule34", "accent": "#9EAEE3", "surface": "#22283B", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=rule34.xxx" },
     "sankaku": { "name": "Sankaku Complex", "accent": "#F2A25C", "surface": "#3A2616", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=sankakucomplex.com" },
-    "idolcomplex": { "name": "Idol Complex", "accent": "#E88BB5", "surface": "#3A1A2A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=idolcomplex.com" }
+    "idolcomplex": { "name": "Idol Complex", "accent": "#E88BB5", "surface": "#3A1A2A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=idolcomplex.com" },
+    "tbib": { "name": "TBIB", "accent": "#7CC48A", "surface": "#1B2E22", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=tbib.org" },
+    "aibooru": { "name": "AIBooru", "accent": "#5FD3C6", "surface": "#163330", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=aibooru.online" },
+    "nozomi": { "name": "Nozomi", "accent": "#E6C65C", "surface": "#352E16", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=nozomi.la" }
   }
 }
