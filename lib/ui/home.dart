@@ -52,6 +52,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final _device = DeviceService();
   StreamSubscription<AppShortcut>? _shortcutSubscription;
   bool _drawerOpen = false;
+
+  /// The one-handed panel's height; the feed runs underneath it and ends
+  /// with this much space so its last row can scroll clear of the panel.
+  double _panelHeight = 0;
   // Feed multi-select: identities of the selected posts, with the posts.
   bool _selecting = false;
   final Map<String, SavedPost> _selected = {};
@@ -316,11 +320,19 @@ class _HomeScreenState extends State<HomeScreen> {
         children: sided(_feedActions()),
       );
     }
-    return Material(
+    // Frosted so the feed shows through as it scrolls underneath. The body
+    // skips the bottom safe area in this mode, so the panel reaches the
+    // screen edge and pads its own content above the system bar.
+    return FrostedSurface(
       key: const ValueKey('one_handed_panel'),
       color: appBarSurface(board),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(0, 8, 0, 4),
+        padding: EdgeInsets.fromLTRB(
+          0,
+          8,
+          0,
+          4 + MediaQuery.paddingOf(context).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -369,7 +381,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// One-handed mode's jump-to-top button on the preferred hand's side,
   /// shown once the feed is scrolled.
   Widget _scrollTopButton() => Positioned(
-    bottom: 16,
+    bottom: 16 + _panelHeight,
     left: widget.state.settings.handedness == Handedness.left ? 16 : null,
     right: widget.state.settings.handedness == Handedness.left ? null : 16,
     child: ValueListenableBuilder<bool>(
@@ -585,7 +597,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _pickDate() async {
     final board = widget.state.board;
     if (board == null) return;
-    if (board == Board.gelbooru || board == Board.rule34) {
+    if (board.usesGelbooruSyntax || board == Board.nozomi) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -637,6 +649,16 @@ class _HomeScreenState extends State<HomeScreen> {
   );
 
   Future<void> _chooseRatings() async {
+    if (widget.state.board?.hasRatings == false) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This website does not rate posts, so rating filters do not apply.',
+          ),
+        ),
+      );
+      return;
+    }
     var selected = widget.state.selectedRatings.toSet();
     final result = await showModalBottomSheet<Set<Rating>>(
       context: context,
@@ -683,8 +705,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String? _sortTag(Board board, String filter) {
     if (filter == 'none') return null;
-    final gelbooruSyntax = board == Board.gelbooru || board == Board.rule34;
-    if (gelbooruSyntax) {
+    // Nozomi only offers a popularity ordering.
+    if (board == Board.nozomi) {
+      return filter == 'score' ? 'order:popular' : null;
+    }
+    if (board.usesGelbooruSyntax) {
       return switch (filter) {
         'score' => 'sort:score',
         'quality' => 'sort:width:desc',
@@ -850,137 +875,170 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _drawer(Board board) {
     final state = widget.state;
     final incognito = state.settings.incognito;
+    // The header (logo, shortcuts) stays solid; the website list below is
+    // frosted so the feed shows through it.
     return Drawer(
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
-              child: Row(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.transparent,
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Material(
+            color: canvas,
+            child: SafeArea(
+              bottom: false,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Image(
-                    image: AssetImage(logoAsset),
-                    height: 30,
-                    fit: BoxFit.contain,
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    tooltip: 'Learn to search',
-                    color: ink(.70),
-                    icon: const Icon(Icons.help_outline_rounded),
-                    onPressed: () =>
-                        _openFromDrawer((_) => SearchGuideScreen(board: board)),
-                  ),
-                  IconButton(
-                    key: const ValueKey('drawer_settings'),
-                    tooltip: 'Settings',
-                    color: ink(.70),
-                    icon: const Icon(Icons.tune_rounded),
-                    onPressed: () =>
-                        _openFromDrawer((_) => SettingsScreen(state: state)),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
-              child: Text(
-                'Browsing ${board.label}',
-                style: TextStyle(color: ink(.54), fontSize: 13),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(
-                children: [
-                  _DrawerShortcut(
-                    icon: Icons.favorite_rounded,
-                    label: 'Favorites',
-                    onTap: () =>
-                        _openFromDrawer((_) => SavedPostsScreen(state: state)),
-                  ),
-                  _DrawerShortcut(
-                    icon: Icons.download_done_rounded,
-                    label: 'Downloads',
-                    onTap: () =>
-                        _openFromDrawer((_) => DownloadsScreen(state: state)),
-                  ),
-                  _DrawerShortcut(
-                    icon: Icons.travel_explore_rounded,
-                    label: 'All sites',
-                    onTap: () => _openFromDrawer(
-                      (_) => MultiSearchScreen(
-                        state: state,
-                        initialTags: state.tags,
-                      ),
-                    ),
-                  ),
-                  _DrawerShortcut(
-                    key: const ValueKey('drawer_incognito'),
-                    icon: incognito
-                        ? Icons.visibility_off_rounded
-                        : Icons.visibility_outlined,
-                    label: 'Incognito',
-                    active: incognito,
-                    onTap: () => state.setIncognito(!incognito),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Websites',
-                      style: TextStyle(
-                        color: ink(.54),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Reorder or hide websites',
-                    visualDensity: VisualDensity.compact,
-                    color: ink(.54),
-                    icon: const Icon(Icons.tune_rounded, size: 20),
-                    onPressed: _editBoardLayout,
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-                children: [
-                  // The current website stays listed even when hidden
-                  // so the drawer always shows where you are.
-                  for (final option in state.settings.boardOrder)
-                    if (option == board ||
-                        !state.settings.hiddenBoards.contains(option))
-                      ListTile(
-                        selected: option == board,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
+                    child: Row(
+                      children: [
+                        Image(
+                          image: AssetImage(logoAsset),
+                          height: 30,
+                          fit: BoxFit.contain,
                         ),
-                        leading: SiteLogo(option, size: 36),
-                        title: Text(appearanceFor(option).name),
-                        trailing: option == board
-                            ? const Icon(Icons.check_rounded, size: 20)
-                            : null,
-                        onTap: option == board
-                            ? null
-                            : () => _chooseBoardFromDrawer(option),
-                      ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: 'Learn to search',
+                          color: ink(.70),
+                          icon: const Icon(Icons.help_outline_rounded),
+                          onPressed: () => _openFromDrawer(
+                            (_) => SearchGuideScreen(board: board),
+                          ),
+                        ),
+                        IconButton(
+                          key: const ValueKey('drawer_settings'),
+                          tooltip: 'Settings',
+                          color: ink(.70),
+                          icon: const Icon(Icons.settings_rounded),
+                          onPressed: () => _openFromDrawer(
+                            (_) => SettingsScreen(state: state),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
+                    child: Text(
+                      'Browsing ${board.label}',
+                      style: TextStyle(color: ink(.54), fontSize: 13),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      children: [
+                        _DrawerShortcut(
+                          icon: Icons.favorite_rounded,
+                          label: 'Favorites',
+                          onTap: () => _openFromDrawer(
+                            (_) => SavedPostsScreen(state: state),
+                          ),
+                        ),
+                        _DrawerShortcut(
+                          icon: Icons.download_done_rounded,
+                          label: 'Downloads',
+                          onTap: () => _openFromDrawer(
+                            (_) => DownloadsScreen(state: state),
+                          ),
+                        ),
+                        _DrawerShortcut(
+                          icon: Icons.travel_explore_rounded,
+                          label: 'All sites',
+                          onTap: () => _openFromDrawer(
+                            (_) => MultiSearchScreen(
+                              state: state,
+                              initialTags: state.tags,
+                            ),
+                          ),
+                        ),
+                        _DrawerShortcut(
+                          key: const ValueKey('drawer_incognito'),
+                          icon: incognito
+                              ? Icons.visibility_off_rounded
+                              : Icons.visibility_outlined,
+                          label: 'Incognito',
+                          active: incognito,
+                          onTap: () => state.setIncognito(!incognito),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                 ],
               ),
             ),
-          ],
-        ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: FrostedSurface(
+              key: const ValueKey('drawer_websites'),
+              color: canvas,
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Websites',
+                              style: TextStyle(
+                                color: ink(.54),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Reorder or hide websites',
+                            visualDensity: VisualDensity.compact,
+                            color: ink(.54),
+                            icon: const Icon(Icons.tune_rounded, size: 20),
+                            onPressed: _editBoardLayout,
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView(
+                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                        children: [
+                          // The current website stays listed even when hidden
+                          // so the drawer always shows where you are.
+                          for (final option in state.settings.boardOrder)
+                            if (option == board ||
+                                !state.settings.hiddenBoards.contains(option))
+                              ListTile(
+                                selected: option == board,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                leading: SiteLogo(option, size: 36),
+                                title: Text(appearanceFor(option).name),
+                                trailing: option == board
+                                    ? const Icon(Icons.check_rounded, size: 20)
+                                    : null,
+                                onTap: option == board
+                                    ? null
+                                    : () => _chooseBoardFromDrawer(option),
+                              ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1012,7 +1070,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.tune_rounded),
+              leading: const Icon(Icons.settings_rounded),
               title: const Text('Settings'),
               onTap: () {
                 Navigator.pop(context);
@@ -1250,6 +1308,7 @@ class _HomeScreenState extends State<HomeScreen> {
             : _drawer(board),
         body: SafeArea(
           top: false,
+          bottom: !oneHanded,
           child: Column(
             children: [
               // A thin red line under the app bar while incognito is on.
@@ -1418,15 +1477,36 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
                           ),
+                          if (oneHanded)
+                            SliverToBoxAdapter(
+                              child: SizedBox(height: _panelHeight),
+                            ),
                         ],
                       ),
                     );
                     if (!oneHanded) return feed;
-                    return Stack(children: [feed, _scrollTopButton()]);
+                    return Stack(
+                      children: [
+                        feed,
+                        _scrollTopButton(),
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: SizeReporter(
+                            onHeight: (height) {
+                              if (mounted && height != _panelHeight) {
+                                setState(() => _panelHeight = height);
+                              }
+                            },
+                            child: _bottomPanel(board, search, filters),
+                          ),
+                        ),
+                      ],
+                    );
                   },
                 ),
               ),
-              if (oneHanded) _bottomPanel(board, search, filters),
             ],
           ),
         ),
@@ -2650,18 +2730,18 @@ class FilterBar extends StatelessWidget {
           (tag) => tag.startsWith('created_at:') || tag.startsWith('date:'),
         )
         .firstOrNull;
-    final noFavoriteOrder =
-        board == Board.gelbooru ||
-        board == Board.rule34 ||
-        board.isSankakuFamily;
+    final noFavoriteOrder = board.usesGelbooruSyntax || board.isSankakuFamily;
     final sortItems = <PopupMenuEntry<String>>[
       const PopupMenuItem(value: 'none', child: Text('Relevance / default')),
       const PopupMenuItem(value: 'score', child: Text('Popularity / score')),
-      if (!noFavoriteOrder)
-        const PopupMenuItem(value: 'favorites', child: Text('Favorites')),
-      const PopupMenuItem(value: 'quality', child: Text('Quality')),
-      const PopupMenuItem(value: 'newest', child: Text('Newest')),
-      const PopupMenuItem(value: 'oldest', child: Text('Oldest')),
+      // Nozomi lists posts newest first or by popularity only.
+      if (board != Board.nozomi) ...[
+        if (!noFavoriteOrder)
+          const PopupMenuItem(value: 'favorites', child: Text('Favorites')),
+        const PopupMenuItem(value: 'quality', child: Text('Quality')),
+        const PopupMenuItem(value: 'newest', child: Text('Newest')),
+        const PopupMenuItem(value: 'oldest', child: Text('Oldest')),
+      ],
     ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),

@@ -913,6 +913,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ),
                         ),
+                      // One opacity and one blur for every frosted surface:
+                      // the one-handed panel, the drawer's websites, and the
+                      // viewer's details.
+                      Padding(
+                        padding: const EdgeInsets.only(top: 16),
+                        child: _slider(
+                          'Surface opacity',
+                          'How solid the one-handed panel, side menu websites, and post details are over the feed or image. Lower values show more of what is behind.',
+                          _settings.surfaceOpacity,
+                          20,
+                          100,
+                          16,
+                          (v) => setState(
+                            () => _settings = _settings.copyWith(
+                              surfaceOpacity: v,
+                            ),
+                          ),
+                        ),
+                      ),
+                      _slider(
+                        'Surface blur',
+                        'How much the content behind those surfaces is blurred. 0 turns blurring off.',
+                        _settings.surfaceBlur,
+                        0,
+                        30,
+                        30,
+                        (v) => setState(
+                          () => _settings = _settings.copyWith(surfaceBlur: v),
+                        ),
+                      ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
                         child: Material(

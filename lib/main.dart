@@ -176,7 +176,12 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.state,
     builder: (context, _) {
-      setPalette(widget.state.settings.theme);
+      final settings = widget.state.settings;
+      setPalette(settings.theme);
+      setSurfaceGlass(
+        opacity: settings.surfaceOpacity,
+        blur: settings.surfaceBlur,
+      );
       final theme = buildAppTheme(board: widget.state.board);
       final locked = _locked && _splashComplete;
       final hidden = locked || (_covered && _splashComplete);
@@ -199,11 +204,24 @@ class _BooruPlusAppState extends State<BooruPlusApp>
             if (hidden) _LockScreen(onUnlock: locked ? _unlock : null),
           ],
         ),
-        home: !_splashComplete || !widget.state.initialized
-            ? SplashScreen(onFinished: _finishSplash)
-            : widget.state.board == null
-            ? OnboardingScreen(state: widget.state)
-            : HomeScreen(state: widget.state),
+        // The first screen grows into place as the splash logo lifts away.
+        home: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 520),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(
+              scale: Tween(begin: .9, end: 1.0).animate(animation),
+              child: child,
+            ),
+          ),
+          child: !_splashComplete || !widget.state.initialized
+              ? SplashScreen(onFinished: _finishSplash)
+              : widget.state.board == null
+              ? OnboardingScreen(state: widget.state)
+              : HomeScreen(state: widget.state),
+        ),
       );
     },
   );
@@ -269,7 +287,10 @@ class _SplashScreenState extends State<SplashScreen>
   void initState() {
     super.initState();
     _controller =
-        AnimationController(vsync: this, duration: const Duration(seconds: 1))
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 1300),
+          )
           ..addStatusListener((status) {
             if (status == AnimationStatus.completed) widget.onFinished();
           })
@@ -287,14 +308,30 @@ class _SplashScreenState extends State<SplashScreen>
     body: AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
-        final fadeProgress = ((_controller.value - .65) / .35).clamp(0.0, 1.0);
-        return Opacity(opacity: 1 - fadeProgress, child: child);
+        final t = _controller.value;
+        // Grows in, holds, then expands upward while fading out as the
+        // feed grows in behind it.
+        final enter = Curves.easeOutBack.transform((t / .35).clamp(0.0, 1.0));
+        final exit = Curves.easeInCubic.transform(
+          ((t - .6) / .4).clamp(0.0, 1.0),
+        );
+        final height = MediaQuery.sizeOf(context).height;
+        return Opacity(
+          opacity: (((t / .25).clamp(0.0, 1.0)) * (1 - exit)).clamp(0.0, 1.0),
+          child: Transform.translate(
+            offset: Offset(0, -height * .12 * exit),
+            child: Transform.scale(
+              scale: .82 + .18 * enter + .4 * exit,
+              child: child,
+            ),
+          ),
+        );
       },
       child: Center(
         child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: 420),
+            constraints: const BoxConstraints(maxWidth: 420),
             child: Image(image: AssetImage(logoAsset), fit: BoxFit.contain),
           ),
         ),

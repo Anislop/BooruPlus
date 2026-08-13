@@ -83,6 +83,10 @@ class MainActivity : FlutterActivity() {
     private val konachanNet by lazy { ImageBoard(client, KonachanBoard.NET, KonachanImage::class.java) }
     private val sankaku by lazy { SankakuApi(client, USER_AGENT) }
     private val idolComplex by lazy { SankakuApi.idolComplex(client, USER_AGENT) }
+    private val tbib by lazy { TbibApi(client, USER_AGENT) }
+    private val aiBooru by lazy { AiBooruApi(client, USER_AGENT) }
+    private val nozomiClient = lazy { NozomiApi(client, USER_AGENT) }
+    private val nozomi by nozomiClient
     private var directoryResult: MethodChannel.Result? = null
     private var exportResult: MethodChannel.Result? = null
     private var exportContent: String? = null
@@ -421,6 +425,11 @@ class MainActivity : FlutterActivity() {
         if (board in setOf("konachan", "yandere")) { result.success(emptyList<Map<String, Any?>>()); return }
         // Sankaku sends its optional session's access token as apiKey.
         sankakuFamily(board)?.let { api -> background(result) { api.autocomplete(query, limit, key) }; return }
+        when (board) {
+            "tbib" -> { background(result) { tbib.autocomplete(query, limit) }; return }
+            "aibooru" -> { background(result) { aiBooru.autocomplete(query, limit) }; return }
+            "nozomi" -> { background(result) { nozomi.autocomplete(query, limit) }; return }
+        }
         background(result) {
             val api = when (board) {
                 "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
@@ -574,6 +583,17 @@ class MainActivity : FlutterActivity() {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
         }
         val feed = if (call.argument<Boolean>("feed") == true) startFeed(result) else null
+        // Boards with their own JSON clients (ExtraBoards.kt).
+        when (board) {
+            "tbib" -> { background(result, feed = feed) { tbib.fetch(tags, page, limit, random, seed) { cancelled() } }; return }
+            "aibooru" -> { background(result, feed = feed) { aiBooru.fetch(tags, page, limit, random, seed) { cancelled() } }; return }
+            "nozomi" -> {
+                background(result, feed = feed) {
+                    nozomi.fetch(tags, page, limit, random, seed, makeCursorKey("nozomi", tags, limit, random, if (random) seed else 0)) { cancelled() }
+                }
+                return
+            }
+        }
         val sankakuApi = sankakuFamily(board)
         if (sankakuApi != null) {
             background(result, feed = feed) {
@@ -914,6 +934,12 @@ class MainActivity : FlutterActivity() {
             }
             return
         }
+        // Nozomi media answers 404 without its site as the Referer.
+        if (call.argument<String>("board") == "nozomi" && parsed != null &&
+            parsed.scheme == "https" && NozomiApi.isMediaHost(parsed.host)) {
+            background(result, mediaExecutor) { readMedia(value, NozomiApi::isMediaHost, NozomiApi.REFERER) }
+            return
+        }
         if (parsed == null || !isGelbooruHost(parsed.host) || parsed.scheme != "https" ||
             parsed.queryParameter("api_key").isNullOrBlank() || parsed.queryParameter("user_id").isNullOrBlank()) {
             result.error("INVALID_URL", "Unsupported media URL", null)
@@ -1133,6 +1159,7 @@ class MainActivity : FlutterActivity() {
                 connection.readTimeout = 30000
                 connection.setRequestProperty("User-Agent", USER_AGENT)
                 if (isGelbooruHost(current.host)) connection.setRequestProperty("Referer", GELBOORU_REFERER)
+                if (NozomiApi.isMediaHost(current.host)) connection.setRequestProperty("Referer", NozomiApi.REFERER)
                 val code = connection.responseCode
                 if (code in 300..399) {
                     val location = connection.getHeaderField("Location") ?: throw IOException("Invalid redirect")
@@ -1185,6 +1212,7 @@ class MainActivity : FlutterActivity() {
         authResult = null
         pending.toList().forEach { if (pending.remove(it)) it.error("CANCELLED", "Activity closed", null) }
         client.dispatcher.cancelAll()
+        if (nozomiClient.isInitialized()) nozomi.close()
         executor.shutdownNow()
         mediaExecutor.shutdownNow()
         super.onDestroy()
@@ -1213,7 +1241,7 @@ class MainActivity : FlutterActivity() {
         private const val TAG_CACHE_LIMIT = 512
         private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
         private const val GELBOORU_REFERER = "https://gelbooru.com/"
-        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST)
+        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to TbibApi.HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }

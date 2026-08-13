@@ -90,6 +90,24 @@ const _defaults = <Board, BoardAppearance>{
     accent: Color(0xFFE88BB5),
     surface: Color(0xFF3A1A2A),
   ),
+  Board.tbib: BoardAppearance(
+    name: 'TBIB',
+    icon: Icons.collections_outlined,
+    accent: Color(0xFF7CC48A),
+    surface: Color(0xFF1B2E22),
+  ),
+  Board.aibooru: BoardAppearance(
+    name: 'AIBooru',
+    icon: Icons.auto_awesome_outlined,
+    accent: Color(0xFF5FD3C6),
+    surface: Color(0xFF163330),
+  ),
+  Board.nozomi: BoardAppearance(
+    name: 'Nozomi',
+    icon: Icons.wb_sunny_outlined,
+    accent: Color(0xFFE6C65C),
+    surface: Color(0xFF352E16),
+  ),
 };
 
 final boardAppearances = <Board, BoardAppearance>{..._defaults};

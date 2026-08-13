@@ -239,6 +239,81 @@ void main() {
     expect(restored.browsedTagCounts, {'dog': 4});
   });
 
+  test('surface opacity and blur persist, clamp, and default for old data', () {
+    final legacy = AppSettings.fromMap({'columns': 3});
+    expect(legacy.surfaceOpacity, 80);
+    expect(legacy.surfaceBlur, 16);
+
+    final restored = AppSettings.decode(
+      const AppSettings(surfaceOpacity: 45, surfaceBlur: 4).encode(),
+    );
+    expect(restored.surfaceOpacity, 45);
+    expect(restored.surfaceBlur, 4);
+
+    final clamped = AppSettings.fromMap({
+      'surfaceOpacity': 5,
+      'surfaceBlur': 99,
+    });
+    expect(clamped.surfaceOpacity, 20);
+    expect(clamped.surfaceBlur, 30);
+  });
+
+  test('AIBooru ignores the no-AI setting and says so', () async {
+    final repo = FakeRepo([
+      [
+        {'id': 1, 'url': 'https://x/1.png', 'tags': 'ai_generated cat'},
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    expect(state.settings.excludeAi, isTrue);
+    await state.chooseBoard(Board.aibooru);
+    expect(state.takeNotice(), contains('ignored'));
+    expect(repo.queries.last, isNot(contains('-ai_generated')));
+    expect(state.posts.map((post) => post.id), [1]);
+
+    await state.chooseBoard(Board.safebooru);
+    expect(state.takeNotice(), isNull);
+    expect(repo.queries.last, contains('-ai_generated'));
+    expect(state.posts, isEmpty);
+  });
+
+  test('rating filters skip Nozomi and stay local on TBIB', () async {
+    final repo = FakeRepo([
+      [
+        {
+          'id': 1,
+          'url': 'https://x/1.webp',
+          'tags': 'cat',
+          'rating': 'Unknown',
+        },
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.nozomi,
+    );
+    await state.initialize();
+    await state.setRatingFilters({Rating.general});
+    await state.search(['cat']);
+    expect(
+      repo.queries.last.where((tag) => tag.startsWith('rating:')),
+      isEmpty,
+    );
+    expect(state.posts.map((post) => post.id), [1]);
+
+    await state.chooseBoard(Board.tbib, tags: ['cat']);
+    expect(
+      repo.queries.last.where((tag) => tag.startsWith('rating:')),
+      isEmpty,
+    );
+    // Unrated posts are filtered out where ratings exist.
+    expect(state.posts, isEmpty);
+  });
+
   test('search and browse usage are counted independently', () async {
     final store = MemoryStore()..selected = Board.konachan;
     final state = AppState(repository: FakeRepo(const [[]]), store: store);
