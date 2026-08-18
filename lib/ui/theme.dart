@@ -28,19 +28,35 @@ bool get lightPalette => _palette == ThemeChoice.white;
 void setPalette(ThemeChoice choice) => _palette = choice;
 
 double _surfaceOpacity = .8;
+double _panelOpacity = .8;
+double _detailsOpacity = .8;
 double _surfaceBlur = 16;
 
-/// Opacity (0-1) of the frosted surfaces drawn over content, from
-/// [AppSettings.surfaceOpacity].
+/// Opacity (0-1) of the drawer's frosted website list, from
+/// [AppSettings.surfaceOpacity]; the default for a [FrostedSurface].
 double get surfaceOpacity => _surfaceOpacity;
+
+/// Opacity (0-1) of the one-handed panel, from [AppSettings.panelOpacity].
+double get panelSurfaceOpacity => _panelOpacity;
+
+/// Opacity (0-1) of the viewer's details, from
+/// [AppSettings.detailsOpacity].
+double get detailsSurfaceOpacity => _detailsOpacity;
 
 /// Blur radius behind the frosted surfaces; 0 turns blurring off.
 double get surfaceBlur => _surfaceBlur;
 
-/// Applies [AppSettings.surfaceOpacity] and [AppSettings.surfaceBlur] to
-/// every [FrostedSurface]. Like [setPalette], widgets read them directly.
-void setSurfaceGlass({required int opacity, required int blur}) {
+/// Applies the frosted-surface opacities and [blur] to every
+/// [FrostedSurface]. Like [setPalette], widgets read them directly.
+void setSurfaceGlass({
+  required int opacity,
+  required int panelOpacity,
+  required int detailsOpacity,
+  required int blur,
+}) {
   _surfaceOpacity = opacity.clamp(20, 100) / 100;
+  _panelOpacity = panelOpacity.clamp(20, 100) / 100;
+  _detailsOpacity = detailsOpacity.clamp(20, 100) / 100;
   _surfaceBlur = blur.clamp(0, 30).toDouble();
 }
 
@@ -173,8 +189,9 @@ class SectionLabel extends StatelessWidget {
   );
 }
 
-/// [color] at the user's surface opacity over a blur of whatever lies
-/// behind, so the feed or the image shows through. Fully opaque surfaces
+/// [color] at the user's surface opacity (or [opacity], 0-1, when given)
+/// over a blur of whatever lies behind, so the feed or the image shows
+/// through. Fully opaque surfaces
 /// skip the blur, which would be invisible and still cost a pass. While
 /// [active] is false the surface is transparent and blurs nothing; the
 /// widget tree stays the same so toggling keeps the child's state.
@@ -185,15 +202,17 @@ class FrostedSurface extends StatelessWidget {
     required this.child,
     this.borderRadius = BorderRadius.zero,
     this.active = true,
+    this.opacity,
   });
   final Color color;
   final Widget child;
   final BorderRadius borderRadius;
   final bool active;
+  final double? opacity;
 
   @override
   Widget build(BuildContext context) {
-    final opacity = surfaceOpacity;
+    final opacity = this.opacity ?? surfaceOpacity;
     final blur = surfaceBlur;
     final frosted = active && opacity < 1 && blur > 0;
     final rounded = borderRadius != BorderRadius.zero;

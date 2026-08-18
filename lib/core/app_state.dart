@@ -711,6 +711,21 @@ class AppState extends ChangeNotifier {
   /// A search across several websites at once; see [MultiSiteSearch].
   MultiSiteSearch multiSiteSearch() => MultiSiteSearch._(this);
 
+  /// Saves which websites are switched off in Search all sites, without
+  /// reloading the feed.
+  Future<void> setMultiSearchOff(Iterable<Board> boards) =>
+      _enqueueSettingsUpdate(() async {
+        final next = _settings.copyWith(multiSearchOff: boards.toList());
+        if (next == _settings) return;
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+        notifyListeners();
+      });
+
   /// Turns incognito on or off without reloading the feed.
   Future<void> setIncognito(bool enabled) => _enqueueSettingsUpdate(() async {
     final next = _settings.copyWith(incognito: enabled);
@@ -1233,6 +1248,8 @@ class AppState extends ChangeNotifier {
             boardOrder: _settings.boardOrder,
             hiddenBoards: _settings.hiddenBoards,
             savedSearchMarks: _settings.savedSearchMarks,
+            aiNoticeShown: _settings.aiNoticeShown,
+            multiSearchOff: _settings.multiSearchOff,
           )
           .normalized();
       await _store.saveSettings(normalized);
@@ -1569,18 +1586,34 @@ class AppState extends ChangeNotifier {
       ? _settings.selectedRatings.single
       : null;
 
-  /// Tells the user that [board] ignores the no-AI setting, when it is chosen
-  /// or restored at startup.
+  /// Tells the user, once, that the AI-only [board] ignores the no-AI
+  /// setting, when it is chosen or restored at startup.
   void _noteIgnoredAiSetting(Board? board) {
-    if (board?.isAiBoard == true && _settings.excludeAi) {
-      _notice =
-          '${board!.label} only hosts AI-generated posts, so the "No AI-generated posts" setting is ignored here.';
+    if (board == null ||
+        !board.isAiBoard ||
+        !_settings.excludeAi ||
+        _settings.excludesAiOn(board) ||
+        _settings.aiNoticeShown) {
+      return;
     }
+    _notice =
+        '${board.label} only hosts AI-generated posts, so the "No AI-generated posts" setting is ignored here.';
+    unawaited(
+      _enqueueSettingsUpdate(() async {
+        if (_settings.aiNoticeShown) return;
+        final next = _settings.copyWith(aiNoticeShown: true);
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+      }),
+    );
   }
 
-  /// Whether the no-AI setting applies on [board]; AI-only boards ignore it.
-  bool _excludesAiOn(Board? board) =>
-      _settings.excludeAi && board?.isAiBoard != true;
+  /// Whether the no-AI setting applies on [board]; exempt boards ignore it.
+  bool _excludesAiOn(Board? board) => _settings.excludesAiOn(board);
 
   bool _isOrdinaryTag(String value) {
     final tag = value.startsWith('-') ? value.substring(1) : value;

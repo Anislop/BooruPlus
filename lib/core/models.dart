@@ -759,6 +759,13 @@ class AppSettings {
     this.classicDrawer = false,
     this.surfaceOpacity = 80,
     this.surfaceBlur = 16,
+    this.panelOpacity = 80,
+    this.detailsOpacity = 80,
+    this.hidePanelOnScroll = true,
+    this.reduceMotion = false,
+    this.aiExemptBoards = const [Board.aibooru],
+    this.aiNoticeShown = false,
+    this.multiSearchOff = const [],
     this.filenameTemplate = defaultFilenameTemplate,
     this.autoFavoriteOnDownload = false,
     this.boardHiddenUploaders = const {},
@@ -839,13 +846,44 @@ class AppSettings {
   /// entries above a short website list.
   final bool classicDrawer;
 
-  /// Opacity (percent) of the frosted surfaces drawn over the feed or the
-  /// viewer: the one-handed bottom panel, the drawer's website list, and the
-  /// viewer's details panel. One value for the whole app.
+  /// Opacity (percent) of the drawer's frosted website list. The one-handed
+  /// panel and the viewer's details have their own [panelOpacity] and
+  /// [detailsOpacity].
   final int surfaceOpacity;
 
-  /// Blur strength behind those frosted surfaces; 0 turns blurring off.
+  /// Blur strength behind the frosted surfaces; 0 turns blurring off.
   final int surfaceBlur;
+
+  /// Opacity (percent) of the one-handed bottom panel.
+  final int panelOpacity;
+
+  /// Opacity (percent) of the viewer's details panel.
+  final int detailsOpacity;
+
+  /// In [oneHanded] mode, the bottom panel slides away while the feed is
+  /// scrolled down and returns when it is scrolled up.
+  final bool hidePanelOnScroll;
+
+  /// Skips the splash animation and turns off the blur behind frosted
+  /// surfaces, for slower phones.
+  final bool reduceMotion;
+
+  /// Websites where [excludeAi] does not apply, in enum order. AIBooru,
+  /// which only hosts AI-generated posts, is listed by default.
+  final List<Board> aiExemptBoards;
+
+  /// Whether the notice that an AI-only website ignores [excludeAi] was
+  /// already shown, so it appears once rather than on every start.
+  final bool aiNoticeShown;
+
+  /// Websites switched off in Search all sites, in enum order, kept so the
+  /// next search starts with the same choice. Websites not listed (such as
+  /// one signed in to later) start switched on.
+  final List<Board> multiSearchOff;
+
+  /// Whether [excludeAi] applies on [board].
+  bool excludesAiOn(Board? board) =>
+      excludeAi && (board == null || !aiExemptBoards.contains(board));
 
   /// Download file name pattern; see [mediaFileName].
   final String filenameTemplate;
@@ -921,6 +959,17 @@ class AppSettings {
     classicDrawer: classicDrawer,
     surfaceOpacity: surfaceOpacity.clamp(20, 100),
     surfaceBlur: surfaceBlur.clamp(0, 30),
+    panelOpacity: panelOpacity.clamp(20, 100),
+    detailsOpacity: detailsOpacity.clamp(20, 100),
+    hidePanelOnScroll: hidePanelOnScroll,
+    reduceMotion: reduceMotion,
+    aiExemptBoards: List.unmodifiable(
+      Board.values.where(aiExemptBoards.toSet().contains),
+    ),
+    aiNoticeShown: aiNoticeShown,
+    multiSearchOff: List.unmodifiable(
+      Board.values.where(multiSearchOff.toSet().contains),
+    ),
     filenameTemplate: filenameTemplate.trim().isEmpty
         ? defaultFilenameTemplate
         : filenameTemplate.trim().length > 120
@@ -967,6 +1016,13 @@ class AppSettings {
     bool? classicDrawer,
     int? surfaceOpacity,
     int? surfaceBlur,
+    int? panelOpacity,
+    int? detailsOpacity,
+    bool? hidePanelOnScroll,
+    bool? reduceMotion,
+    List<Board>? aiExemptBoards,
+    bool? aiNoticeShown,
+    List<Board>? multiSearchOff,
     String? filenameTemplate,
     bool? autoFavoriteOnDownload,
     Map<Board, List<String>>? boardHiddenUploaders,
@@ -1009,6 +1065,13 @@ class AppSettings {
     classicDrawer: classicDrawer ?? this.classicDrawer,
     surfaceOpacity: surfaceOpacity ?? this.surfaceOpacity,
     surfaceBlur: surfaceBlur ?? this.surfaceBlur,
+    panelOpacity: panelOpacity ?? this.panelOpacity,
+    detailsOpacity: detailsOpacity ?? this.detailsOpacity,
+    hidePanelOnScroll: hidePanelOnScroll ?? this.hidePanelOnScroll,
+    reduceMotion: reduceMotion ?? this.reduceMotion,
+    aiExemptBoards: aiExemptBoards ?? this.aiExemptBoards,
+    aiNoticeShown: aiNoticeShown ?? this.aiNoticeShown,
+    multiSearchOff: multiSearchOff ?? this.multiSearchOff,
     filenameTemplate: filenameTemplate ?? this.filenameTemplate,
     autoFavoriteOnDownload:
         autoFavoriteOnDownload ?? this.autoFavoriteOnDownload,
@@ -1058,6 +1121,13 @@ class AppSettings {
     'classicDrawer': classicDrawer,
     'surfaceOpacity': surfaceOpacity,
     'surfaceBlur': surfaceBlur,
+    'panelOpacity': panelOpacity,
+    'detailsOpacity': detailsOpacity,
+    'hidePanelOnScroll': hidePanelOnScroll,
+    'reduceMotion': reduceMotion,
+    'aiExemptBoards': aiExemptBoards.map((board) => board.name).toList(),
+    'aiNoticeShown': aiNoticeShown,
+    'multiSearchOff': multiSearchOff.map((board) => board.name).toList(),
     'filenameTemplate': filenameTemplate,
     'autoFavoriteOnDownload': autoFavoriteOnDownload,
     'boardHiddenUploaders': {
@@ -1119,6 +1189,16 @@ class AppSettings {
     classicDrawer: _asBool(map['classicDrawer'], false),
     surfaceOpacity: _asInt(map['surfaceOpacity'], 80),
     surfaceBlur: _asInt(map['surfaceBlur'], 16),
+    // Settings saved before the separate opacities used the shared one.
+    panelOpacity: _asInt(map['panelOpacity'] ?? map['surfaceOpacity'], 80),
+    detailsOpacity: _asInt(map['detailsOpacity'] ?? map['surfaceOpacity'], 80),
+    hidePanelOnScroll: _asBool(map['hidePanelOnScroll'], true),
+    reduceMotion: _asBool(map['reduceMotion'], false),
+    aiExemptBoards: map['aiExemptBoards'] is List
+        ? _boardsFromMap(map['aiExemptBoards'])
+        : const [Board.aibooru],
+    aiNoticeShown: _asBool(map['aiNoticeShown'], false),
+    multiSearchOff: _boardsFromMap(map['multiSearchOff']),
     filenameTemplate: map['filenameTemplate'] is String
         ? map['filenameTemplate'] as String
         : defaultFilenameTemplate,
@@ -1302,6 +1382,13 @@ class AppSettings {
         other.classicDrawer != classicDrawer ||
         other.surfaceOpacity != surfaceOpacity ||
         other.surfaceBlur != surfaceBlur ||
+        other.panelOpacity != panelOpacity ||
+        other.detailsOpacity != detailsOpacity ||
+        other.hidePanelOnScroll != hidePanelOnScroll ||
+        other.reduceMotion != reduceMotion ||
+        !_sameBoards(other.aiExemptBoards, aiExemptBoards) ||
+        other.aiNoticeShown != aiNoticeShown ||
+        !_sameBoards(other.multiSearchOff, multiSearchOff) ||
         other.filenameTemplate != filenameTemplate ||
         other.autoFavoriteOnDownload != autoFavoriteOnDownload ||
         !_sameBoardTags(other.boardHiddenUploaders, boardHiddenUploaders) ||
@@ -1399,6 +1486,13 @@ class AppSettings {
     classicDrawer,
     surfaceOpacity,
     surfaceBlur,
+    panelOpacity,
+    detailsOpacity,
+    hidePanelOnScroll,
+    reduceMotion,
+    Object.hashAll(aiExemptBoards),
+    aiNoticeShown,
+    Object.hashAll(multiSearchOff),
     filenameTemplate,
     autoFavoriteOnDownload,
     _countsHash(savedSearchMarks),

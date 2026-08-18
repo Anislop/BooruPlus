@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
@@ -56,6 +57,15 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The one-handed panel's height; the feed runs underneath it and ends
   /// with this much space so its last row can scroll clear of the panel.
   double _panelHeight = 0;
+
+  /// Whether the one-handed panel has slid away while scrolling down; see
+  /// [AppSettings.hidePanelOnScroll].
+  final _panelHidden = ValueNotifier(false);
+  double _lastScrollOffset = 0;
+
+  /// Distance scrolled in the current direction, so small jitters do not
+  /// toggle the panel.
+  double _scrollTravel = 0;
   // Feed multi-select: identities of the selected posts, with the posts.
   bool _selecting = false;
   final Map<String, SavedPost> _selected = {};
@@ -66,6 +76,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _scroll.addListener(() {
       _showScrollTop.value = _scroll.offset > 600;
+      _updatePanelOnScroll();
       if (_scroll.position.extentAfter < 700 && widget.state.error == null) {
         widget.state.loadMore();
       }
@@ -87,6 +98,7 @@ class _HomeScreenState extends State<HomeScreen> {
     widget.state.removeListener(_showNotice);
     _scroll.dispose();
     _showScrollTop.dispose();
+    _panelHidden.dispose();
     super.dispose();
   }
 
@@ -111,6 +123,42 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(_searchHistory.clear);
       await state.chooseBoard(board, tags: shortcut.tags);
     }
+  }
+
+  /// Slides the one-handed panel away as the user scrolls down and brings
+  /// it back as they scroll up or reach the top. Programmatic jumps (such
+  /// as restoring a feed) leave it as it is.
+  void _updatePanelOnScroll() {
+    final offset = _scroll.offset;
+    final delta = offset - _lastScrollOffset;
+    _lastScrollOffset = offset;
+    if (offset <= 0) {
+      _scrollTravel = 0;
+      _panelHidden.value = false;
+      return;
+    }
+    final direction = _scroll.position.userScrollDirection;
+    if (direction == ScrollDirection.idle) return;
+    _scrollTravel = (_scrollTravel >= 0) == (delta >= 0)
+        ? _scrollTravel + delta
+        : delta;
+    if (direction == ScrollDirection.reverse &&
+        _scrollTravel > 24 &&
+        offset > _panelHeight &&
+        _canHidePanel()) {
+      _panelHidden.value = true;
+    } else if (direction == ScrollDirection.forward && _scrollTravel < -24) {
+      _panelHidden.value = false;
+    }
+  }
+
+  /// The panel stays up while selecting or typing in its search field.
+  bool _canHidePanel() {
+    final settings = widget.state.settings;
+    return settings.oneHanded &&
+        settings.hidePanelOnScroll &&
+        !_selecting &&
+        MediaQuery.viewInsetsOf(context).bottom == 0;
   }
 
   void _scrollToTop() {
@@ -326,6 +374,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return FrostedSurface(
       key: const ValueKey('one_handed_panel'),
       color: appBarSurface(board),
+      opacity: panelSurfaceOpacity,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           0,
@@ -380,10 +429,21 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// One-handed mode's jump-to-top button on the preferred hand's side,
   /// shown once the feed is scrolled.
-  Widget _scrollTopButton() => Positioned(
-    bottom: 16 + _panelHeight,
-    left: widget.state.settings.handedness == Handedness.left ? 16 : null,
-    right: widget.state.settings.handedness == Handedness.left ? null : 16,
+  /// Follows the panel down when it slides away.
+  Widget _scrollTopButton() => ValueListenableBuilder<bool>(
+    valueListenable: _panelHidden,
+    builder: (context, hidden, child) => AnimatedPositioned(
+      duration: _panelSlideDuration,
+      curve: Curves.easeOutCubic,
+      bottom:
+          16 +
+          (_panelIsHidden(hidden)
+              ? MediaQuery.paddingOf(context).bottom
+              : _panelHeight),
+      left: widget.state.settings.handedness == Handedness.left ? 16 : null,
+      right: widget.state.settings.handedness == Handedness.left ? null : 16,
+      child: child!,
+    ),
     child: ValueListenableBuilder<bool>(
       valueListenable: _showScrollTop,
       builder: (context, visible, _) => AnimatedScale(
@@ -399,6 +459,18 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     ),
   );
+
+  Duration get _panelSlideDuration => widget.state.settings.reduceMotion
+      ? Duration.zero
+      : const Duration(milliseconds: 220);
+
+  /// Whether the panel is slid away now; it always returns once hiding no
+  /// longer applies (selection started, setting turned off).
+  bool _panelIsHidden(bool hidden) =>
+      hidden &&
+      !_selecting &&
+      widget.state.settings.oneHanded &&
+      widget.state.settings.hidePanelOnScroll;
 
   void _showNotice() {
     if (!mounted) return;
@@ -893,7 +965,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
+                    padding: const EdgeInsets.fromLTRB(20, 16, 16, 0),
                     child: Row(
                       children: [
                         Image(
@@ -974,11 +1046,15 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-          const Divider(height: 1),
           Expanded(
+            // Rounded like the drawer's bottom corner: the blur is clipped
+            // by this surface alone, so a square corner would show past it.
             child: FrostedSurface(
               key: const ValueKey('drawer_websites'),
               color: canvas,
+              borderRadius: const BorderRadius.only(
+                bottomRight: Radius.circular(16),
+              ),
               child: SafeArea(
                 top: false,
                 child: Column(
@@ -1493,13 +1569,24 @@ class _HomeScreenState extends State<HomeScreen> {
                           left: 0,
                           right: 0,
                           bottom: 0,
-                          child: SizeReporter(
-                            onHeight: (height) {
-                              if (mounted && height != _panelHeight) {
-                                setState(() => _panelHeight = height);
-                              }
-                            },
-                            child: _bottomPanel(board, search, filters),
+                          child: ValueListenableBuilder<bool>(
+                            valueListenable: _panelHidden,
+                            builder: (context, hidden, child) => AnimatedSlide(
+                              offset: _panelIsHidden(hidden)
+                                  ? const Offset(0, 1)
+                                  : Offset.zero,
+                              duration: _panelSlideDuration,
+                              curve: Curves.easeOutCubic,
+                              child: child,
+                            ),
+                            child: SizeReporter(
+                              onHeight: (height) {
+                                if (mounted && height != _panelHeight) {
+                                  setState(() => _panelHeight = height);
+                                }
+                              },
+                              child: _bottomPanel(board, search, filters),
+                            ),
                           ),
                         ),
                       ],

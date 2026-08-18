@@ -964,10 +964,18 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                       }
                     },
                     // Frosted only while the opened details lift these
-                    // controls over the media.
+                    // controls over the media. They then join the details
+                    // into one sheet, taking over its rounded top so no
+                    // unblurred media shows in the corners between them.
                     child: FrostedSurface(
-                      color: canvas,
+                      color: panel,
                       active: _details,
+                      opacity: detailsSurfaceOpacity,
+                      borderRadius: _details
+                          ? const BorderRadius.vertical(
+                              top: Radius.circular(20),
+                            )
+                          : BorderRadius.zero,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1106,9 +1114,10 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                   FrostedSurface(
                     key: const ValueKey('post_details_panel'),
                     color: panel,
-                    borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(20),
-                    ),
+                    opacity: detailsSurfaceOpacity,
+                    borderRadius: _details
+                        ? BorderRadius.zero
+                        : const BorderRadius.vertical(top: Radius.circular(20)),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,

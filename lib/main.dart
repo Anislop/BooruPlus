@@ -178,13 +178,20 @@ class _BooruPlusAppState extends State<BooruPlusApp>
     builder: (context, _) {
       final settings = widget.state.settings;
       setPalette(settings.theme);
+      final reduceMotion = settings.reduceMotion;
       setSurfaceGlass(
         opacity: settings.surfaceOpacity,
-        blur: settings.surfaceBlur,
+        panelOpacity: settings.panelOpacity,
+        detailsOpacity: settings.detailsOpacity,
+        blur: reduceMotion ? 0 : settings.surfaceBlur,
       );
+      // Reduce motion skips the splash animation once settings are loaded.
+      // Remembered, so turning it off later does not bring the splash back.
+      final splashComplete = _splashComplete =
+          _splashComplete || (widget.state.initialized && reduceMotion);
       final theme = buildAppTheme(board: widget.state.board);
-      final locked = _locked && _splashComplete;
-      final hidden = locked || (_covered && _splashComplete);
+      final locked = _locked && splashComplete;
+      final hidden = locked || (_covered && splashComplete);
       if (locked && !_prompted) {
         _prompted = true;
         WidgetsBinding.instance.addPostFrameCallback((_) => _unlock());
@@ -206,7 +213,9 @@ class _BooruPlusAppState extends State<BooruPlusApp>
         ),
         // The first screen grows into place as the splash logo lifts away.
         home: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 520),
+          duration: reduceMotion
+              ? Duration.zero
+              : const Duration(milliseconds: 520),
           switchInCurve: Curves.easeOutCubic,
           switchOutCurve: Curves.easeInCubic,
           transitionBuilder: (child, animation) => FadeTransition(
@@ -216,7 +225,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
               child: child,
             ),
           ),
-          child: !_splashComplete || !widget.state.initialized
+          child: !splashComplete || !widget.state.initialized
               ? SplashScreen(onFinished: _finishSplash)
               : widget.state.board == null
               ? OnboardingScreen(state: widget.state)
