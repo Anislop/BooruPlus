@@ -40,9 +40,11 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     final visible = widget.state.settings.visibleBoards;
     widget.state.searchableBoards(among: visible).then((boards) {
       if (!mounted) return;
+      // Starts with the websites switched off last time still off.
+      final off = widget.state.settings.multiSearchOff;
       setState(() {
         _available = boards;
-        _chosen = boards.toSet();
+        _chosen = boards.where((board) => !off.contains(board)).toSet();
         _ready = true;
       });
       if (_tags.isNotEmpty) _run();
@@ -64,7 +66,7 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
 
   /// Switching a website applies to the current results at once: its
   /// posts are hidden or shown, and loading more asks only the websites
-  /// switched on.
+  /// switched on. The choice is saved for the next search.
   void _toggle(Board board, bool selected) {
     setState(() {
       if (selected) {
@@ -73,6 +75,14 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
         _chosen.remove(board);
       }
     });
+    // Websites not offered now (signed out, hidden) keep their saved state.
+    final off = {
+      ...widget.state.settings.multiSearchOff.where(
+        (other) => !_available.contains(other),
+      ),
+      ..._available.where((other) => !_chosen.contains(other)),
+    };
+    widget.state.setMultiSearchOff(off);
     if (_search.tags.isNotEmpty) {
       _search.setEnabled(_available.where(_chosen.contains));
     }

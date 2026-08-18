@@ -6,6 +6,7 @@ import '../core/services.dart';
 import 'blocked_tags.dart';
 import 'onboarding.dart';
 import 'saved_posts.dart';
+import 'site_catalog.dart';
 import 'theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -288,6 +289,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } finally {
       if (mounted) setState(() => _backingUp = false);
     }
+  }
+
+  /// Picks the websites where the no-AI setting does not apply.
+  Future<void> _chooseAiExemptions() async {
+    final chosen = {..._settings.aiExemptBoards};
+    final result = await showDialog<Set<Board>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Show AI posts on'),
+          contentPadding: const EdgeInsets.only(top: 12),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final board in _settings.boardOrder)
+                  CheckboxListTile(
+                    value: chosen.contains(board),
+                    secondary: SiteLogo(board, size: 28),
+                    title: Text(appearanceFor(board).name),
+                    subtitle: board.isAiBoard
+                        ? const Text('Only hosts AI-generated posts')
+                        : null,
+                    onChanged: (value) => setDialogState(() {
+                      if (value == true) {
+                        chosen.add(board);
+                      } else {
+                        chosen.remove(board);
+                      }
+                    }),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, chosen),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(
+      () => _settings = _settings.copyWith(aiExemptBoards: result.toList()),
+    );
   }
 
   Future<void> _importBackup() async {
@@ -851,6 +904,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      if (_settings.excludeAi)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Material(
+                            color: panel,
+                            borderRadius: BorderRadius.circular(16),
+                            clipBehavior: Clip.antiAlias,
+                            child: ListTile(
+                              key: const ValueKey('ai_exempt_boards'),
+                              enabled: !_busy,
+                              leading: const Icon(Icons.rule_rounded),
+                              title: const Text('Websites that show AI posts'),
+                              subtitle: Text(
+                                _settings.aiExemptBoards.isEmpty
+                                    ? 'None. The setting applies everywhere.'
+                                    : _settings.aiExemptBoards
+                                          .map(
+                                            (board) =>
+                                                appearanceFor(board).name,
+                                          )
+                                          .join(', '),
+                              ),
+                              trailing: const Icon(Icons.chevron_right_rounded),
+                              onTap: _chooseAiExemptions,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
+                            ),
+                          ),
+                        ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
                         child: Material(
@@ -913,28 +996,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ),
                         ),
-                      // One opacity and one blur for every frosted surface:
-                      // the one-handed panel, the drawer's websites, and the
-                      // viewer's details.
+                      if (_settings.oneHanded)
+                        _switchCard(
+                          value: _settings.hidePanelOnScroll,
+                          onChanged: (value) => setState(
+                            () => _settings = _settings.copyWith(
+                              hidePanelOnScroll: value,
+                            ),
+                          ),
+                          icon: Icons.unfold_less_rounded,
+                          title: 'Hide panel while scrolling',
+                          subtitle: 'Slide the bottom panel away while scrolling down and bring it back when scrolling up.',
+                        ),
+                      // Each frosted surface has its own opacity; the blur
+                      // is shared.
+                      if (_settings.oneHanded)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: _slider(
+                            'One-handed panel opacity',
+                            'How solid the bottom panel is over the feed. Lower values show more of the feed behind it.',
+                            _settings.panelOpacity,
+                            20,
+                            100,
+                            16,
+                            (v) => setState(
+                              () => _settings = _settings.copyWith(
+                                panelOpacity: v,
+                              ),
+                            ),
+                          ),
+                        ),
                       Padding(
                         padding: const EdgeInsets.only(top: 16),
                         child: _slider(
-                          'Surface opacity',
-                          'How solid the one-handed panel, side menu websites, and post details are over the feed or image. Lower values show more of what is behind.',
-                          _settings.surfaceOpacity,
+                          'Post details opacity',
+                          'How solid the viewer\'s tags and details are over the image. Lower values show more of the image behind them.',
+                          _settings.detailsOpacity,
                           20,
                           100,
                           16,
                           (v) => setState(
                             () => _settings = _settings.copyWith(
-                              surfaceOpacity: v,
+                              detailsOpacity: v,
                             ),
                           ),
                         ),
                       ),
                       _slider(
+                        'Side menu opacity',
+                        'How solid the side menu\'s website list is over the feed.',
+                        _settings.surfaceOpacity,
+                        20,
+                        100,
+                        16,
+                        (v) => setState(
+                          () =>
+                              _settings = _settings.copyWith(surfaceOpacity: v),
+                        ),
+                      ),
+                      _slider(
                         'Surface blur',
-                        'How much the content behind those surfaces is blurred. 0 turns blurring off.',
+                        _settings.reduceMotion
+                            ? 'Off while Reduce motion is on.'
+                            : 'How much the content behind those surfaces is blurred. 0 turns blurring off.',
                         _settings.surfaceBlur,
                         0,
                         30,
@@ -942,6 +1067,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         (v) => setState(
                           () => _settings = _settings.copyWith(surfaceBlur: v),
                         ),
+                      ),
+                      _switchCard(
+                        value: _settings.reduceMotion,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            reduceMotion: value,
+                          ),
+                        ),
+                        icon: Icons.motion_photos_off_outlined,
+                        title: 'Reduce motion',
+                        subtitle: 'Skip the opening animation and turn off the blur behind panels. Helps on slower phones.',
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
