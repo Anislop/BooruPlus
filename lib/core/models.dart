@@ -457,6 +457,13 @@ class MediaPost {
   /// The provider's post ID as shown in links, file names, and labels.
   String get displayId => providerId ?? '$id';
 
+  /// The file format from [extension], such as JPG or MP4; empty when the
+  /// URL names none.
+  String get fileType => switch (extension) {
+    'jpeg' => 'JPG',
+    _ => extension.toUpperCase(),
+  };
+
   /// Resolution tier of the original file (its short side).
   int get videoQuality => _tier(width, height);
 
