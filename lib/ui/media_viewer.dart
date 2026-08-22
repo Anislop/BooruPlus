@@ -881,7 +881,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     final board = _currentBoard;
     final browserUrl = _postBrowserUrl(board, post);
     final favorited = widget.state.isFavorite(post, board: board);
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: post.isVideo ? Colors.black : canvas,
       appBar: AppBar(
         backgroundColor: appBarSurface(board),
@@ -1173,6 +1173,14 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         ),
       ),
     );
+    // Back slides open details down before it leaves the viewer.
+    return PopScope<void>(
+      canPop: !_details,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _details) setState(() => _details = false);
+      },
+      child: page,
+    );
   }
 
   /// The bar under the media: rating, size, score, and favorite. Tapping
@@ -1240,7 +1248,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                           style: TextStyle(fontWeight: FontWeight.w600),
                         ),
                         Text(
-                          '${post.width} × ${post.height} · ${post.isVideo ? 'Video' : 'Image'} · ${post.tags.length} tag${post.tags.length == 1 ? '' : 's'}',
+                          '${post.width} × ${post.height} · ${post.fileType.isEmpty ? (post.isVideo ? 'Video' : 'Image') : '${post.fileType} ${post.isVideo ? 'video' : 'image'}'} · ${post.tags.length} tag${post.tags.length == 1 ? '' : 's'}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(color: ink(.54), fontSize: 11),

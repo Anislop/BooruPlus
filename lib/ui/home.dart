@@ -45,7 +45,7 @@ class _HistoryEntry {
   final double offset;
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const _restorableEntries = 5;
   final _scroll = ScrollController();
   final _showScrollTop = ValueNotifier(false);
@@ -53,6 +53,11 @@ class _HomeScreenState extends State<HomeScreen> {
   final _device = DeviceService();
   StreamSubscription<AppShortcut>? _shortcutSubscription;
   bool _drawerOpen = false;
+
+  /// Whether the keyboard is up, tracked through metrics changes rather
+  /// than read in build, which would rebuild the feed on every frame of
+  /// the keyboard animation.
+  bool _keyboardOpen = false;
 
   /// The one-handed panel's height; the feed runs underneath it and ends
   /// with this much space so its last row can scroll clear of the panel.
@@ -74,6 +79,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scroll.addListener(() {
       _showScrollTop.value = _scroll.offset > 600;
       _updatePanelOnScroll();
@@ -94,12 +100,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _shortcutSubscription?.cancel();
     widget.state.removeListener(_showNotice);
     _scroll.dispose();
     _showScrollTop.dispose();
     _panelHidden.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (!mounted) return;
+    final open = View.of(context).viewInsets.bottom > 0;
+    if (open != _keyboardOpen) setState(() => _keyboardOpen = open);
   }
 
   /// Opens favorites or runs the saved search a launcher shortcut names.
@@ -158,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return settings.oneHanded &&
         settings.hidePanelOnScroll &&
         !_selecting &&
-        MediaQuery.viewInsetsOf(context).bottom == 0;
+        !_keyboardOpen;
   }
 
   void _scrollToTop() {
@@ -387,34 +401,40 @@ class _HomeScreenState extends State<HomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Hidden rather than removed while selecting, so unfinished
-            // search text survives.
-            Visibility(
-              visible: !_selecting,
-              maintainState: true,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Sort, date, and ratings sit on the holding hand's side.
-                  Align(
-                    alignment: left
-                        ? Alignment.centerLeft
-                        : Alignment.centerRight,
-                    child: filters,
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                    // Reversed so a long tag list or the suggestions scroll
-                    // while the text being typed stays in view.
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 260),
-                      child: SingleChildScrollView(
-                        reverse: true,
-                        child: search,
+            // search text survives. Flexible, so with the keyboard open the
+            // search area (and its suggestions) shrinks to the space left
+            // instead of pushing the panel past the top of the feed.
+            Flexible(
+              child: Visibility(
+                visible: !_selecting,
+                maintainState: true,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Sort, date, and ratings sit on the holding hand's side.
+                    Align(
+                      alignment: left
+                          ? Alignment.centerLeft
+                          : Alignment.centerRight,
+                      child: filters,
+                    ),
+                    Flexible(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                        // Reversed so a long tag list or the suggestions scroll
+                        // while the text being typed stays in view.
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 260),
+                          child: SingleChildScrollView(
+                            reverse: true,
+                            child: search,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
             Padding(
@@ -965,7 +985,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 16, 0),
+                    padding: const EdgeInsets.fromLTRB(20, 16, 24, 0),
                     child: Row(
                       children: [
                         Image(
@@ -974,8 +994,10 @@ class _HomeScreenState extends State<HomeScreen> {
                           fit: BoxFit.contain,
                         ),
                         const Spacer(),
+                        // Compact, so the two icons sit close together.
                         IconButton(
                           tooltip: 'Learn to search',
+                          visualDensity: VisualDensity.compact,
                           color: ink(.70),
                           icon: const Icon(Icons.help_outline_rounded),
                           onPressed: () => _openFromDrawer(
@@ -985,6 +1007,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         IconButton(
                           key: const ValueKey('drawer_settings'),
                           tooltip: 'Settings',
+                          visualDensity: VisualDensity.compact,
                           color: ink(.70),
                           icon: const Icon(Icons.settings_rounded),
                           onPressed: () => _openFromDrawer(
@@ -1328,10 +1351,21 @@ class _HomeScreenState extends State<HomeScreen> {
       onDate: _pickDate,
       onRatings: _chooseRatings,
     );
+    // With the keyboard up, back only closes it rather than leaving the
+    // search.
+    final keyboardOpen = _keyboardOpen;
     return PopScope<void>(
-      canPop: !_selecting && (_searchHistory.isEmpty || _drawerOpen),
+      canPop:
+          !_selecting &&
+          !keyboardOpen &&
+          (_searchHistory.isEmpty || _drawerOpen),
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop || _drawerOpen) return;
+        if (didPop) return;
+        if (keyboardOpen) {
+          FocusManager.instance.primaryFocus?.unfocus();
+          return;
+        }
+        if (_drawerOpen) return;
         if (_selecting) {
           if (_batchProgress == null) _endSelection();
         } else {
@@ -1340,6 +1374,10 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       child: Scaffold(
         onDrawerChanged: (open) {
+          // The drawer takes focus while open and hands it back when it
+          // closes, which would reopen the keyboard on the search field.
+          // Unfocusing also clears that remembered focus.
+          FocusManager.instance.primaryFocus?.unfocus();
           if (_drawerOpen != open && mounted) {
             setState(() => _drawerOpen = open);
           }
@@ -1565,27 +1603,30 @@ class _HomeScreenState extends State<HomeScreen> {
                       children: [
                         feed,
                         _scrollTopButton(),
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: ValueListenableBuilder<bool>(
-                            valueListenable: _panelHidden,
-                            builder: (context, hidden, child) => AnimatedSlide(
-                              offset: _panelIsHidden(hidden)
-                                  ? const Offset(0, 1)
-                                  : Offset.zero,
-                              duration: _panelSlideDuration,
-                              curve: Curves.easeOutCubic,
-                              child: child,
-                            ),
-                            child: SizeReporter(
-                              onHeight: (height) {
-                                if (mounted && height != _panelHeight) {
-                                  setState(() => _panelHeight = height);
-                                }
-                              },
-                              child: _bottomPanel(board, search, filters),
+                        // Filling the stack bounds the panel by the feed's
+                        // height, so its search area shrinks to fit.
+                        Positioned.fill(
+                          child: Align(
+                            alignment: Alignment.bottomCenter,
+                            child: ValueListenableBuilder<bool>(
+                              valueListenable: _panelHidden,
+                              builder: (context, hidden, child) =>
+                                  AnimatedSlide(
+                                    offset: _panelIsHidden(hidden)
+                                        ? const Offset(0, 1)
+                                        : Offset.zero,
+                                    duration: _panelSlideDuration,
+                                    curve: Curves.easeOutCubic,
+                                    child: child,
+                                  ),
+                              child: SizeReporter(
+                                onHeight: (height) {
+                                  if (mounted && height != _panelHeight) {
+                                    setState(() => _panelHeight = height);
+                                  }
+                                },
+                                child: _bottomPanel(board, search, filters),
+                              ),
                             ),
                           ),
                         ),
@@ -2332,7 +2373,7 @@ Future<void> showQuickPostActions(
           board: board,
           isFavorite: isFavorite ?? state.isFavorite(post, board: board),
           blur: blur,
-          videoUrl: post.isVideo && !blur
+          videoUrl: post.isVideo
               ? _peekVideoUrl(post, state.settings.videoQuality)
               : null,
           controller: controller,
@@ -2383,8 +2424,8 @@ class _QuickActionDialog extends StatefulWidget {
   final ValueChanged<String?> onResult;
   final bool blur;
 
-  /// Stream to autoplay (muted, looping) for video posts; null shows only
-  /// the poster.
+  /// Stream to autoplay (muted, looping, no controls) for video posts,
+  /// once revealed when [blur] applies; null shows only the poster.
   final String? videoUrl;
   final QuickActionOverlayController? controller;
   final Rect? origin;
@@ -2426,8 +2467,14 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       onRelease: _releaseArmed,
       onCancel: _cancel,
     );
+    if (!widget.blur) _startVideoIfAny();
+  }
+
+  void _startVideoIfAny() {
     final videoUrl = widget.videoUrl;
-    if (videoUrl != null && videoUrl.isNotEmpty) _startVideo(videoUrl);
+    if (_video == null && videoUrl != null && videoUrl.isNotEmpty) {
+      _startVideo(videoUrl);
+    }
   }
 
   @override
@@ -2444,15 +2491,35 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   Future<void> _startVideo(String url) async {
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: widget.board == Board.gelbooru
-          ? const {
-              'Referer': 'https://gelbooru.com/',
-              'User-Agent': 'BooruPlus/1.0',
-            }
-          : const {},
+      httpHeaders: switch (widget.board) {
+        Board.gelbooru => const {
+          'Referer': 'https://gelbooru.com/',
+          'User-Agent': 'BooruPlus/1.0',
+        },
+        // Nozomi's media hosts answer 404 without the site as Referer.
+        Board.nozomi => const {
+          'Referer': 'https://nozomi.la/',
+          'User-Agent': 'BooruPlus/1.0',
+        },
+        _ => const {},
+      },
     );
     _video = video;
     bool stale() => !mounted || _closing || !identical(_video, video);
+    // The poster stays until frames are actually playing, so the switch
+    // never shows a black, still-buffering player.
+    void showWhenPlaying() {
+      final value = video.value;
+      if (stale()) {
+        video.removeListener(showWhenPlaying);
+        return;
+      }
+      if (value.isPlaying && !value.isBuffering && value.position > .zero) {
+        video.removeListener(showWhenPlaying);
+        setState(() => _videoReady = true);
+      }
+    }
+
     try {
       await video.initialize();
       if (stale()) return;
@@ -2460,8 +2527,8 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       // A hold is a quick peek; stay silent until the post is opened.
       await video.setVolume(0);
       if (stale()) return;
+      video.addListener(showWhenPlaying);
       await video.play();
-      if (!stale()) setState(() => _videoReady = true);
     } catch (_) {
       // The poster remains when the stream cannot start.
     }
@@ -2607,7 +2674,16 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
     final captionHeight = captionPainter.height;
     captionPainter.dispose();
     final buttonHeight = 30 + textScaler.scale(20);
-    final chrome = _inset * 2 + _gap * 2 + captionHeight + buttonHeight;
+    final details = _details();
+    final tags = post.tagDetails.take(3).toList();
+    final chipHeight = 10 + textScaler.scale(15);
+    final chrome =
+        _inset * 2 +
+        _gap * 2 +
+        captionHeight +
+        buttonHeight +
+        (details.isEmpty ? 0 : chipHeight + _gap) +
+        (tags.isEmpty ? 0 : chipHeight + _gap);
     final aspect = post.width > 0 && post.height > 0
         ? (post.width / post.height).clamp(1 / 3, 3.0).toDouble()
         : 1.0;
@@ -2706,8 +2782,10 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
                                         ),
                                       if (widget.blur && !_revealed)
                                         FilledButton.icon(
-                                          onPressed: () =>
-                                              setState(() => _revealed = true),
+                                          onPressed: () {
+                                            setState(() => _revealed = true);
+                                            _startVideoIfAny();
+                                          },
                                           icon: const Icon(Icons.visibility),
                                           label: const Text('Reveal media'),
                                         ),
@@ -2716,6 +2794,21 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
                                 ),
                               ),
                             ),
+                            if (details.isNotEmpty) ...[
+                              const SizedBox(height: _gap),
+                              _chipRow([
+                                for (final detail in details)
+                                  _chip(detail, Colors.white),
+                              ]),
+                            ],
+                            // The same tags the grid tile shows.
+                            if (tags.isNotEmpty) ...[
+                              const SizedBox(height: _gap),
+                              _chipRow([
+                                for (final tag in tags)
+                                  _chip(tag.name, _tagColor(tag.category)),
+                              ]),
+                            ],
                             const SizedBox(height: _gap),
                             Text(
                               caption,
@@ -2771,6 +2864,45 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
       ),
     );
   }
+
+  /// File type and, for images, resolution.
+  List<String> _details() {
+    final post = widget.post;
+    return [
+      if (post.fileType.isNotEmpty)
+        '${post.fileType} ${post.isVideo ? 'video' : 'image'}'
+      else
+        post.isVideo ? 'Video' : 'Image',
+      if (!post.isVideo && post.width > 0 && post.height > 0)
+        '${post.width} × ${post.height}',
+    ];
+  }
+
+  /// One line of chips; long ones shorten instead of wrapping, which keeps
+  /// the card's height estimate exact.
+  Widget _chipRow(List<Widget> chips) => Row(
+    children: [
+      for (var i = 0; i < chips.length; i++) ...[
+        if (i > 0) const SizedBox(width: 6),
+        Flexible(child: chips[i]),
+      ],
+    ],
+  );
+
+  Widget _chip(String text, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: Colors.black.withValues(alpha: .55),
+      borderRadius: BorderRadius.circular(6),
+      border: Border.all(color: color.withValues(alpha: .6)),
+    ),
+    child: Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(color: color, fontSize: 11, height: 1.2),
+    ),
+  );
 
   Widget _actionButton({
     required Key key,
