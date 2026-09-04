@@ -10,6 +10,7 @@ import 'package:booruplus/ui/site_catalog.dart';
 import 'package:booruplus/ui/tag_input.dart';
 import 'package:booruplus/ui/theme.dart';
 import 'package:booruplus/ui/settings.dart';
+import 'package:booruplus/ui/shorts.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1231,6 +1232,115 @@ void main() {
     final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     expect(scaffold.backgroundColor, Colors.black);
 
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('booruShorts shows videos with its rail and edits tags from '
+      'the gear', (tester) async {
+    final repo = FakeRepo([
+      [
+        for (var id = 1; id <= 3; id++)
+          {
+            'id': id,
+            'url': 'https://x/$id.mp4',
+            'previewUrl': '',
+            'tags': 'cat',
+            'rating': 'general',
+          },
+      ],
+    ]);
+    final store = MemoryStore();
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: ShortsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const ValueKey('shorts_pages')), findsOneWidget);
+    expect(find.byKey(const ValueKey('shorts_favorite')), findsOneWidget);
+    expect(find.byKey(const ValueKey('shorts_details')), findsOneWidget);
+    expect(find.byKey(const ValueKey('shorts_site')), findsOneWidget);
+    // Every request asks for video only.
+    expect(repo.queries, isNotEmpty);
+    expect(
+      repo.queries.every(
+        (tags) =>
+            tags.contains('video') ||
+            tags.contains('filetype:mp4,webm') ||
+            tags.contains('~type:mp4'),
+      ),
+      isTrue,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('shorts_favorite')));
+    await tester.pump();
+    expect(state.favoritePosts, hasLength(1));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_tags')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_tags_sheet')), findsOneWidget);
+    await tester.enterText(
+      find.descendant(
+        of: find.byKey(const ValueKey('shorts_tags_sheet')),
+        matching: find.byType(TextField),
+      ),
+      'dog',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('shorts_tags_done')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+    // The unfinished tag is kept, saved, and searched.
+    expect(store.settings.shortsTags, ['dog']);
+    expect(repo.queries.last, contains('dog'));
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('Settings switches a website off for booruShorts', (
+    tester,
+  ) async {
+    final store = MemoryStore();
+    final state = AppState(repository: FakeRepo(const [[]]), store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: SettingsScreen(state: state),
+      ),
+    );
+    final sites = find.byKey(const ValueKey('settings_shorts_sites'));
+    await tester.scrollUntilVisible(
+      sites,
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    final chips = find.descendant(of: sites, matching: find.byType(FilterChip));
+    // Only websites with video are offered.
+    expect(
+      chips,
+      findsNWidgets(Board.values.where((board) => board.hasShorts).length),
+    );
+    await tester.tap(chips.first);
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Save preferences'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save preferences'));
+    await tester.pumpAndSettle();
+    expect(store.settings.shortsOff, hasLength(1));
     await tester.pumpWidget(const SizedBox());
     state.dispose();
   });

@@ -1,0 +1,1785 @@
+import 'dart:math';
+import 'dart:ui';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
+
+import '../core/app_state.dart';
+import '../core/models.dart';
+import '../core/services.dart';
+import 'media_image.dart';
+import 'media_viewer.dart';
+import 'site_catalog.dart';
+import 'tag_input.dart';
+import 'theme.dart';
+
+/// booruShorts: a full-screen feed of videos from every usable website,
+/// swiped vertically. See docs/booru-shorts.md.
+class ShortsScreen extends StatefulWidget {
+  const ShortsScreen({super.key, required this.state});
+  final AppState state;
+
+  @override
+  State<ShortsScreen> createState() => _ShortsScreenState();
+}
+
+class _ShortsScreenState extends State<ShortsScreen>
+    with WidgetsBindingObserver {
+  late final ShortsFeed _feed = widget.state.shortsFeed();
+  final _pages = PageController();
+  final _screenAwake = ScreenAwakeService();
+  final _device = DeviceService();
+
+  // Players for the previous, current, and next video, by post identity.
+  final Map<String, _Clip> _clips = {};
+  final Set<String> _revealed = {};
+  List<Board> _available = const [];
+  bool _ready = false;
+  int _index = 0;
+  late bool _muted = widget.state.settings.shortsMuted;
+  bool _userPaused = false;
+  bool _resumed =
+      (WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed) ==
+      AppLifecycleState.resumed;
+  // Pushed screens (full details) pause playback while they are open.
+  int _suspended = 0;
+  bool _metered = false;
+  bool _downloading = false;
+  bool _sharing = false;
+  VideoPlayerController? _watched;
+  bool _advancing = false;
+
+  // Filters for this visit only: one tag, or one website.
+  String? _tagFilter;
+  Board? _onlyBoard;
+
+  AppSettings get _settings => widget.state.settings;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (_resumed) _screenAwake.setEnabled(true);
+    _feed.addListener(_syncClips);
+    if (_settings.dataSaver == DataSaverMode.mobileData) {
+      _device.isMeteredNetwork().then((metered) {
+        if (mounted) _metered = metered;
+      });
+    }
+    widget.state.shortsBoards().then((boards) {
+      if (!mounted) return;
+      setState(() {
+        _available = boards;
+        _ready = true;
+      });
+      _start();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _resumed = state == AppLifecycleState.resumed;
+    _screenAwake.setEnabled(_resumed);
+    _applyPlayback();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _screenAwake.setEnabled(false);
+    _watched?.removeListener(_watchEnd);
+    for (final clip in _clips.values) {
+      clip.dispose();
+    }
+    _clips.clear();
+    _feed.removeListener(_syncClips);
+    _feed.dispose();
+    _pages.dispose();
+    super.dispose();
+  }
+
+  /// Starts the feed over with the saved tags (or this visit's filter) on
+  /// the available websites (or the one chosen for this visit).
+  void _start() {
+    _disposeClips();
+    _index = 0;
+    _userPaused = false;
+    if (_pages.hasClients) _pages.jumpToPage(0);
+    final filter = _tagFilter;
+    final only = _onlyBoard;
+    _feed.start(
+      tags: filter != null ? [filter] : _settings.shortsTags,
+      boards: only != null ? [only] : _available,
+    );
+  }
+
+  void _disposeClips() {
+    _watched?.removeListener(_watchEnd);
+    _watched = null;
+    for (final clip in _clips.values) {
+      clip.dispose();
+    }
+    _clips.clear();
+  }
+
+  /// The highest rendition tier Shorts streams: the viewer's quality
+  /// setting capped at 720p, and at 480p while the data saver applies.
+  int get _maxQuality {
+    final chosen = _settings.videoQuality;
+    var cap = chosen <= 0 ? 720 : min(chosen, 720);
+    final saving = switch (_settings.dataSaver) {
+      DataSaverMode.off => false,
+      DataSaverMode.mobileData => _metered,
+      DataSaverMode.always => true,
+    };
+    if (saving) cap = min(cap, 480);
+    return cap;
+  }
+
+  String? get _currentKey {
+    final posts = _feed.posts;
+    return _index < posts.length ? posts[_index].identity : null;
+  }
+
+  /// Keeps players for the previous, current, and next videos only.
+  void _syncClips() {
+    if (!mounted) return;
+    final posts = _feed.posts;
+    final wanted = <String, SavedPost>{};
+    for (final i in [_index, _index + 1, _index - 1]) {
+      if (i < 0 || i >= posts.length) continue;
+      wanted[posts[i].identity] = posts[i];
+    }
+    for (final key in _clips.keys.toList()) {
+      if (wanted.containsKey(key)) continue;
+      final clip = _clips.remove(key)!;
+      if (identical(clip.controller, _watched)) {
+        _watched?.removeListener(_watchEnd);
+        _watched = null;
+      }
+      clip.dispose();
+    }
+    for (final entry in wanted.entries) {
+      _clips.putIfAbsent(entry.key, () {
+        final clip = _Clip(
+          widget.state.displayReady(entry.value),
+          maxQuality: _maxQuality,
+          onChanged: _clipChanged,
+        );
+        clip.start();
+        return clip;
+      });
+    }
+    _applyPlayback();
+  }
+
+  void _clipChanged() {
+    if (!mounted) return;
+    setState(() {});
+    _applyPlayback();
+  }
+
+  bool _shouldBlur(MediaPost post) {
+    final rating = post.rating.trim().toLowerCase();
+    if (rating.contains('explicit') || rating == 'e') {
+      return _settings.blurExplicit;
+    }
+    return (rating.contains('questionable') || rating == 'q') &&
+        _settings.blurQuestionable;
+  }
+
+  bool _hiddenBehindBlur(SavedPost saved) =>
+      _shouldBlur(saved.post) && !_revealed.contains(saved.identity);
+
+  /// Plays the current video when nothing stops it and pauses the rest.
+  void _applyPlayback() {
+    final current = _currentKey;
+    final loop = !_settings.shortsAutoAdvance;
+    for (final entry in _clips.entries) {
+      final clip = entry.value;
+      final controller = clip.controller;
+      if (controller == null) continue;
+      clip.configure(muted: _muted, loop: loop);
+      final play =
+          entry.key == current &&
+          _resumed &&
+          _suspended == 0 &&
+          !_userPaused &&
+          !_hiddenBehindBlur(clip.saved);
+      if (play && !controller.value.isPlaying) controller.play();
+      if (!play && controller.value.isPlaying) controller.pause();
+      if (entry.key == current && !identical(controller, _watched)) {
+        _watched?.removeListener(_watchEnd);
+        _watched = controller..addListener(_watchEnd);
+      }
+    }
+  }
+
+  /// With auto-advance on, moves to the next video when one ends.
+  void _watchEnd() {
+    final controller = _watched;
+    if (controller == null ||
+        !_settings.shortsAutoAdvance ||
+        _advancing ||
+        !mounted) {
+      return;
+    }
+    final value = controller.value;
+    if (!value.isInitialized ||
+        value.isPlaying ||
+        value.duration <= Duration.zero ||
+        value.position < value.duration - const Duration(milliseconds: 150)) {
+      return;
+    }
+    _advancing = true;
+    _next();
+  }
+
+  void _next() {
+    if (!_pages.hasClients) {
+      _advancing = false;
+      return;
+    }
+    final from = _index;
+    _pages
+        .nextPage(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+        )
+        .whenComplete(() {
+          // Nowhere to go: let the next ending try again.
+          if (mounted && _index == from) _advancing = false;
+        });
+  }
+
+  void _handlePageChanged(int index) {
+    final previous = _clips[_currentKey];
+    previous?.controller?.pause();
+    previous?.controller?.seekTo(Duration.zero);
+    _index = index;
+    _userPaused = false;
+    _advancing = false;
+    final posts = _feed.posts;
+    if (index >= posts.length - 3) _feed.loadMore();
+    if (index < posts.length) {
+      widget.state.recordBrowsedTags(posts[index].post.tags);
+    }
+    _syncClips();
+    setState(() {});
+  }
+
+  void _togglePlay() {
+    final controller = _clips[_currentKey]?.controller;
+    if (controller == null) return;
+    _userPaused = controller.value.isPlaying;
+    _applyPlayback();
+  }
+
+  void _toggleMute() {
+    setState(() => _muted = !_muted);
+    widget.state.setShortsMuted(_muted);
+    _applyPlayback();
+  }
+
+  void _reveal(SavedPost saved) {
+    setState(() => _revealed.add(saved.identity));
+    _applyPlayback();
+  }
+
+  void _filterTag(String tag) {
+    setState(() {
+      _tagFilter = tag;
+      _onlyBoard = null;
+    });
+    _start();
+  }
+
+  void _clearTagFilter() {
+    setState(() => _tagFilter = null);
+    _start();
+  }
+
+  void _setOnlyBoard(Board? board) {
+    setState(() => _onlyBoard = board);
+    _start();
+  }
+
+  void _notify(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _open(String url, String failure) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
+    try {
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        throw StateError('Unavailable');
+      }
+    } catch (_) {
+      _notify(failure);
+    }
+  }
+
+  Future<void> _favorite(SavedPost saved, {bool onlyAdd = false}) async {
+    if (onlyAdd) {
+      await widget.state.favoritePost(saved.post, board: saved.board);
+    } else {
+      await widget.state.toggleFavorite(saved.post, board: saved.board);
+    }
+  }
+
+  Future<void> _download(SavedPost saved) async {
+    if (_downloading) return;
+    setState(() => _downloading = true);
+    try {
+      await widget.state.downloadPost(saved.post, board: saved.board);
+      _notify(
+        _settings.autoFavoriteOnDownload
+            ? 'Video saved to your download folder and favorited.'
+            : 'Video saved to your download folder.',
+      );
+    } on PlatformException catch (e) {
+      _notify(
+        e.code == 'DIRECTORY_ACCESS'
+            ? 'Folder access expired. Choose your download folder again in Settings.'
+            : 'Download failed. Check your connection, folder access, and free space.',
+      );
+    } catch (_) {
+      _notify('Download unavailable. Please try again.');
+    } finally {
+      if (mounted) setState(() => _downloading = false);
+    }
+  }
+
+  Future<void> _share(SavedPost saved) async {
+    final url = mediaUrlOf(saved.post);
+    if (url.isEmpty || _sharing) return;
+    setState(() => _sharing = true);
+    _notify('Preparing to share…');
+    try {
+      await _device.shareMedia(
+        url: url,
+        name: mediaFileName(
+          saved.board,
+          saved.post,
+          url,
+          template: _settings.filenameTemplate,
+        ),
+      );
+      if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    } catch (_) {
+      _notify('Unable to share this video. Check your connection.');
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  Future<void> _openFullDetails(SavedPost saved) async {
+    _suspended++;
+    _applyPlayback();
+    final result = await Navigator.push<ViewerTagBrowse>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MediaViewer(
+          post: saved.post,
+          board: saved.board,
+          state: widget.state,
+          savedPosts: [saved],
+          initialDetails: true,
+        ),
+      ),
+    );
+    _suspended--;
+    if (!mounted) return;
+    _applyPlayback();
+    if (result != null && result.mode != TagBrowseMode.exclude) {
+      _filterTag(result.tag);
+    }
+  }
+
+  Future<void> _showDetails(SavedPost saved) async {
+    final tag = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _ShortsDetails(
+        saved: saved,
+        onFullDetails: () {
+          Navigator.pop(context);
+          _openFullDetails(saved);
+        },
+        onOpenPost: () => _open(
+          postBrowserUrl(saved.board, saved.post),
+          'Unable to open this post.',
+        ),
+        onOpenSource: () =>
+            _open(saved.post.source, 'Unable to open this source.'),
+      ),
+    );
+    if (tag != null && mounted) _filterTag(tag);
+  }
+
+  Future<void> _showSite(SavedPost saved) async {
+    final board = saved.board;
+    final link = postBrowserUrl(board, saved.post);
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: SiteLogo(board, size: 32, colored: true),
+              title: Text(board.label),
+              subtitle: Text(board.host),
+            ),
+            if (link.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.open_in_new_rounded),
+                title: const Text('Open on website'),
+                onTap: () => Navigator.pop(context, 'open'),
+              ),
+            if (_onlyBoard == null)
+              ListTile(
+                leading: const Icon(Icons.filter_alt_outlined),
+                title: Text('Only ${board.label}'),
+                subtitle: const Text('For this visit'),
+                onTap: () => Navigator.pop(context, 'only'),
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.public_rounded),
+                title: const Text('Show all websites'),
+                onTap: () => Navigator.pop(context, 'all'),
+              ),
+            ListTile(
+              leading: const Icon(Icons.block_rounded),
+              title: Text('Hide ${board.label} from booruShorts'),
+              subtitle: const Text('Switch it back on in Settings'),
+              onTap: () => Navigator.pop(context, 'hide'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case 'open':
+        await _open(link, 'Unable to open this post.');
+      case 'only':
+        _setOnlyBoard(board);
+      case 'all':
+        _setOnlyBoard(null);
+      case 'hide':
+        await widget.state.setShortsOff({..._settings.shortsOff, board});
+        if (!mounted) return;
+        setState(() {
+          _available = _available.where((other) => other != board).toList();
+          if (_onlyBoard == board) _onlyBoard = null;
+        });
+        _start();
+        _notify('${board.label} is hidden from booruShorts.');
+    }
+  }
+
+  Future<void> _showMore(SavedPost saved) async {
+    final link = postBrowserUrl(saved.board, saved.post);
+    final uploader = saved.post.uploader.trim();
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (link.isNotEmpty) ...[
+              ListTile(
+                leading: const Icon(Icons.link_rounded),
+                title: const Text('Copy post link'),
+                onTap: () => Navigator.pop(context, 'copy'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.share_outlined),
+                title: const Text('Share post link'),
+                onTap: () => Navigator.pop(context, 'share_link'),
+              ),
+            ],
+            ListTile(
+              leading: const Icon(Icons.visibility_off_outlined),
+              title: const Text('Hide this post'),
+              onTap: () => Navigator.pop(context, 'hide'),
+            ),
+            if (uploader.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.person_off_outlined),
+                title: Text('Hide posts by $uploader'),
+                onTap: () => Navigator.pop(context, 'uploader'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: link));
+        _notify('Post link copied.');
+      case 'share_link':
+        try {
+          await _device.shareText(link);
+        } catch (_) {
+          _notify('No app can share this link.');
+        }
+      case 'hide':
+        await widget.state.hidePost(saved.post, board: saved.board);
+        _notify('Post hidden.');
+        _next();
+      case 'uploader':
+        await _hideUploader(saved, uploader);
+    }
+  }
+
+  Future<void> _hideUploader(SavedPost saved, String uploader) async {
+    final board = saved.board;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Hide posts by $uploader?'),
+        content: Text(
+          'Their posts on ${board.label} will no longer appear in feeds. Undo this in Settings › Hidden uploaders.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Hide'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.state.hideUploader(uploader, board: board);
+      _notify('Posts by $uploader are hidden on ${board.label}.');
+      _next();
+    } catch (_) {
+      _notify('Could not hide this uploader. Please try again.');
+    }
+  }
+
+  /// The gear sheet: the tags Shorts searches, editable in place. Saved
+  /// and applied when the sheet closes, however it is closed.
+  Future<void> _editTags() async {
+    final before = _settings.shortsTags;
+    var tags = before;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _ShortsTagsSheet(
+        tags: before,
+        autocomplete: widget.state.autocomplete,
+        onChanged: (value) => tags = value,
+      ),
+    );
+    if (!mounted || listEquals(tags, before)) return;
+    await widget.state.setShortsTags(tags);
+    if (!mounted) return;
+    setState(() => _tagFilter = null);
+    _start();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: SystemUiOverlayStyle.light,
+    child: Scaffold(
+      backgroundColor: Colors.black,
+      body: ListenableBuilder(
+        listenable: Listenable.merge([_feed, widget.state]),
+        builder: (context, _) => Stack(
+          children: [
+            Positioned.fill(child: _body()),
+            Positioned(left: 0, right: 0, top: 0, child: _topBar()),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _body() {
+    final posts = _feed.posts;
+    if (!_ready || (posts.isEmpty && (_feed.loading || _feed.hasMore))) {
+      return const Center(
+        child: CircularProgressIndicator(
+          key: ValueKey('shorts_loading'),
+          color: Colors.white,
+        ),
+      );
+    }
+    if (posts.isEmpty) return _emptyState();
+    return PageView.builder(
+      key: const ValueKey('shorts_pages'),
+      controller: _pages,
+      scrollDirection: Axis.vertical,
+      itemCount: posts.length + 1,
+      onPageChanged: _handlePageChanged,
+      itemBuilder: (context, index) {
+        if (index >= posts.length) return _endPage();
+        final saved = widget.state.displayReady(posts[index]);
+        final clip = _clips[posts[index].identity];
+        return _ShortsPage(
+          key: ValueKey(posts[index].identity),
+          saved: saved,
+          controller: clip?.controller,
+          failed: clip?.failed ?? false,
+          active: index == _index,
+          blurred: _hiddenBehindBlur(saved),
+          favorite: widget.state.isFavorite(saved.post, board: saved.board),
+          downloading: _downloading,
+          sharing: _sharing,
+          onTogglePlay: _togglePlay,
+          onReveal: () => _reveal(saved),
+          onDoubleTap: () => _favorite(saved, onlyAdd: true),
+          onFavorite: () => _favorite(saved),
+          onDetails: () => _showDetails(saved),
+          onSite: () => _showSite(saved),
+          onShare: () => _share(saved),
+          onDownload: () => _download(saved),
+          onMore: () => _showMore(saved),
+          onTag: _filterTag,
+        );
+      },
+    );
+  }
+
+  Widget _endPage() {
+    if (_feed.loading || _feed.hasMore) {
+      if (!_feed.loading) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _feed.loadMore();
+        });
+      }
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
+    }
+    return _message(
+      icon: Icons.check_circle_outline_rounded,
+      text: "You're all caught up.",
+      action: 'Start over',
+      onAction: _start,
+    );
+  }
+
+  Widget _emptyState() {
+    if (_available.isEmpty) {
+      return _message(
+        icon: Icons.videocam_off_outlined,
+        text: 'No website with videos is available. Sign in to one, or switch websites on in Settings › booruShorts.',
+      );
+    }
+    final errors = _feed.errors;
+    if (errors.isNotEmpty) {
+      return _message(
+        icon: Icons.cloud_off_rounded,
+        text: [
+          for (final entry in errors.entries)
+            '${entry.key.label}: ${entry.value}',
+        ].join('\n'),
+        action: 'Retry',
+        onAction: _feed.retry,
+      );
+    }
+    return _message(
+      icon: Icons.search_off_rounded,
+      text: _feed.tags.isEmpty
+          ? 'No videos found.'
+          : 'No videos found with ${_feed.tags.join(', ')}.',
+      action: 'Edit tags',
+      onAction: _editTags,
+    );
+  }
+
+  Widget _message({
+    required IconData icon,
+    required String text,
+    String? action,
+    VoidCallback? onAction,
+  }) => Center(
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(32, 96, 32, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 48, color: Colors.white70),
+          const SizedBox(height: 16),
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70, height: 1.4),
+          ),
+          if (action != null) ...[
+            const SizedBox(height: 20),
+            FilledButton.tonal(onPressed: onAction, child: Text(action)),
+          ],
+        ],
+      ),
+    ),
+  );
+
+  Widget _topBar() {
+    const shadow = [Shadow(blurRadius: 8, color: Colors.black54)];
+    final filter = _tagFilter;
+    final only = _onlyBoard;
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x99000000), Color(0x00000000)],
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: 'Back',
+                color: Colors.white,
+                icon: const Icon(Icons.arrow_back_rounded, shadows: shadow),
+                onPressed: () => Navigator.maybePop(context),
+              ),
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      const Text(
+                        'booruShorts',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 19,
+                          fontWeight: FontWeight.w700,
+                          shadows: shadow,
+                        ),
+                      ),
+                      if (filter != null)
+                        _FilterChip(
+                          key: const ValueKey('shorts_tag_filter'),
+                          label: filter,
+                          onClear: _clearTagFilter,
+                        ),
+                      if (only != null)
+                        _FilterChip(
+                          label: only.label,
+                          onClear: () => _setOnlyBoard(null),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              IconButton(
+                key: const ValueKey('shorts_mute'),
+                tooltip: _muted ? 'Unmute' : 'Mute',
+                color: Colors.white,
+                icon: Icon(
+                  _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+                  shadows: shadow,
+                ),
+                onPressed: _toggleMute,
+              ),
+              IconButton(
+                key: const ValueKey('shorts_tags'),
+                tooltip: 'booruShorts tags',
+                color: Colors.white,
+                icon: const Icon(Icons.settings_rounded, shadows: shadow),
+                onPressed: _editTags,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One video's player. Opens the rendition for [maxQuality] (or the
+/// original), falling back to the original and then the first rendition
+/// when one cannot be played.
+class _Clip {
+  _Clip(this.saved, {required this.maxQuality, required this.onChanged});
+  final SavedPost saved;
+  final int maxQuality;
+  final VoidCallback onChanged;
+  VideoPlayerController? controller;
+  bool failed = false;
+  bool _disposed = false;
+  bool? _muted, _loop;
+
+  Future<void> start() async {
+    final post = saved.post;
+    final variant = post.videoVariantFor(maxQuality);
+    final original = mediaUrlOf(post);
+    // The chosen rendition, then the original, then the first rendition
+    // (usually H.264, for originals this device cannot decode).
+    final urls = <String>{
+      ?variant?.url,
+      original,
+      if (post.videoVariants.isNotEmpty) post.videoVariants.first.url,
+    };
+    for (final url in urls) {
+      if (await _open(url)) break;
+    }
+    if (_disposed || controller != null) return;
+    failed = true;
+    onChanged();
+  }
+
+  /// Whether [url] opened, or this clip was disposed meanwhile.
+  Future<bool> _open(String url) async {
+    if (_disposed) return true;
+    final uri = Uri.tryParse(url);
+    if (url.isEmpty || uri == null) return false;
+    final video = VideoPlayerController.networkUrl(
+      uri,
+      httpHeaders: videoHeaders(saved.board),
+    );
+    try {
+      await video.initialize();
+    } catch (_) {
+      // dispose() never completes for a player whose creation failed.
+      video.dispose().ignore();
+      return false;
+    }
+    if (_disposed) {
+      await video.dispose();
+      return true;
+    }
+    controller = video;
+    onChanged();
+    return true;
+  }
+
+  /// Applies sound and looping, skipping platform calls that change
+  /// nothing.
+  void configure({required bool muted, required bool loop}) {
+    final video = controller;
+    if (video == null) return;
+    if (_muted != muted) {
+      _muted = muted;
+      video.setVolume(muted ? 0 : 1);
+    }
+    if (_loop != loop) {
+      _loop = loop;
+      video.setLooping(loop);
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    controller?.dispose();
+    controller = null;
+  }
+}
+
+class _ShortsPage extends StatefulWidget {
+  const _ShortsPage({
+    super.key,
+    required this.saved,
+    required this.controller,
+    required this.failed,
+    required this.active,
+    required this.blurred,
+    required this.favorite,
+    required this.downloading,
+    required this.sharing,
+    required this.onTogglePlay,
+    required this.onReveal,
+    required this.onDoubleTap,
+    required this.onFavorite,
+    required this.onDetails,
+    required this.onSite,
+    required this.onShare,
+    required this.onDownload,
+    required this.onMore,
+    required this.onTag,
+  });
+  final SavedPost saved;
+  final VideoPlayerController? controller;
+  final bool failed, active, blurred, favorite, downloading, sharing;
+  final VoidCallback onTogglePlay, onReveal, onDoubleTap, onFavorite;
+  final VoidCallback onDetails, onSite, onShare, onDownload, onMore;
+  final ValueChanged<String> onTag;
+
+  @override
+  State<_ShortsPage> createState() => _ShortsPageState();
+}
+
+class _ShortsPageState extends State<_ShortsPage> {
+  int _flash = 0;
+  IconData _flashIcon = Icons.play_arrow_rounded;
+  int _burst = 0;
+  Offset _burstAt = Offset.zero;
+  Offset _lastDoubleTap = Offset.zero;
+  bool _fast = false;
+
+  MediaPost get _post => widget.saved.post;
+  Board get _board => widget.saved.board;
+  bool get _ready => widget.controller?.value.isInitialized == true;
+
+  void _tap() {
+    if (widget.blurred || !_ready) return;
+    final playing = widget.controller!.value.isPlaying;
+    widget.onTogglePlay();
+    setState(() {
+      _flash++;
+      _flashIcon = playing ? Icons.pause_rounded : Icons.play_arrow_rounded;
+    });
+  }
+
+  void _doubleTap() {
+    if (widget.blurred) return;
+    widget.onDoubleTap();
+    setState(() {
+      _burst++;
+      _burstAt = _lastDoubleTap;
+    });
+  }
+
+  void _setFast(bool fast) {
+    final controller = widget.controller;
+    if (!_ready || widget.blurred || controller == null) return;
+    controller.setPlaybackSpeed(fast ? 2 : 1);
+    setState(() => _fast = fast);
+  }
+
+  @override
+  void didUpdateWidget(_ShortsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Leaving the page while holding resets the speed.
+    if (!widget.active && _fast) {
+      widget.controller?.setPlaybackSpeed(1);
+      _fast = false;
+    }
+  }
+
+  String get _preview =>
+      _post.previewUrl.isNotEmpty && _post.previewUrl != _post.url
+      ? _post.previewUrl
+      : '';
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final controller = widget.controller;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_preview.isNotEmpty)
+          ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+            child: MediaImage(
+              url: _preview,
+              board: _board,
+              fit: BoxFit.cover,
+              maxDimension: 320,
+              errorWidget: const SizedBox.shrink(),
+            ),
+          ),
+        const ColoredBox(color: Color(0x8C000000)),
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _tap,
+          onDoubleTapDown: (details) => _lastDoubleTap = details.localPosition,
+          onDoubleTap: _doubleTap,
+          onLongPressStart: (_) => _setFast(true),
+          onLongPressEnd: (_) => _setFast(false),
+          onLongPressCancel: () => _setFast(false),
+          child: _media(controller),
+        ),
+        const Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 260,
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0x00000000), Color(0xB3000000)],
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 16,
+          right: 84,
+          bottom: bottomInset + 28,
+          child: _info(),
+        ),
+        Positioned(right: 6, bottom: bottomInset + 28, child: _rail()),
+        if (_flash > 0)
+          IgnorePointer(
+            child: Center(
+              child: TweenAnimationBuilder<double>(
+                key: ValueKey(_flash),
+                tween: Tween(begin: 1, end: 0),
+                duration: const Duration(milliseconds: 650),
+                builder: (_, value, child) => Opacity(
+                  opacity: value,
+                  child: Transform.scale(
+                    scale: 1 + (1 - value) * .3,
+                    child: child,
+                  ),
+                ),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: const BoxDecoration(
+                    color: Color(0x66000000),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(_flashIcon, size: 46, color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+        if (_burst > 0)
+          Positioned(
+            left: _burstAt.dx - 56,
+            top: _burstAt.dy - 56,
+            child: IgnorePointer(
+              child: TweenAnimationBuilder<double>(
+                key: ValueKey(_burst),
+                tween: Tween(begin: 0, end: 1),
+                duration: const Duration(milliseconds: 800),
+                builder: (_, value, child) => Opacity(
+                  opacity: value < .7 ? 1 : (1 - value) / .3,
+                  child: Transform.scale(
+                    scale: value < .2
+                        ? value / .2 * 1.2
+                        : 1.2 - (value - .2) * .25,
+                    child: child,
+                  ),
+                ),
+                child: const Icon(
+                  Icons.favorite_rounded,
+                  size: 112,
+                  color: Color(0xFFFF3B5C),
+                  shadows: [Shadow(blurRadius: 16, color: Colors.black45)],
+                ),
+              ),
+            ),
+          ),
+        if (_fast)
+          Positioned(
+            top: MediaQuery.paddingOf(context).top + 64,
+            left: 0,
+            right: 0,
+            child: const IgnorePointer(
+              child: Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Color(0x80000000),
+                    borderRadius: BorderRadius.all(Radius.circular(20)),
+                  ),
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    child: Text(
+                      '2× ▸▸',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        if (controller != null && _ready && !widget.blurred)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: bottomInset,
+            child: _ScrubBar(controller: controller),
+          ),
+      ],
+    );
+  }
+
+  Widget _media(VideoPlayerController? controller) {
+    if (widget.blurred) {
+      return Stack(
+        alignment: Alignment.center,
+        children: [
+          const Icon(
+            Icons.visibility_off_outlined,
+            size: 42,
+            color: Colors.white54,
+          ),
+          if (widget.active)
+            Padding(
+              padding: const EdgeInsets.only(top: 110),
+              child: FilledButton.icon(
+                onPressed: widget.onReveal,
+                icon: const Icon(Icons.visibility),
+                label: const Text('Reveal'),
+              ),
+            ),
+        ],
+      );
+    }
+    if (controller != null && _ready) {
+      final size = controller.value.size;
+      final ratio = controller.value.aspectRatio;
+      // Phone-shaped portrait video fills the screen; anything wider is
+      // letterboxed so nothing important is cropped.
+      final cover = ratio > 0 && ratio <= .7;
+      return ClipRect(
+        child: FittedBox(
+          fit: cover ? BoxFit.cover : BoxFit.contain,
+          child: SizedBox(
+            width: size.width > 0 ? size.width : 1,
+            height: size.height > 0 ? size.height : 1,
+            child: VideoPlayer(controller),
+          ),
+        ),
+      );
+    }
+    if (widget.failed) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Text(
+            "This video couldn't be played on this device. Swipe for the next one.",
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white70),
+          ),
+        ),
+      );
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_preview.isNotEmpty)
+          MediaImage(
+            url: _preview,
+            board: _board,
+            fit: BoxFit.contain,
+            errorWidget: const SizedBox.shrink(),
+          ),
+        const Center(
+          child: SizedBox.square(
+            dimension: 36,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _info() {
+    const shadow = [Shadow(blurRadius: 6, color: Colors.black87)];
+    final grouped = groupedTags(_post);
+    final artists = (grouped[TagCategory.artist] ?? const <TagInfo>[])
+        .take(2)
+        .map((tag) => tag.name)
+        .toList();
+    var featured = [
+      ...?grouped[TagCategory.character],
+      ...?grouped[TagCategory.copyright],
+    ].take(3).toList();
+    if (featured.isEmpty) {
+      featured = (grouped[TagCategory.general] ?? const <TagInfo>[])
+          .take(3)
+          .toList();
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          artists.isEmpty
+              ? _board.label
+              : '${artists.map(_display).join(', ')} · ${_board.label}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            shadows: shadow,
+          ),
+        ),
+        if (featured.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final tag in featured)
+                Material(
+                  color: const Color(0x40000000),
+                  shape: const StadiumBorder(
+                    side: BorderSide(color: Color(0x40FFFFFF)),
+                  ),
+                  child: InkWell(
+                    customBorder: const StadiumBorder(),
+                    onTap: () => widget.onTag(tag.name),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      child: Text(
+                        '#${_display(tag.name)}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _rail() => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      _RailButton(
+        key: const ValueKey('shorts_favorite'),
+        icon: Icon(
+          widget.favorite
+              ? Icons.favorite_rounded
+              : Icons.favorite_border_rounded,
+          color: widget.favorite ? const Color(0xFFFF3B5C) : Colors.white,
+          size: 32,
+          shadows: _RailButton.shadow,
+        ),
+        label: widget.favorite ? 'Saved' : 'Favorite',
+        onTap: widget.onFavorite,
+      ),
+      _RailButton(
+        key: const ValueKey('shorts_details'),
+        icon: const Icon(
+          Icons.info_outline_rounded,
+          color: Colors.white,
+          size: 30,
+          shadows: _RailButton.shadow,
+        ),
+        label: 'Details',
+        onTap: widget.onDetails,
+      ),
+      _RailButton(
+        key: const ValueKey('shorts_site'),
+        icon: SiteLogo(_board, size: 34, colored: true, showBorder: true),
+        label: _board.label,
+        onTap: widget.onSite,
+      ),
+      _RailButton(
+        icon: widget.sharing
+            ? const _RailProgress()
+            : const Icon(
+                Icons.share_rounded,
+                color: Colors.white,
+                size: 28,
+                shadows: _RailButton.shadow,
+              ),
+        label: 'Share',
+        onTap: widget.onShare,
+      ),
+      _RailButton(
+        icon: widget.downloading
+            ? const _RailProgress()
+            : const Icon(
+                Icons.download_rounded,
+                color: Colors.white,
+                size: 30,
+                shadows: _RailButton.shadow,
+              ),
+        label: 'Download',
+        onTap: widget.onDownload,
+      ),
+      _RailButton(
+        icon: const Icon(
+          Icons.more_horiz_rounded,
+          color: Colors.white,
+          size: 30,
+          shadows: _RailButton.shadow,
+        ),
+        label: 'More',
+        onTap: widget.onMore,
+      ),
+    ],
+  );
+}
+
+String _display(String tag) => tag.replaceAll('_', ' ');
+
+class _RailButton extends StatelessWidget {
+  const _RailButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+  final Widget icon;
+  final String label;
+  final VoidCallback onTap;
+
+  static const shadow = [Shadow(blurRadius: 8, color: Colors.black54)];
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 72,
+    child: InkResponse(
+      onTap: onTap,
+      radius: 32,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(height: 36, child: Center(child: icon)),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                shadows: shadow,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _RailProgress extends StatelessWidget {
+  const _RailProgress();
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.square(
+    dimension: 24,
+    child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white),
+  );
+}
+
+class _FilterChip extends StatelessWidget {
+  const _FilterChip({super.key, required this.label, required this.onClear});
+  final String label;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(left: 10),
+    child: Material(
+      color: const Color(0x59000000),
+      shape: const StadiumBorder(side: BorderSide(color: Color(0x59FFFFFF))),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onClear,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _display(label),
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.close_rounded, size: 16, color: Colors.white70),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// The draggable progress bar along the bottom. Touching it thickens it
+/// and shows the time; dragging pauses and seeks, and releasing resumes.
+class _ScrubBar extends StatefulWidget {
+  const _ScrubBar({required this.controller});
+  final VideoPlayerController controller;
+
+  @override
+  State<_ScrubBar> createState() => _ScrubBarState();
+}
+
+class _ScrubBarState extends State<_ScrubBar> {
+  double? _drag;
+  bool _resume = false;
+
+  Duration get _duration => widget.controller.value.duration;
+
+  void _seek(double fraction) {
+    final ms = (_duration.inMilliseconds * fraction).round();
+    widget.controller.seekTo(Duration(milliseconds: ms));
+  }
+
+  void _begin(double dx, double width) {
+    _resume = widget.controller.value.isPlaying;
+    widget.controller.pause();
+    _update(dx, width);
+  }
+
+  void _update(double dx, double width) {
+    if (width <= 0) return;
+    final fraction = (dx / width).clamp(0.0, 1.0);
+    setState(() => _drag = fraction);
+    _seek(fraction);
+  }
+
+  void _end() {
+    final fraction = _drag;
+    setState(() => _drag = null);
+    if (fraction != null) _seek(fraction);
+    if (_resume) widget.controller.play();
+  }
+
+  static String _time(Duration value) {
+    final minutes = value.inMinutes;
+    final seconds = value.inSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final width = box.maxWidth;
+      return GestureDetector(
+        key: const ValueKey('shorts_scrub'),
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: (details) =>
+            _begin(details.localPosition.dx, width),
+        onHorizontalDragUpdate: (details) =>
+            _update(details.localPosition.dx, width),
+        onHorizontalDragEnd: (_) => _end(),
+        onHorizontalDragCancel: _end,
+        onTapUp: (details) {
+          if (width <= 0) return;
+          _seek((details.localPosition.dx / width).clamp(0.0, 1.0));
+        },
+        child: ValueListenableBuilder<VideoPlayerValue>(
+          valueListenable: widget.controller,
+          builder: (context, value, _) {
+            final total = value.duration.inMilliseconds;
+            final dragging = _drag != null;
+            final played =
+                _drag ??
+                (total <= 0
+                    ? 0.0
+                    : (value.position.inMilliseconds / total).clamp(0.0, 1.0));
+            var buffered = 0.0;
+            for (final range in value.buffered) {
+              if (total > 0) {
+                buffered = max(buffered, range.end.inMilliseconds / total);
+              }
+            }
+            final barHeight = dragging ? 6.0 : 2.5;
+            return SizedBox(
+              height: dragging ? 64 : 28,
+              child: Stack(
+                alignment: Alignment.bottomCenter,
+                children: [
+                  if (dragging)
+                    Positioned(
+                      bottom: 18,
+                      child: Text(
+                        '${_time(Duration(milliseconds: (total * played).round()))} / ${_time(value.duration)}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          shadows: [
+                            Shadow(blurRadius: 8, color: Colors.black87),
+                          ],
+                        ),
+                      ),
+                    ),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 120),
+                    height: barHeight,
+                    margin: const EdgeInsets.only(bottom: 4),
+                    color: const Color(0x33FFFFFF),
+                    child: Stack(
+                      children: [
+                        FractionallySizedBox(
+                          widthFactor: buffered.clamp(0.0, 1.0),
+                          child: const ColoredBox(color: Color(0x55FFFFFF)),
+                        ),
+                        FractionallySizedBox(
+                          widthFactor: played,
+                          child: const ColoredBox(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+    },
+  );
+}
+
+/// Post details for booruShorts: the essentials and grouped tags. Tapping
+/// a tag closes the sheet with that tag, so Shorts can filter by it.
+class _ShortsDetails extends StatelessWidget {
+  const _ShortsDetails({
+    required this.saved,
+    required this.onFullDetails,
+    required this.onOpenPost,
+    required this.onOpenSource,
+  });
+  final SavedPost saved;
+  final VoidCallback onFullDetails, onOpenPost, onOpenSource;
+
+  static const _order = [
+    TagCategory.artist,
+    TagCategory.copyright,
+    TagCategory.character,
+    TagCategory.species,
+    TagCategory.general,
+    TagCategory.meta,
+    TagCategory.lore,
+    TagCategory.unknown,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final post = saved.post;
+    final board = saved.board;
+    final grouped = groupedTags(post);
+    final source = Uri.tryParse(post.source.trim());
+    final hasSource =
+        source != null && ['http', 'https'].contains(source.scheme);
+    final facts = [
+      if (post.rating.trim().isNotEmpty) ('Rating', post.rating.trim()),
+      ('Score', '${post.score}'),
+      if (post.width > 0 && post.height > 0)
+        ('Size', '${post.width} × ${post.height}'),
+      if (post.uploader.trim().isNotEmpty) ('Uploader', post.uploader.trim()),
+    ];
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: .55,
+      minChildSize: .3,
+      maxChildSize: .92,
+      builder: (context, scroll) => ListView(
+        key: const ValueKey('shorts_details_sheet'),
+        controller: scroll,
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        children: [
+          Row(
+            children: [
+              SiteLogo(board, size: 30, colored: true),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  post.hasId
+                      ? '${board.label} · #${post.displayId}'
+                      : board.label,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 18,
+            runSpacing: 8,
+            children: [
+              for (final (label, value) in facts)
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(color: ink(.54), fontSize: 12),
+                    ),
+                    Text(value, style: TextStyle(color: ink(.87))),
+                  ],
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: onFullDetails,
+                icon: const Icon(Icons.article_outlined),
+                label: const Text('Open full details'),
+              ),
+              if (postBrowserUrl(board, post).isNotEmpty)
+                OutlinedButton.icon(
+                  onPressed: onOpenPost,
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: const Text('Website'),
+                ),
+              if (hasSource)
+                OutlinedButton.icon(
+                  onPressed: onOpenSource,
+                  icon: const Icon(Icons.link_rounded),
+                  label: const Text('Source'),
+                ),
+            ],
+          ),
+          for (final category in _order)
+            if (grouped[category]?.isNotEmpty == true) ...[
+              const SizedBox(height: 16),
+              Text(
+                category.label,
+                style: TextStyle(
+                  color: ink(.54),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final tag in grouped[category]!)
+                    ActionChip(
+                      label: Text(
+                        _display(tag.name),
+                        style: TextStyle(color: tagColor(category)),
+                      ),
+                      tooltip: 'Show booruShorts with this tag',
+                      onPressed: () => Navigator.pop(context, tag.name),
+                    ),
+                ],
+              ),
+            ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The gear sheet: the tags booruShorts searches. Reports every edit,
+/// including a tag still being typed, so closing the sheet any way keeps
+/// it.
+class _ShortsTagsSheet extends StatefulWidget {
+  const _ShortsTagsSheet({
+    required this.tags,
+    required this.autocomplete,
+    required this.onChanged,
+  });
+  final List<String> tags;
+  final Future<List<TagSuggestion>> Function(String query) autocomplete;
+  final ValueChanged<List<String>> onChanged;
+
+  @override
+  State<_ShortsTagsSheet> createState() => _ShortsTagsSheetState();
+}
+
+class _ShortsTagsSheetState extends State<_ShortsTagsSheet> {
+  late List<String> _tags = List.of(widget.tags);
+  String _draft = '';
+
+  List<String> get _result {
+    final draft = _draft.trim();
+    return [..._tags, if (draft.isNotEmpty && !_tags.contains(draft)) draft];
+  }
+
+  void _report() => widget.onChanged(_result);
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: EdgeInsets.fromLTRB(
+      20,
+      0,
+      20,
+      16 + MediaQuery.viewInsetsOf(context).bottom,
+    ),
+    child: Column(
+      key: const ValueKey('shorts_tags_sheet'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'booruShorts tags',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Shows videos with any of these tags. Leave it empty for every video.',
+          style: TextStyle(color: ink(.60), fontSize: 13),
+        ),
+        const SizedBox(height: 14),
+        TagInput(
+          tags: _tags,
+          onChanged: (tags) {
+            setState(() => _tags = tags);
+            _report();
+          },
+          onDraftChanged: (draft) {
+            _draft = draft;
+            _report();
+          },
+          autocomplete: widget.autocomplete,
+          searchStyle: false,
+          hint: 'Add a tag, then press space',
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            if (_tags.isNotEmpty)
+              TextButton(
+                onPressed: () {
+                  setState(() => _tags = []);
+                  _report();
+                },
+                child: const Text('Clear all'),
+              ),
+            const Spacer(),
+            FilledButton(
+              key: const ValueKey('shorts_tags_done'),
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}

@@ -49,6 +49,7 @@ class MediaViewer extends StatefulWidget {
     this.posts = const [],
     this.savedPosts = const [],
     this.initialIndex = 0,
+    this.initialDetails = false,
   });
   final MediaPost post;
   final Board board;
@@ -56,6 +57,9 @@ class MediaViewer extends StatefulWidget {
   final List<MediaPost> posts;
   final List<SavedPost> savedPosts;
   final int initialIndex;
+
+  /// Opens with the details panel showing.
+  final bool initialDetails;
   @override
   State<MediaViewer> createState() => _MediaViewerState();
 }
@@ -109,6 +113,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         ? 0
         : widget.initialIndex.clamp(0, _itemCount - 1).toInt();
     _quality = widget.state.settings.videoQuality;
+    _details = widget.initialDetails;
     _pages = PageController(initialPage: _index);
     WidgetsBinding.instance.addObserver(this);
     if (_lifecycle == AppLifecycleState.resumed) {
@@ -348,7 +353,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     final generation = ++_videoGeneration;
     final post = _post;
     final variant = fallback ?? post.videoVariantFor(_quality);
-    final url = variant?.url ?? _mediaUrl(post);
+    final url = variant?.url ?? mediaUrlOf(post);
     if (url.isEmpty) {
       if (mounted) {
         setState(() => _videoError = 'This video has no playable URL.');
@@ -357,18 +362,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: switch (_currentBoard) {
-        Board.gelbooru => const {
-          'Referer': 'https://gelbooru.com/',
-          'User-Agent': 'BooruPlus/1.0',
-        },
-        // Nozomi's media hosts answer 404 without the site as Referer.
-        Board.nozomi => const {
-          'Referer': 'https://nozomi.la/',
-          'User-Agent': 'BooruPlus/1.0',
-        },
-        _ => const {},
-      },
+      httpHeaders: videoHeaders(_currentBoard),
     );
     _video = video;
     _streamQuality = variant?.quality ?? 0;
@@ -518,7 +512,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   Future<void> _openPost() async {
-    final uri = Uri.tryParse(_postBrowserUrl(_currentBoard, _post));
+    final uri = Uri.tryParse(postBrowserUrl(_currentBoard, _post));
     if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
     try {
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
@@ -547,7 +541,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
 
   Future<void> _shareMedia() async {
     final post = _post;
-    final url = _mediaUrl(post);
+    final url = mediaUrlOf(post);
     if (url.isEmpty || _sharing) return;
     setState(() => _sharing = true);
     _notify('Preparing to share…');
@@ -571,7 +565,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
 
   Future<void> _postAction(String action) async {
     final post = _post;
-    final link = _postBrowserUrl(_currentBoard, post);
+    final link = postBrowserUrl(_currentBoard, post);
     switch (action) {
       case 'share_link':
         try {
@@ -608,7 +602,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
             title: Text('Share link'),
           ),
         ),
-      if (_mediaUrl(post).isNotEmpty)
+      if (mediaUrlOf(post).isNotEmpty)
         PopupMenuItem(
           value: 'share_media',
           enabled: !_sharing,
@@ -879,7 +873,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final post = _post;
     final board = _currentBoard;
-    final browserUrl = _postBrowserUrl(board, post);
+    final browserUrl = postBrowserUrl(board, post);
     final favorited = widget.state.isFavorite(post, board: board);
     final page = Scaffold(
       backgroundColor: post.isVideo ? Colors.black : canvas,
@@ -1360,11 +1354,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                     SelectableText(post.description),
                   ],
                   const SectionLabel('Tags · tap to search, hold for more'),
-                  for (final entry in _groupedTags(post).entries) ...[
+                  for (final entry in groupedTags(post).entries) ...[
                     Text(
                       _categoryLabel(entry.key),
                       style: TextStyle(
-                        color: _tagColor(entry.key),
+                        color: tagColor(entry.key),
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),
@@ -1383,7 +1377,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                 style: const TextStyle(fontSize: 12),
                               ),
                               side: BorderSide(
-                                color: _tagColor(tag.category)
+                                color: tagColor(tag.category)
                                     .withValues(alpha: .6),
                               ),
                               onPressed: () => _browseTag(tag.name),
@@ -1722,7 +1716,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     final board = _boardAt(index);
     final active = index == _index;
     if (post.isVideo) return _videoPage(post, board, active: active);
-    if (_mediaUrl(post).isEmpty) {
+    if (mediaUrlOf(post).isEmpty) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(24),
@@ -1772,7 +1766,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     bool sample = false,
   }) {
     final image = MediaImage(
-      url: sample ? post.sampleUrl : _mediaUrl(post),
+      url: sample ? post.sampleUrl : mediaUrlOf(post),
       board: board,
       fit: BoxFit.contain,
       // Bounded decoding keeps huge originals under common GPU texture
@@ -1858,7 +1852,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   Widget _blurredVideo(MediaPost post, Board board, {required bool active}) {
     final preview = post.previewUrl.isNotEmpty
         ? post.previewUrl
-        : _mediaUrl(post);
+        : mediaUrlOf(post);
     return Stack(
       alignment: Alignment.center,
       children: [
@@ -1923,7 +1917,21 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 }
 
-String _mediaUrl(MediaPost post) {
+/// Request headers for streaming a video from [board].
+Map<String, String> videoHeaders(Board board) => switch (board) {
+  Board.gelbooru => const {
+    'Referer': 'https://gelbooru.com/',
+    'User-Agent': 'BooruPlus/1.0',
+  },
+  // Nozomi's media hosts answer 404 without the site as Referer.
+  Board.nozomi => const {
+    'Referer': 'https://nozomi.la/',
+    'User-Agent': 'BooruPlus/1.0',
+  },
+  _ => const {},
+};
+
+String mediaUrlOf(MediaPost post) {
   final dynamic value = post;
   try {
     final authenticated = value.authenticatedUrl;
@@ -1943,7 +1951,7 @@ String _mediaUrl(MediaPost post) {
   return post.url;
 }
 
-String _postBrowserUrl(Board board, MediaPost post) {
+String postBrowserUrl(Board board, MediaPost post) {
   final provided = post.postUrl?.trim();
   if (provided != null && provided.isNotEmpty) {
     final uri = Uri.tryParse(provided);
@@ -1976,7 +1984,7 @@ bool _hasPools(Board board, MediaPost post) =>
 
 String _categoryLabel(TagCategory category) => category.label;
 
-Color _tagColor(TagCategory category) => switch (category) {
+Color tagColor(TagCategory category) => switch (category) {
   TagCategory.artist => tagTone(const Color(0xFFE8A0FF)),
   TagCategory.character => tagTone(const Color(0xFF8BC8FF)),
   TagCategory.copyright => tagTone(const Color(0xFFFFA56B)),
@@ -1986,7 +1994,7 @@ Color _tagColor(TagCategory category) => switch (category) {
   _ => ink(.70),
 };
 
-Map<TagCategory, List<TagInfo>> _groupedTags(MediaPost post) {
+Map<TagCategory, List<TagInfo>> groupedTags(MediaPost post) {
   final tags = post.tagDetails.isEmpty
       ? post.tags
             .map((name) => TagInfo(name: name, category: TagCategory.general))

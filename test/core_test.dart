@@ -1578,6 +1578,157 @@ void main() {
       expect(state.error, isNotNull);
     },
   );
+
+  group('booruShorts', () {
+    test('settings round-trip and older settings load defaults', () {
+      final settings = const AppSettings().copyWith(
+        shortsTags: [' Cat ', 'cat', 'dog'],
+        shortsOff: [Board.nozomi, Board.danbooru],
+        shortsMuted: true,
+        shortsAutoAdvance: true,
+      );
+      expect(settings.shortsTags, ['cat', 'dog']);
+      // Kept in enum order.
+      expect(settings.shortsOff, [Board.danbooru, Board.nozomi]);
+      expect(AppSettings.decode(settings.encode()), settings);
+
+      final legacy = AppSettings.decode('{"blacklist": ["a"]}');
+      expect(legacy.shortsTags, isEmpty);
+      expect(legacy.shortsOff, isEmpty);
+      expect(legacy.shortsMuted, isFalse);
+      expect(legacy.shortsAutoAdvance, isFalse);
+    });
+
+    test('only websites with video take part', () {
+      expect(Board.danbooru.shortsVideoQuery, ['filetype:mp4,webm']);
+      expect(Board.e621.shortsVideoQuery, ['~type:webm', '~type:mp4']);
+      expect(Board.sankaku.shortsVideoQuery, ['video']);
+      for (final board in [
+        Board.safebooru,
+        Board.tbib,
+        Board.konachan,
+        Board.yandere,
+      ]) {
+        expect(board.hasShorts, isFalse, reason: board.name);
+      }
+    });
+
+    test('each tag is its own random stream per website, never a feed '
+        'request, keeping only allowed videos once', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, 'cat'): [
+          _video(1, md5: 'a' * 32),
+          {'id': 2, 'url': 'https://x/2.png', 'tags': 'cat'},
+          _video(3, tags: 'cat blocked'),
+        ],
+        (Board.danbooru, 'dog'): [_video(4)],
+        // The same file as Danbooru post 1, found on e621.
+        (Board.e621, 'cat'): [_video(1, md5: 'a' * 32), _video(5)],
+      });
+      final store = MemoryStore()
+        ..settings = const AppSettings(blacklist: ['blocked']);
+      final state = AppState(repository: repo, store: store);
+      await state.initialize();
+      final feed = state.shortsFeed();
+      await feed.start(
+        tags: ['cat', 'dog'],
+        boards: [Board.danbooru, Board.e621, Board.safebooru],
+      );
+
+      expect(
+        feed.posts.map((saved) => '${saved.board.name}:${saved.post.id}'),
+        unorderedEquals(['danbooru:1', 'danbooru:4', 'e621:5']),
+      );
+      expect(repo.calls.map((call) => call.board).toSet(), {
+        Board.danbooru,
+        Board.e621,
+      });
+      final danbooruCat = repo.calls.firstWhere(
+        (call) => call.board == Board.danbooru && call.tags.contains('cat'),
+      );
+      expect(danbooruCat.tags.first, 'filetype:mp4,webm');
+      expect(danbooruCat.tags, isNot(contains('dog')));
+      expect(repo.calls.every((call) => call.random && !call.feed), isTrue);
+      expect(repo.calls.map((call) => call.seed).toSet(), hasLength(1));
+      feed.dispose();
+    });
+
+    test('without tags every video is asked for', () async {
+      final repo = _ShortsRepo({
+        (Board.sankaku, null): [_video(7)],
+      });
+      final state = AppState(repository: repo, store: MemoryStore());
+      await state.initialize();
+      final feed = state.shortsFeed();
+      await feed.start(tags: const [], boards: [Board.sankaku]);
+      expect(feed.posts.single.post.id, 7);
+      expect(repo.calls.single.tags.first, 'video');
+      feed.dispose();
+    });
+
+    test('a failing website is reported and can be retried', () async {
+      final repo = _ShortsRepo({
+        (Board.e621, null): [_video(8)],
+      })..failing.add(Board.danbooru);
+      final state = AppState(repository: repo, store: MemoryStore());
+      await state.initialize();
+      final feed = state.shortsFeed();
+      await feed.start(tags: const [], boards: [Board.danbooru, Board.e621]);
+      expect(feed.posts.single.post.id, 8);
+      expect(feed.errors.keys, [Board.danbooru]);
+
+      repo.failing.clear();
+      repo.results[(Board.danbooru, null)] = [_video(9)];
+      await feed.retry();
+      expect(feed.errors, isEmpty);
+      expect(feed.posts.map((saved) => saved.post.id), contains(9));
+      feed.dispose();
+    });
+
+    test('a website that only repeats itself stops being asked', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, null): [_video(1)],
+      })..repeat = true;
+      final state = AppState(repository: repo, store: MemoryStore());
+      await state.initialize();
+      final feed = state.shortsFeed();
+      await feed.start(tags: const [], boards: [Board.danbooru]);
+      expect(feed.posts, hasLength(1));
+      await feed.loadMore();
+      expect(feed.hasMore, isFalse);
+      final calls = repo.calls.length;
+      await feed.loadMore();
+      expect(repo.calls, hasLength(calls));
+      feed.dispose();
+    });
+
+    test('websites need video, Shorts switched on, and credentials', () async {
+      final store = MemoryStore()
+        ..settings = const AppSettings(shortsOff: [Board.e926]);
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+      final boards = await state.shortsBoards();
+      expect(boards, contains(Board.danbooru));
+      expect(boards, isNot(contains(Board.e926)));
+      expect(boards, isNot(contains(Board.safebooru)));
+      expect(boards, isNot(contains(Board.gelbooru)));
+    });
+
+    test('saving Shorts tags and mute does not reload the feed', () async {
+      final repo = FakeRepo(const [[]]);
+      final store = MemoryStore()..selected = Board.safebooru;
+      final state = AppState(repository: repo, store: store);
+      await state.initialize();
+      final calls = repo.calls;
+      await state.setShortsTags(['Cat']);
+      await state.setShortsMuted(true);
+      await state.setShortsOff([Board.nozomi]);
+      expect(repo.calls, calls);
+      expect(store.settings.shortsTags, ['cat']);
+      expect(store.settings.shortsMuted, isTrue);
+      expect(store.settings.shortsOff, [Board.nozomi]);
+    });
+  });
 }
 
 class _DelayedRepo implements BoardRepository {
@@ -1822,4 +1973,63 @@ class _FailingBoardStore extends MemoryStore {
   @override
   Future<void> saveBoard(Board? value) =>
       Future.error(StateError('board write failed'));
+}
+
+Map<String, dynamic> _video(int id, {String md5 = '', String tags = 'cat'}) => {
+  'id': id,
+  'url': 'https://x/$id.mp4',
+  'tags': tags,
+  'rating': 'general',
+  'md5': md5,
+};
+
+/// Answers booruShorts streams by website and Shorts tag (the user's tag
+/// that follows the video query); the first page only.
+class _ShortsRepo implements BoardRepository {
+  _ShortsRepo(this.results);
+  final Map<(Board, String?), List<Map<String, dynamic>>> results;
+  final Set<Board> failing = {};
+  // Every page repeats the first page's posts.
+  bool repeat = false;
+  final List<
+    ({Board board, List<String> tags, bool random, bool feed, int? seed})
+  >
+  calls = [];
+
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) async {
+    calls.add((
+      board: board,
+      tags: tags,
+      random: random,
+      feed: feed,
+      seed: randomSeed,
+    ));
+    if (failing.contains(board)) throw StateError('offline');
+    if (page > 0 && !repeat) return const [];
+    final video = board.shortsVideoQuery ?? const [];
+    final rest = tags.skip(video.length);
+    final tag =
+        rest.isEmpty || rest.first.contains(':') || rest.first.startsWith('-')
+        ? null
+        : rest.first;
+    return results[(board, tag)] ?? const [];
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) async => const [];
 }
