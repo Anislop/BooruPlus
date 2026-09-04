@@ -711,6 +711,44 @@ class AppState extends ChangeNotifier {
   /// A search across several websites at once; see [MultiSiteSearch].
   MultiSiteSearch multiSiteSearch() => MultiSiteSearch._(this);
 
+  /// The booruShorts video feed; see [ShortsFeed].
+  ShortsFeed shortsFeed() => ShortsFeed._(this);
+
+  /// Websites booruShorts can show now: visible, hosting video, switched on
+  /// for Shorts, and usable (credentials saved where required).
+  Future<List<Board>> shortsBoards() => searchableBoards(
+    among: _settings.visibleBoards.where(
+      (board) => board.hasShorts && !_settings.shortsOff.contains(board),
+    ),
+  );
+
+  /// Saves the booruShorts tags, without reloading the feed.
+  Future<void> setShortsTags(List<String> tags) =>
+      _saveQuietly((settings) => settings.copyWith(shortsTags: tags));
+
+  /// Saves the websites switched off in booruShorts.
+  Future<void> setShortsOff(Iterable<Board> boards) =>
+      _saveQuietly((settings) => settings.copyWith(shortsOff: boards.toList()));
+
+  /// Remembers whether booruShorts plays without sound.
+  Future<void> setShortsMuted(bool muted) =>
+      _saveQuietly((settings) => settings.copyWith(shortsMuted: muted));
+
+  /// Saves a settings change made outside the Settings screen, without
+  /// reloading the feed. A failed save keeps the previous settings.
+  Future<void> _saveQuietly(AppSettings Function(AppSettings) change) =>
+      _enqueueSettingsUpdate(() async {
+        final next = change(_settings);
+        if (next == _settings) return;
+        try {
+          await _store.saveSettings(next);
+        } catch (_) {
+          return;
+        }
+        _settings = next;
+        notifyListeners();
+      });
+
   /// Saves which websites are switched off in Search all sites, without
   /// reloading the feed.
   Future<void> setMultiSearchOff(Iterable<Board> boards) =>
@@ -1969,6 +2007,229 @@ class MultiSiteSearch extends ChangeNotifier {
     } catch (error) {
       if (generation == _generation) {
         _errors[board] = _app._friendlyFor(board, error);
+      }
+      return const [];
+    }
+  }
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _generation++;
+    super.dispose();
+  }
+}
+
+/// The booruShorts feed: videos from several websites, in random order,
+/// merged into one list. Each Shorts tag is its own stream per website
+/// (any tag matches), combined with the website's video query, so every
+/// request stays within the website's tag budget. Like [MultiSiteSearch]
+/// it keeps its own generation and never sends `feed`, so it does not
+/// cancel the main feed's requests.
+class ShortsFeed extends ChangeNotifier {
+  ShortsFeed._(this._app);
+  final AppState _app;
+  static const _pageSize = 40;
+  // Streams asked per round, so many tags times many websites do not fire
+  // dozens of requests at once.
+  static const _perRound = 6;
+
+  List<String> _tags = const [];
+  List<Board> _boards = const [];
+  List<(Board, String?)> _streams = const [];
+  List<SavedPost> _posts = const [];
+  final Map<(Board, String?), int> _pages = {};
+  final Set<(Board, String?)> _exhausted = {};
+  final Map<(Board, String?), String> _errors = {};
+  // Pages in a row that added nothing playable, by stream.
+  final Map<(Board, String?), int> _barren = {};
+  final Set<String> _seen = {};
+  int _seed = 0;
+  bool _retryPending = false;
+  int _cursor = 0;
+  int _generation = 0;
+  bool _loading = false;
+  bool _disposed = false;
+
+  /// The tags this feed matches (any of them); empty for every video.
+  List<String> get tags => _tags;
+  List<Board> get boards => _boards;
+  List<SavedPost> get posts => _posts;
+  bool get loading => _loading;
+  bool get hasMore => _streams.any(_active);
+
+  /// Why a website stopped returning videos, by website.
+  Map<Board, String> get errors => Map.unmodifiable({
+    for (final entry in _errors.entries) entry.key.$1: entry.value,
+  });
+
+  bool _active((Board, String?) stream) =>
+      !_exhausted.contains(stream) && !_errors.containsKey(stream);
+
+  /// Starts over with videos matching any of [tags] on [boards]. Boards
+  /// without video are skipped.
+  Future<void> start({
+    required List<String> tags,
+    required Iterable<Board> boards,
+  }) async {
+    _generation++;
+    _tags = List.unmodifiable(
+      tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toSet(),
+    );
+    _boards = List.unmodifiable(boards.where((board) => board.hasShorts));
+    _streams = List.unmodifiable([
+      for (final board in _boards)
+        if (_tags.isEmpty)
+          (board, null)
+        else
+          for (final tag in _tags) (board, tag),
+    ]);
+    _posts = const [];
+    _pages.clear();
+    _exhausted.clear();
+    _errors.clear();
+    _barren.clear();
+    _seen.clear();
+    _seed = Random().nextInt(1 << 31);
+    _retryPending = false;
+    _cursor = 0;
+    _loading = false;
+    _notify();
+    await loadMore();
+  }
+
+  /// Asks the websites that stopped with an error again.
+  Future<void> retry() async {
+    if (_errors.isEmpty) return;
+    // A round in progress could report the same errors again; retry once
+    // it finishes.
+    if (_loading) {
+      _retryPending = true;
+      return;
+    }
+    _errors.clear();
+    _notify();
+    await loadMore();
+  }
+
+  Future<void> loadMore() async {
+    if (_loading || !hasMore) return;
+    final generation = _generation;
+    _loading = true;
+    _notify();
+    // A round can come back with nothing playable (all filtered out); ask
+    // the next streams instead of stalling at the end of the list.
+    var added = 0;
+    for (var round = 0; round < 3 && added == 0; round++) {
+      final streams = _nextStreams();
+      if (streams.isEmpty) break;
+      final batches = await Future.wait(
+        streams.map((stream) => _fetch(stream, generation)),
+      );
+      if (generation != _generation || _disposed) return;
+      // Interleave so the websites and tags mix.
+      final merged = <SavedPost>[];
+      final accepted = List.filled(batches.length, 0);
+      for (var i = 0; ; i++) {
+        var any = false;
+        for (var b = 0; b < batches.length; b++) {
+          final batch = batches[b];
+          if (i >= batch.length) continue;
+          any = true;
+          if (_accept(batch[i])) {
+            merged.add(batch[i]);
+            accepted[b]++;
+          }
+        }
+        if (!any) break;
+      }
+      // A stream whose pages keep adding nothing playable (all filtered
+      // out or already shown) is treated as finished, so the end of the
+      // list cannot keep asking forever.
+      for (var b = 0; b < streams.length; b++) {
+        final stream = streams[b];
+        if (!_pages.containsKey(stream) || !_active(stream)) continue;
+        if (accepted[b] > 0) {
+          _barren.remove(stream);
+        } else if ((_barren[stream] = (_barren[stream] ?? 0) + 1) >= 2) {
+          _exhausted.add(stream);
+        }
+      }
+      if (merged.isNotEmpty) {
+        _posts = List.unmodifiable([..._posts, ...merged]);
+        added += merged.length;
+      }
+    }
+    _loading = false;
+    _notify();
+    if (_retryPending) {
+      _retryPending = false;
+      await retry();
+    }
+  }
+
+  /// The next streams to ask, rotating through the active ones.
+  List<(Board, String?)> _nextStreams() {
+    final active = _streams.where(_active).toList(growable: false);
+    if (active.length <= _perRound) return active;
+    final start = _cursor % active.length;
+    _cursor += _perRound;
+    return [
+      for (var i = 0; i < _perRound; i++) active[(start + i) % active.length],
+    ];
+  }
+
+  /// Whether [saved] is new to the feed, by identity and, across websites,
+  /// by file hash.
+  bool _accept(SavedPost saved) {
+    final md5 = saved.post.md5;
+    if (_seen.contains(saved.identity) ||
+        (md5.isNotEmpty && _seen.contains('md5:$md5'))) {
+      return false;
+    }
+    _seen.add(saved.identity);
+    if (md5.isNotEmpty) _seen.add('md5:$md5');
+    return true;
+  }
+
+  Future<List<SavedPost>> _fetch(
+    (Board, String?) stream,
+    int generation,
+  ) async {
+    final (board, tag) = stream;
+    final page = (_pages[stream] ?? -1) + 1;
+    final query = [...board.shortsVideoQuery!, ?tag];
+    try {
+      final raw = await _app._withSession(
+        board,
+        (credentials) => _app._repository.fetch(
+          board: board,
+          tags: _app._queryTagsFor(board, query, signedIn: credentials != null),
+          limit: _pageSize,
+          page: page,
+          random: true,
+          randomSeed: _seed,
+          credentials: credentials,
+        ),
+      );
+      if (generation != _generation) return const [];
+      _pages[stream] = page;
+      if (raw.isEmpty) {
+        _exhausted.add(stream);
+        return const [];
+      }
+      return raw
+          .map(MediaPost.fromMap)
+          .where((post) => post.isVideo && _app._allowedOn(post, board))
+          .map((post) => SavedPost(board: board, post: post))
+          .toList(growable: false);
+    } catch (error) {
+      if (generation == _generation) {
+        _errors[stream] = _app._friendlyFor(board, error);
       }
       return const [];
     }

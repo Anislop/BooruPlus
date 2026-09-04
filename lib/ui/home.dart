@@ -14,6 +14,7 @@ import 'media_image.dart';
 import 'multi_search.dart';
 import 'search_guide.dart';
 import 'settings.dart';
+import 'shorts.dart';
 import 'saved_posts.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
@@ -1064,6 +1065,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ],
                     ),
                   ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(15, 6, 15, 0),
+                    child: _ShortsEntry(
+                      onTap: () =>
+                          _openFromDrawer((_) => ShortsScreen(state: state)),
+                    ),
+                  ),
                   const SizedBox(height: 8),
                 ],
               ),
@@ -1233,6 +1241,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ),
                 );
               },
+            ),
+            ListTile(
+              key: const ValueKey('drawer_shorts'),
+              leading: const Icon(Icons.smart_display_rounded),
+              title: const Text('booruShorts'),
+              onTap: () => _openFromDrawer((_) => ShortsScreen(state: state)),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
@@ -1646,6 +1660,56 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 /// "N new" beside a saved search once its count arrives.
 /// One of the drawer's shortcut buttons: an icon above a short label.
 /// [active] tints it, for a mode that is on.
+/// The compact drawer's booruShorts button, under the shortcut row.
+class _ShortsEntry extends StatelessWidget {
+  const _ShortsEntry({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Material(
+      key: const ValueKey('drawer_shorts'),
+      color: accent.withValues(alpha: .12),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          child: Row(
+            children: [
+              Icon(Icons.smart_display_rounded, color: accent, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'booruShorts',
+                      style: TextStyle(
+                        color: ink(.87),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      'Swipe through videos from every site',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: ink(.54), fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded, color: ink(.54)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _DrawerShortcut extends StatelessWidget {
   const _DrawerShortcut({
     super.key,

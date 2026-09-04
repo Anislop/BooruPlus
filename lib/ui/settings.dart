@@ -7,6 +7,7 @@ import 'blocked_tags.dart';
 import 'onboarding.dart';
 import 'saved_posts.dart';
 import 'site_catalog.dart';
+import 'tag_input.dart';
 import 'theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -34,6 +35,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _clearingCache = false;
 
   bool get _hasUnsavedChanges => _settings != widget.state.settings;
+
+  void _setShortsSite(Board board, bool on) => setState(
+    () => _settings = _settings.copyWith(
+      shortsOff: on
+          ? _settings.shortsOff.where((other) => other != board).toList()
+          : [..._settings.shortsOff, board],
+    ),
+  );
 
   Future<void> _editBlockedTags() async {
     final result = await Navigator.push<BlockedTags>(
@@ -1199,6 +1208,101 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.volume_up_outlined,
                         title: 'Volume keys turn pages',
                         subtitle: 'Volume down shows the next post and volume up the previous one while viewing.',
+                      ),
+                      const SectionLabel('booruShorts'),
+                      Material(
+                        key: const ValueKey('settings_shorts_tags'),
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Tags'),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Show videos with any of these tags. Leave it empty for every video.',
+                                style: TextStyle(color: ink(.54), fontSize: 13),
+                              ),
+                              const SizedBox(height: 10),
+                              TagInput(
+                                tags: _settings.shortsTags,
+                                onChanged: (tags) => setState(
+                                  () => _settings = _settings.copyWith(
+                                    shortsTags: tags,
+                                  ),
+                                ),
+                                autocomplete: widget.state.autocomplete,
+                                searchStyle: false,
+                                enabled: !_busy,
+                                hint: 'Add a tag, then press space',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Material(
+                        key: const ValueKey('settings_shorts_sites'),
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Websites'),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Websites that feed booruShorts. Websites that need an API key join once you connect them.',
+                                style: TextStyle(color: ink(.54), fontSize: 13),
+                              ),
+                              const SizedBox(height: 10),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final board in _settings.boardOrder)
+                                    if (board.hasShorts)
+                                      FilterChip(
+                                        avatar: SiteLogo(board, size: 18),
+                                        label: Text(board.label),
+                                        selected: !_settings.shortsOff.contains(
+                                          board,
+                                        ),
+                                        onSelected: _busy
+                                            ? null
+                                            : (on) => _setShortsSite(board, on),
+                                      ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _switchCard(
+                        value: _settings.shortsMuted,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsMuted: value,
+                          ),
+                        ),
+                        icon: Icons.volume_off_outlined,
+                        title: 'Start muted',
+                        subtitle: 'Play booruShorts without sound. The mute button in booruShorts changes this too.',
+                      ),
+                      _switchCard(
+                        value: _settings.shortsAutoAdvance,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsAutoAdvance: value,
+                          ),
+                        ),
+                        icon: Icons.skip_next_outlined,
+                        title: 'Auto-advance',
+                        subtitle: 'Move to the next video when one ends instead of replaying it.',
                       ),
                       const SectionLabel('Blocked tags'),
                       Material(

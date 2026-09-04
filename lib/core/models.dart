@@ -76,6 +76,23 @@ extension BoardInfo on Board {
   /// Boards whose connection is managed in Settings.
   bool get supportsAuth => requiresAuth || supportsSignIn;
 
+  /// The query that limits a search to videos, for booruShorts; null on
+  /// boards without usable video (Safebooru and TBIB return only GIFs for
+  /// `video`; Konachan and Yande.re host images). See docs/booru-shorts.md.
+  List<String>? get shortsVideoQuery => switch (this) {
+    // A metatag: it does not count toward the anonymous tag limit.
+    Board.danbooru || Board.aibooru => const ['filetype:mp4,webm'],
+    Board.e621 || Board.e926 => const ['~type:webm', '~type:mp4'],
+    Board.gelbooru ||
+    Board.rule34 ||
+    Board.sankaku ||
+    Board.idolcomplex ||
+    Board.nozomi => const ['video'],
+    Board.safebooru || Board.tbib || Board.konachan || Board.yandere => null,
+  };
+
+  bool get hasShorts => shortsVideoQuery != null;
+
   String get authUrl => switch (this) {
     Board.rule34 => 'https://rule34.xxx/index.php?page=account&s=options',
     Board.gelbooru => 'https://gelbooru.com/index.php?page=account&s=options',
@@ -777,6 +794,10 @@ class AppSettings {
     this.autoFavoriteOnDownload = false,
     this.boardHiddenUploaders = const {},
     this.savedSearchMarks = const {},
+    this.shortsTags = const [],
+    this.shortsOff = const [],
+    this.shortsMuted = false,
+    this.shortsAutoAdvance = false,
   });
   final int columns, rows, batchSize;
 
@@ -905,6 +926,19 @@ class AppSettings {
   /// [savedSearchKey], for the new-posts count.
   final Map<String, int> savedSearchMarks;
 
+  /// booruShorts shows videos with any of these tags (all videos when
+  /// empty).
+  final List<String> shortsTags;
+
+  /// Websites switched off in booruShorts, in enum order.
+  final List<Board> shortsOff;
+
+  /// booruShorts plays without sound.
+  final bool shortsMuted;
+
+  /// booruShorts moves to the next video when one ends instead of looping.
+  final bool shortsAutoAdvance;
+
   /// The [savedSearchMarks] key for [query] on [board].
   static String savedSearchKey(Board board, List<String> query) =>
       '${board.name}|${_normalizedTags(query).join(' ')}';
@@ -985,6 +1019,12 @@ class AppSettings {
     autoFavoriteOnDownload: autoFavoriteOnDownload,
     boardHiddenUploaders: _normalizedBoardTags(boardHiddenUploaders),
     savedSearchMarks: _normalizedMarks(savedSearchMarks),
+    shortsTags: List.unmodifiable(_normalizedTags(shortsTags).take(20)),
+    shortsOff: List.unmodifiable(
+      Board.values.where(shortsOff.toSet().contains),
+    ),
+    shortsMuted: shortsMuted,
+    shortsAutoAdvance: shortsAutoAdvance,
   );
 
   AppSettings copyWith({
@@ -1034,6 +1074,10 @@ class AppSettings {
     bool? autoFavoriteOnDownload,
     Map<Board, List<String>>? boardHiddenUploaders,
     Map<String, int>? savedSearchMarks,
+    List<String>? shortsTags,
+    List<Board>? shortsOff,
+    bool? shortsMuted,
+    bool? shortsAutoAdvance,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -1084,6 +1128,10 @@ class AppSettings {
         autoFavoriteOnDownload ?? this.autoFavoriteOnDownload,
     boardHiddenUploaders: boardHiddenUploaders ?? this.boardHiddenUploaders,
     savedSearchMarks: savedSearchMarks ?? this.savedSearchMarks,
+    shortsTags: shortsTags ?? this.shortsTags,
+    shortsOff: shortsOff ?? this.shortsOff,
+    shortsMuted: shortsMuted ?? this.shortsMuted,
+    shortsAutoAdvance: shortsAutoAdvance ?? this.shortsAutoAdvance,
   ).normalized();
   static const _unset = Object();
 
@@ -1142,6 +1190,10 @@ class AppSettings {
         entry.key.name: entry.value,
     },
     'savedSearchMarks': savedSearchMarks,
+    'shortsTags': shortsTags,
+    'shortsOff': shortsOff.map((board) => board.name).toList(),
+    'shortsMuted': shortsMuted,
+    'shortsAutoAdvance': shortsAutoAdvance,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -1215,6 +1267,12 @@ class AppSettings {
       (value) => value is List ? value.map((name) => '$name').toList() : null,
     ),
     savedSearchMarks: _countsFromMap(map['savedSearchMarks']),
+    shortsTags: (map['shortsTags'] as List? ?? const [])
+        .map((tag) => '$tag')
+        .toList(),
+    shortsOff: _boardsFromMap(map['shortsOff']),
+    shortsMuted: _asBool(map['shortsMuted'], false),
+    shortsAutoAdvance: _asBool(map['shortsAutoAdvance'], false),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -1400,6 +1458,10 @@ class AppSettings {
         other.autoFavoriteOnDownload != autoFavoriteOnDownload ||
         !_sameBoardTags(other.boardHiddenUploaders, boardHiddenUploaders) ||
         !_sameCounts(other.savedSearchMarks, savedSearchMarks) ||
+        !_sameTags(other.shortsTags, shortsTags) ||
+        !_sameBoards(other.shortsOff, shortsOff) ||
+        other.shortsMuted != shortsMuted ||
+        other.shortsAutoAdvance != shortsAutoAdvance ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -1503,6 +1565,10 @@ class AppSettings {
     filenameTemplate,
     autoFavoriteOnDownload,
     _countsHash(savedSearchMarks),
+    Object.hashAll(shortsTags),
+    Object.hashAll(shortsOff),
+    shortsMuted,
+    shortsAutoAdvance,
     Object.hashAll(
       boardHiddenUploaders.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),
