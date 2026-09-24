@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
+import 'package:booruplus/core/services.dart';
 import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
@@ -1164,6 +1167,86 @@ void main() {
     );
 
     await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('viewer shows download progress and the original size once '
+      'details open', (tester) async {
+    const channel = MethodChannel('booruplus/test-viewer-download');
+    const progress = MethodChannel('booruplus/test-viewer-progress');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    final saved = Completer<String>();
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method == 'mediaSize') return 2621440;
+      if (call.method == 'download') return saved.future;
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+      downloads: DownloadService(channel: channel, progressChannel: progress),
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap({...post(1), 'url': 'https://x/1.jpg'});
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    // The size is only asked for once the details open.
+    expect(calls.where((call) => call.method == 'mediaSize'), isEmpty);
+
+    await tester.tap(find.byTooltip('Download original media'));
+    await tester.pump();
+    await tester.pump();
+    final download = calls.singleWhere((call) => call.method == 'download');
+    final id = (download.arguments as Map)['id'];
+    expect(id, isA<int>());
+    expect(
+      find.byKey(const ValueKey('viewer_download_progress')),
+      findsOneWidget,
+    );
+    await messenger.handlePlatformMessage(
+      progress.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('progress', {'id': id, 'received': 42, 'total': 100}),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    expect(find.text('42%'), findsOneWidget);
+
+    saved.complete('content://saved');
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('viewer_download_progress')),
+      findsNothing,
+    );
+
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(
+      (calls.lastWhere((call) => call.method == 'mediaSize').arguments
+          as Map)['url'],
+      media.url,
+    );
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('viewer_details_summary')))
+          .data,
+      contains('2.5 MB'),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
     state.dispose();
   });
 

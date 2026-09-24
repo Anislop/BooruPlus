@@ -326,13 +326,8 @@ class _ShortsScreenState extends State<ShortsScreen>
     }
   }
 
-  Future<void> _favorite(SavedPost saved, {bool onlyAdd = false}) async {
-    if (onlyAdd) {
-      await widget.state.favoritePost(saved.post, board: saved.board);
-    } else {
-      await widget.state.toggleFavorite(saved.post, board: saved.board);
-    }
-  }
+  Future<void> _favorite(SavedPost saved) =>
+      widget.state.toggleFavorite(saved.post, board: saved.board);
 
   Future<void> _download(SavedPost saved) async {
     if (_downloading) return;
@@ -649,7 +644,6 @@ class _ShortsScreenState extends State<ShortsScreen>
           sharing: _sharing,
           onTogglePlay: _togglePlay,
           onReveal: () => _reveal(saved),
-          onDoubleTap: () => _favorite(saved, onlyAdd: true),
           onFavorite: () => _favorite(saved),
           onDetails: () => _showDetails(saved),
           onSite: () => _showSite(saved),
@@ -907,7 +901,6 @@ class _ShortsPage extends StatefulWidget {
     required this.sharing,
     required this.onTogglePlay,
     required this.onReveal,
-    required this.onDoubleTap,
     required this.onFavorite,
     required this.onDetails,
     required this.onSite,
@@ -919,7 +912,7 @@ class _ShortsPage extends StatefulWidget {
   final SavedPost saved;
   final VideoPlayerController? controller;
   final bool failed, active, blurred, favorite, downloading, sharing;
-  final VoidCallback onTogglePlay, onReveal, onDoubleTap, onFavorite;
+  final VoidCallback onTogglePlay, onReveal, onFavorite;
   final VoidCallback onDetails, onSite, onShare, onDownload, onMore;
   final ValueChanged<String> onTag;
 
@@ -930,8 +923,9 @@ class _ShortsPage extends StatefulWidget {
 class _ShortsPageState extends State<_ShortsPage> {
   int _flash = 0;
   IconData _flashIcon = Icons.play_arrow_rounded;
-  int _burst = 0;
-  Offset _burstAt = Offset.zero;
+  // Double-tap skips ahead; the badge appears where the finger landed.
+  int _skip = 0;
+  Offset _skipAt = Offset.zero;
   Offset _lastDoubleTap = Offset.zero;
   bool _fast = false;
 
@@ -949,12 +943,17 @@ class _ShortsPageState extends State<_ShortsPage> {
     });
   }
 
+  static const _skipBy = Duration(seconds: 5);
+
   void _doubleTap() {
-    if (widget.blurred) return;
-    widget.onDoubleTap();
+    final controller = widget.controller;
+    if (widget.blurred || !_ready || controller == null) return;
+    final value = controller.value;
+    final target = value.position + _skipBy;
+    controller.seekTo(target < value.duration ? target : value.duration);
     setState(() {
-      _burst++;
-      _burstAt = _lastDoubleTap;
+      _skip++;
+      _skipAt = _lastDoubleTap;
     });
   }
 
@@ -1058,13 +1057,13 @@ class _ShortsPageState extends State<_ShortsPage> {
               ),
             ),
           ),
-        if (_burst > 0)
+        if (_skip > 0)
           Positioned(
-            left: _burstAt.dx - 56,
-            top: _burstAt.dy - 56,
+            left: _skipAt.dx - 44,
+            top: _skipAt.dy - 44,
             child: IgnorePointer(
               child: TweenAnimationBuilder<double>(
-                key: ValueKey(_burst),
+                key: ValueKey(_skip),
                 tween: Tween(begin: 0, end: 1),
                 duration: const Duration(milliseconds: 800),
                 builder: (_, value, child) => Opacity(
@@ -1076,11 +1075,32 @@ class _ShortsPageState extends State<_ShortsPage> {
                     child: child,
                   ),
                 ),
-                child: const Icon(
-                  Icons.favorite_rounded,
-                  size: 112,
-                  color: Color(0xFFFF3B5C),
-                  shadows: [Shadow(blurRadius: 16, color: Colors.black45)],
+                child: const SizedBox.square(
+                  key: ValueKey('shorts_skip'),
+                  dimension: 88,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Color(0x66000000),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.fast_forward_rounded,
+                          size: 42,
+                          color: Colors.white,
+                        ),
+                        Text(
+                          '+5s',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1528,18 +1548,26 @@ class _ScrubBarState extends State<_ScrubBar> {
                         ),
                       ),
                     ),
+                  // The track spans the width; played and buffered fill it
+                  // from the left edge.
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 120),
+                    width: double.infinity,
                     height: barHeight,
                     margin: const EdgeInsets.only(bottom: 4),
                     color: const Color(0x33FFFFFF),
                     child: Stack(
+                      fit: StackFit.expand,
                       children: [
                         FractionallySizedBox(
+                          key: const ValueKey('shorts_scrub_buffered'),
+                          alignment: Alignment.centerLeft,
                           widthFactor: buffered.clamp(0.0, 1.0),
                           child: const ColoredBox(color: Color(0x55FFFFFF)),
                         ),
                         FractionallySizedBox(
+                          key: const ValueKey('shorts_scrub_played'),
+                          alignment: Alignment.centerLeft,
                           widthFactor: played,
                           child: const ColoredBox(color: Colors.white),
                         ),
