@@ -696,6 +696,15 @@ class DownloadRecord {
 /// The default [AppSettings.filenameTemplate].
 const defaultFilenameTemplate = '{site}_{id}';
 
+/// [bytes] as KB, MB, or GB.
+String formatBytes(int bytes) {
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
 /// The name [post]'s media is saved or shared under: [template] with
 /// `{site}`, `{id}`, `{md5}`, `{artist}`, `{character}`, `{copyright}`,
 /// `{rating}`, `{width}`, and `{height}` filled in, made safe for a file

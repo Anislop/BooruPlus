@@ -61,9 +61,11 @@ playing them.
 ## Gestures and controls
 
 - Tap: pause or play, with a brief icon in the center.
-- Double-tap: favorite, with a heart burst.
+- Double-tap: skip ahead 5 seconds (clamped to the end), with a `+5s` badge
+  where the finger landed. Favorite from the rail.
 - Long-press: 2x speed while held.
-- Bottom scrub bar: a thin progress bar (played and buffered). Touching it
+- Bottom scrub bar: a thin full-width progress bar whose played and buffered
+  parts fill from the left edge. Touching it
   thickens it and shows `0:12 / 0:30`; dragging pauses and seeks, releasing
   resumes.
 - Mute toggle in the top bar; the choice is remembered (`shortsMuted`).

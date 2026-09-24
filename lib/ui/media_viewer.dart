@@ -70,6 +70,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   late final PageController _pages;
   String? _videoError;
   bool _downloading = false;
+  // Fraction saved of the download in progress; null until the size is known.
+  double? _downloadProgress;
   bool _sharing = false;
   bool _details = false;
 
@@ -101,6 +103,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   final Map<String, Future<({MediaPost? parent, List<MediaPost> children})>>
   _families = {};
   final Map<String, Future<List<MediaPost>>> _related = {};
+  // Original media sizes, by post, asked for once the details open.
+  final Map<String, Future<int?>> _sizes = {};
   final _screenAwake = ScreenAwakeService();
   final _device = DeviceService();
   AppLifecycleState _lifecycle =
@@ -461,10 +465,22 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   }
 
   Future<void> _download() async {
-    setState(() => _downloading = true);
+    setState(() {
+      _downloading = true;
+      _downloadProgress = null;
+    });
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await widget.state.downloadPost(_post, board: _currentBoard);
+      await widget.state.downloadPost(
+        _post,
+        board: _currentBoard,
+        onProgress: (received, total) {
+          if (!mounted || total == null) return;
+          setState(
+            () => _downloadProgress = (received / total).clamp(0.0, 1.0),
+          );
+        },
+      );
       messenger.showSnackBar(
         SnackBar(
           content: Text(
@@ -1071,11 +1087,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                     : 'Download original media',
                                 onPressed: _downloading ? null : _download,
                                 icon: _downloading
-                                    ? const SizedBox.square(
-                                        dimension: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
+                                    ? _DownloadProgress(
+                                        value: _downloadProgress,
                                       )
                                     : Icon(
                                         widget.state.isDownloaded(
@@ -1177,6 +1190,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     );
   }
 
+  /// The original media's size, asked for the first time the details open
+  /// on [post] and remembered while the viewer is open.
+  Future<int?>? _sizeOf(MediaPost post, Board board) {
+    final key = _linkKey(post, board);
+    final known = _sizes[key];
+    if (known != null || !_details) return known;
+    if (_sizes.length > 40) _sizes.clear();
+    return _sizes[key] = widget.state.mediaSize(post, board: board);
+  }
+
   /// The bar under the media: rating, size, score, and favorite. Tapping
   /// or swiping it opens and closes the details.
   Widget _detailsHeader(
@@ -1241,11 +1264,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                           'Tags & details',
                           style: TextStyle(fontWeight: FontWeight.w600),
                         ),
-                        Text(
-                          '${post.width} × ${post.height} · ${post.fileType.isEmpty ? (post.isVideo ? 'Video' : 'Image') : '${post.fileType} ${post.isVideo ? 'video' : 'image'}'} · ${post.tags.length} tag${post.tags.length == 1 ? '' : 's'}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: ink(.54), fontSize: 11),
+                        FutureBuilder<int?>(
+                          future: _sizeOf(post, board),
+                          builder: (context, size) => Text(
+                            '${post.width} × ${post.height} · ${post.fileType.isEmpty ? (post.isVideo ? 'Video' : 'Image') : '${post.fileType} ${post.isVideo ? 'video' : 'image'}'}${size.data == null ? '' : ' · ${formatBytes(size.data!)}'} · ${post.tags.length} tag${post.tags.length == 1 ? '' : 's'}',
+                            key: const ValueKey('viewer_details_summary'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(color: ink(.54), fontSize: 11),
+                          ),
                         ),
                       ],
                     ),
@@ -2083,7 +2110,9 @@ class _ZoomableMediaState extends State<_ZoomableMedia> {
 }
 
 /// Page physics with a stiffer, critically damped spring so a released
-/// swipe settles on the next post quickly instead of drifting.
+/// swipe settles on the next post quickly instead of drifting. A swipe
+/// must also travel and move faster than the defaults before it turns the
+/// page, so short flicks and slanted vertical swipes stay on the post.
 class _ViewerPagePhysics extends ScrollPhysics {
   const _ViewerPagePhysics({super.parent});
 
@@ -2092,6 +2121,56 @@ class _ViewerPagePhysics extends ScrollPhysics {
       _ViewerPagePhysics(parent: buildParent(ancestor));
 
   @override
+  double get minFlingVelocity => 400;
+
+  @override
+  double get minFlingDistance => 48;
+
+  @override
+  double get dragStartDistanceMotionThreshold => 24;
+
+  @override
   SpringDescription get spring =>
       SpringDescription.withDampingRatio(mass: .5, stiffness: 180, ratio: 1);
+}
+
+/// The download button while saving: a ring that fills with the saved
+/// fraction and shows it as a percentage, or spins until the size is known.
+class _DownloadProgress extends StatelessWidget {
+  const _DownloadProgress({required this.value});
+  final double? value;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = this.value;
+    return SizedBox.square(
+      key: const ValueKey('viewer_download_progress'),
+      dimension: 28,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Positioned.fill(
+            child: CircularProgressIndicator(
+              value: value,
+              strokeWidth: 2.5,
+              color: accent,
+              backgroundColor: ink(.12),
+            ),
+          ),
+          if (value != null)
+            Text(
+              '${(value * 100).floor()}%',
+              // The ring has a fixed size, so large text scales only a little.
+              textScaler: MediaQuery.textScalerOf(context)
+                  .clamp(maxScaleFactor: 1.15),
+              style: TextStyle(
+                color: ink(.87),
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

@@ -93,6 +93,8 @@ class MainActivity : FlutterActivity() {
     private var importResult: MethodChannel.Result? = null
     private var authResult: MethodChannel.Result? = null
     private var channel: MethodChannel? = null
+    // Native-to-Dart download progress, kept apart from the main channel's handler.
+    private var downloadChannel: MethodChannel? = null
     // A launcher shortcut that opened the app, until Dart takes it.
     private var pendingShortcut: Map<String, String>? = null
     private val pending = ConcurrentHashMap.newKeySet<MethodChannel.Result>()
@@ -128,6 +130,7 @@ class MainActivity : FlutterActivity() {
         pendingShortcut = shortcutFrom(intent)
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/platform")
             .also { it.setMethodCallHandler(::handle) }
+        downloadChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/downloads")
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -155,6 +158,7 @@ class MainActivity : FlutterActivity() {
             "fetchMedia" -> fetchMedia(call, result)
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
+            "mediaSize" -> mediaSize(call, result)
             "setKeepScreenOn" -> setKeepScreenOn(call, result)
             "signIn" -> signIn(call, result)
             "refreshSignIn" -> refreshSignIn(call, result)
@@ -1119,19 +1123,32 @@ class MainActivity : FlutterActivity() {
             result.error("INVALID_NAME", "Invalid download name", null); return
         }
         if (Build.VERSION.SDK_INT < 29 && directory == null) { result.error("DIRECTORY_REQUIRED", "Choose a download folder in Settings", null); return }
+        // Dart passes an id when it wants progress reports for this download.
+        val progressId = call.argument<Number>("id")?.toLong()
         background(result, mediaExecutor) {
             var uri: Uri? = null
             try {
                 // Open the network first; an HTTP failure must not leave a target stream open.
-                openSecureDownload(url!!).use { input ->
+                val connection = openSecureConnection(url!!)
+                val length = connection.contentLengthLong.takeIf { it > 0 }
+                downloadStream(connection).use { input ->
                     uri = createTarget(name, directory)
                     (contentResolver.openOutputStream(uri!!, "w") ?: throw IOException("Cannot open target")).use { output ->
                         val buffer = ByteArray(65536)
+                        var received = 0L
+                        var reported = -1L
                         while (true) {
                             if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
                             val count = input.read(buffer)
                             if (count < 0) break
                             output.write(buffer, 0, count)
+                            received += count
+                            // At most one report per percent (or per 512 KB when the size is unknown).
+                            val step = if (length != null) received * 100 / length else received / (512L * 1024L)
+                            if (progressId != null && step != reported) {
+                                reported = step
+                                reportProgress(progressId, received, length)
+                            }
                         }
                     }
                 }
@@ -1148,18 +1165,59 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun openSecureDownload(value: String): InputStream {
+    private fun reportProgress(id: Long, received: Long, total: Long?) {
+        runOnUiThread {
+            if (!closing) downloadChannel?.invokeMethod("progress", mapOf("id" to id, "received" to received, "total" to total))
+        }
+    }
+
+    /** The size in bytes of the media at `url`, or null when the host does not say. */
+    private fun mediaSize(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url")
+        if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media URLs are allowed", null); return }
+        background(result, mediaExecutor) {
+            val head = try { openSecureConnection(url!!, "HEAD") } catch (_: IOException) { null }
+            val headLength = head?.let { try { it.contentLengthLong } finally { it.disconnect() } }
+            if (headLength != null && headLength > 0) return@background headLength
+            // Some hosts refuse HEAD or omit the length; ask for one byte and read the total.
+            val probe = try { openSecureConnection(url!!) { it.setRequestProperty("Range", "bytes=0-0") } } catch (_: IOException) { return@background null }
+            try {
+                if (probe.responseCode == 206) {
+                    probe.getHeaderField("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()?.takeIf { it > 0 }
+                } else {
+                    probe.contentLengthLong.takeIf { it > 0 }
+                }
+            } finally { probe.disconnect() }
+        }
+    }
+
+    private fun openSecureDownload(value: String): InputStream = downloadStream(openSecureConnection(value))
+
+    private fun downloadStream(connection: HttpURLConnection): InputStream = try {
+        object : FilterInputStream(connection.inputStream) {
+            override fun close() { try { super.close() } finally { connection.disconnect() } }
+        }
+    } catch (error: Exception) { connection.disconnect(); throw error }
+
+    /** Follows up to six HTTPS-only redirects; returns a connected 2xx response. */
+    private fun openSecureConnection(
+        value: String,
+        method: String = "GET",
+        configure: (HttpURLConnection) -> Unit = {},
+    ): HttpURLConnection {
         var current = URI(value)
         repeat(6) {
             if (!secureHttps(current.toString())) throw IOException("Insecure URL")
             val connection = current.toURL().openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
+                connection.requestMethod = method
                 connection.connectTimeout = 15000
                 connection.readTimeout = 30000
                 connection.setRequestProperty("User-Agent", USER_AGENT)
                 if (isGelbooruHost(current.host)) connection.setRequestProperty("Referer", GELBOORU_REFERER)
                 if (NozomiApi.isMediaHost(current.host)) connection.setRequestProperty("Referer", NozomiApi.REFERER)
+                configure(connection)
                 val code = connection.responseCode
                 if (code in 300..399) {
                     val location = connection.getHeaderField("Location") ?: throw IOException("Invalid redirect")
@@ -1167,9 +1225,7 @@ class MainActivity : FlutterActivity() {
                     current = current.resolve(location)
                 } else {
                     if (code !in 200..299) throw IOException("HTTP failure")
-                    return object : FilterInputStream(connection.inputStream) {
-                        override fun close() { try { super.close() } finally { connection.disconnect() } }
-                    }
+                    return connection
                 }
             } catch (error: Exception) { connection.disconnect(); throw error }
         }

@@ -2037,9 +2037,7 @@ class _MediaTileState extends State<MediaTile> {
             errorWidget: Center(
               child: Icon(Icons.broken_image_outlined, color: ink(.24)),
             ),
-            loadingWidget: board == Board.gelbooru
-                ? null
-                : Center(child: Icon(Icons.image_outlined, color: ink(.12))),
+            progressBuilder: (value) => TileProgress(value: value),
           )
         : Image.network(
             url,
@@ -2047,7 +2045,16 @@ class _MediaTileState extends State<MediaTile> {
             cacheWidth: 480,
             loadingBuilder: (context, child, progress) => progress == null
                 ? child
-                : Center(child: Icon(Icons.image_outlined, color: ink(.12))),
+                : TileProgress(
+                    value: switch (progress.expectedTotalBytes) {
+                      final total? when total > 0 =>
+                        (progress.cumulativeBytesLoaded / total).clamp(
+                          0.0,
+                          1.0,
+                        ),
+                      _ => null,
+                    },
+                  ),
             errorBuilder: (_, _, _) => Center(
               child: Icon(Icons.broken_image_outlined, color: ink(.24)),
             ),
@@ -3064,6 +3071,49 @@ class FilterBar extends StatelessWidget {
               ),
               onPressed: onRatings,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A feed tile's loading indicator: a ring that fills as the preview
+/// arrives, with the percentage inside, or spins when the size is unknown.
+class TileProgress extends StatelessWidget {
+  const TileProgress({super.key, required this.value});
+  final double? value;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = this.value;
+    return Center(
+      child: SizedBox.square(
+        key: const ValueKey('tile_progress'),
+        dimension: 34,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Positioned.fill(
+              child: CircularProgressIndicator(
+                value: value,
+                strokeWidth: 2.5,
+                color: ink(.54),
+                backgroundColor: ink(.08),
+              ),
+            ),
+            if (value != null)
+              Text(
+                '${(value * 100).floor()}%',
+                // The ring has a fixed size, so large text scales only a little.
+                textScaler: MediaQuery.textScalerOf(context)
+                    .clamp(maxScaleFactor: 1.15),
+                style: TextStyle(
+                  color: ink(.54),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
           ],
         ),
       ),

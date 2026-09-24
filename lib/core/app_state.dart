@@ -302,7 +302,11 @@ class AppState extends ChangeNotifier {
   /// Saves [post]'s original media with the file name template, records it
   /// in the download history, and favorites it when that setting is on.
   /// Returns the saved file's location; platform errors are rethrown.
-  Future<String> downloadPost(MediaPost post, {Board? board}) async {
+  Future<String> downloadPost(
+    MediaPost post, {
+    Board? board,
+    DownloadProgress? onProgress,
+  }) async {
     final display = displayReady(_saved(post, board));
     final url = display.post.url;
     if (url.isEmpty) throw StateError('Missing media URL');
@@ -315,6 +319,7 @@ class AppState extends ChangeNotifier {
         template: _settings.filenameTemplate,
       ),
       directory: _settings.downloadDirectory,
+      onProgress: onProgress,
     );
     final record = DownloadRecord(
       saved: display.sanitized(),
@@ -344,6 +349,13 @@ class AppState extends ChangeNotifier {
   }
 
   static const _maxDownloadRecords = 1000;
+
+  /// The size in bytes of [post]'s original media (what [downloadPost]
+  /// saves), or null when unknown.
+  Future<int?> mediaSize(MediaPost post, {Board? board}) {
+    final url = displayReady(_saved(post, board)).post.url;
+    return url.isEmpty ? Future.value() : _downloads.mediaSize(url);
+  }
 
   /// Downloads [posts] one at a time. Stops early when the download folder
   /// needs to be chosen again.

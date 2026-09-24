@@ -379,23 +379,77 @@ class LocalSettingsStore implements SettingsStore {
       _secure.delete(key: _key(board));
 }
 
+/// Bytes saved so far, and the file's size when the host reports it.
+typedef DownloadProgress = void Function(int received, int? total);
+
 class DownloadService {
-  DownloadService({MethodChannel? channel})
-    : channel = channel ?? const MethodChannel('booruplus/platform');
+  DownloadService({MethodChannel? channel, MethodChannel? progressChannel})
+    : channel = channel ?? const MethodChannel('booruplus/platform'),
+      progressChannel =
+          progressChannel ?? const MethodChannel('booruplus/downloads');
   final MethodChannel channel;
+
+  /// Native-to-Dart `progress` calls (`id`, `received`, nullable `total`).
+  final MethodChannel progressChannel;
+
+  static final _listeners = <int, DownloadProgress>{};
+  static final _listening = <String>{};
+  static var _nextId = 0;
+
   Future<String?> chooseDirectory() =>
       channel.invokeMethod<String?>('pickDownloadDirectory');
+
   Future<String> download({
     required String url,
     required String name,
     String? directory,
-  }) => channel
-      .invokeMethod<String>('download', {
+    DownloadProgress? onProgress,
+  }) async {
+    int? id;
+    if (onProgress != null) {
+      _listen();
+      id = ++_nextId;
+      _listeners[id] = onProgress;
+    }
+    try {
+      final value = await channel.invokeMethod<String>('download', {
         'url': url,
         'name': name,
         'directory': directory,
-      })
-      .then((v) => v ?? '');
+        'id': ?id,
+      });
+      return value ?? '';
+    } finally {
+      _listeners.remove(id);
+    }
+  }
+
+  /// The size in bytes of the media at [url], or null when the host does
+  /// not report it or the request fails.
+  Future<int?> mediaSize(String url) async {
+    try {
+      final value = await channel.invokeMethod<Object?>('mediaSize', {
+        'url': url,
+      });
+      return value is num && value > 0 ? value.toInt() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _listen() {
+    if (!_listening.add(progressChannel.name)) return;
+    progressChannel.setMethodCallHandler((call) async {
+      final args = call.arguments;
+      if (call.method != 'progress' || args is! Map) return;
+      final id = args['id'], received = args['received'], total = args['total'];
+      if (id is! num || received is! num) return;
+      _listeners[id.toInt()]?.call(
+        received.toInt(),
+        total is num && total > 0 ? total.toInt() : null,
+      );
+    });
+  }
 }
 
 class MediaService {

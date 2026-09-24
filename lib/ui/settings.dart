@@ -118,14 +118,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _measureCache();
   }
 
-  static String _bytes(int bytes) {
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
-  }
-
   String get _uploadersSummary {
     final total = _settings.boardHiddenUploaders.values.fold(
       0,
@@ -1482,7 +1474,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           subtitle: Text(
                             _cacheBytes == null
                                 ? 'Measuring…'
-                                : '${_bytes(_cacheBytes!)} of previews and media. Downloads and favorites are not affected.',
+                                : '${formatBytes(_cacheBytes!)} of previews and media. Downloads and favorites are not affected.',
                           ),
                           trailing: TextButton(
                             onPressed: _clearingCache || _busy
