@@ -12,6 +12,7 @@ import '../core/models.dart';
 import '../core/services.dart';
 import 'home.dart';
 import 'media_image.dart';
+import 'multi_search.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
 
@@ -829,6 +830,11 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 title: const Text('Search this tag'),
                 onTap: () => Navigator.pop(context, 'search'),
               ),
+              ListTile(
+                leading: const Icon(Icons.travel_explore_rounded),
+                title: const Text('Search on all sites'),
+                onTap: () => Navigator.pop(context, 'search_all'),
+              ),
               if (fromFeed) ...[
                 ListTile(
                   leading: const Icon(Icons.add_circle_outline_rounded),
@@ -865,6 +871,17 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     switch (action) {
       case 'search':
         _browseTag(tag);
+      case 'search_all':
+        widget.state.recordBrowsedTags([tag]);
+        _video?.pause();
+        if (_slideshow) _toggleSlideshow();
+        Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                MultiSearchScreen(state: widget.state, initialTags: [tag]),
+          ),
+        );
       case 'add':
         _browseTag(tag, mode: TagBrowseMode.add);
       case 'exclude':

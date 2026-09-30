@@ -7,6 +7,7 @@ import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
+import 'package:booruplus/ui/multi_search.dart';
 import 'package:booruplus/ui/onboarding.dart';
 import 'package:booruplus/ui/search_guide.dart';
 import 'package:booruplus/ui/site_catalog.dart';
@@ -1243,6 +1244,43 @@ void main() {
           .widget<Text>(find.byKey(const ValueKey('viewer_details_summary')))
           .data,
       contains('2.5 MB'),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('holding a tag offers a search on all sites', (tester) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap(post(1, tags: ['blue_sky']));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = find.widgetWithText(ActionChip, 'blue_sky');
+    await tester.ensureVisible(chip);
+    await tester.pump();
+    await tester.longPress(chip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Search on all sites'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MultiSearchScreen>(find.byType(MultiSearchScreen))
+          .initialTags,
+      ['blue_sky'],
     );
 
     await tester.pumpWidget(const SizedBox());
