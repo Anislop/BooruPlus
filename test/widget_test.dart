@@ -225,8 +225,9 @@ void main() {
     expect(find.text('Posts per batch'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Save preferences'),
-      250,
+      500,
       scrollable: find.byType(Scrollable).first,
+      maxScrolls: 200,
     );
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
@@ -281,6 +282,11 @@ void main() {
 
       // Change a slider (e.g. Columns from 3 to 4)
       final slider = find.byType(Slider).first;
+      await tester.scrollUntilVisible(
+        find.text('Columns'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(slider);
       await tester.pumpAndSettle();
 
@@ -325,9 +331,11 @@ void main() {
   testWidgets(
     'Learn to search in sidebar is underlined and navigates to SearchGuideScreen',
     (tester) async {
+      // The underlined link is in the classic drawer; the compact one has
+      // an icon button instead.
       final state = AppState(
         repository: FakeRepo(const [[]]),
-        store: MemoryStore(),
+        store: MemoryStore()..settings = const AppSettings(classicDrawer: true),
       );
       await state.initialize();
       await state.chooseBoard(Board.safebooru);
@@ -546,9 +554,11 @@ void main() {
     final store = MemoryStore()
       ..selected = Board.safebooru
       ..settings = const AppSettings(
-        savedQueries: [
-          ['saved_tag'],
-        ],
+        boardSavedQueries: {
+          Board.safebooru: [
+            ['saved_tag'],
+          ],
+        },
         recentSearches: [
           ['recent_tag'],
         ],
