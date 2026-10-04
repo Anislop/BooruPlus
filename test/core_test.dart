@@ -485,9 +485,11 @@ void main() {
       final store = MemoryStore()
         ..selected = Board.safebooru
         ..settings = const AppSettings(
-          savedQueries: [
-            ['saved'],
-          ],
+          boardSavedQueries: {
+            Board.safebooru: [
+              ['saved'],
+            ],
+          },
         );
       final state = AppState(repository: FakeRepo(const [[]]), store: store);
       await state.initialize();

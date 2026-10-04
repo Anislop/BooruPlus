@@ -989,12 +989,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     padding: const EdgeInsets.fromLTRB(20, 16, 24, 0),
                     child: Row(
                       children: [
-                        Image(
-                          image: AssetImage(logoAsset),
-                          height: 30,
-                          fit: BoxFit.contain,
+                        // The wordmark shrinks rather than pushing the
+                        // icons out of a narrow drawer.
+                        Expanded(
+                          child: Align(
+                            alignment: AlignmentDirectional.centerStart,
+                            child: Image(
+                              image: AssetImage(logoAsset),
+                              height: 30,
+                              fit: BoxFit.contain,
+                            ),
+                          ),
                         ),
-                        const Spacer(),
                         // Compact, so the two icons sit close together.
                         IconButton(
                           tooltip: 'Learn to search',
@@ -1157,124 +1163,127 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Padding(
-              padding: EdgeInsets.all(24),
-              child: Row(
-                children: [
-                  Image(
-                    image: AssetImage(logoAsset),
-                    height: 38,
-                    fit: BoxFit.contain,
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-              child: Text(
-                'Browsing ${board.label}',
-                style: TextStyle(color: ink(.54)),
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.settings_rounded),
-              title: const Text('Settings'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => SettingsScreen(state: state),
-                  ),
-                );
-              },
-            ),
-            SwitchListTile(
-              secondary: Icon(
-                state.settings.incognito
-                    ? Icons.visibility_off_rounded
-                    : Icons.visibility_outlined,
-              ),
-              title: const Text('Incognito'),
-              subtitle: const Text("Don't record searches or tags"),
-              value: state.settings.incognito,
-              onChanged: state.setIncognito,
-            ),
-            ListTile(
-              leading: const Icon(Icons.favorite_rounded),
-              title: const Text('Favorites'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => SavedPostsScreen(state: state),
-                  ),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.download_done_rounded),
-              title: const Text('Downloads'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => DownloadsScreen(state: state),
-                  ),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.travel_explore_rounded),
-              title: const Text('Search all sites'),
-              onTap: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute<void>(
-                    builder: (_) => MultiSearchScreen(
-                      state: state,
-                      initialTags: state.tags,
-                    ),
-                  ),
-                );
-              },
-            ),
-            ListTile(
-              key: const ValueKey('drawer_shorts'),
-              leading: const Icon(Icons.smart_display_rounded),
-              title: const Text('booruShorts'),
-              onTap: () => _openFromDrawer((_) => ShortsScreen(state: state)),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Websites',
-                      style: TextStyle(
-                        color: ink(.54),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Reorder or hide websites',
-                    visualDensity: VisualDensity.compact,
-                    color: ink(.54),
-                    icon: const Icon(Icons.tune_rounded, size: 20),
-                    onPressed: _editBoardLayout,
-                  ),
-                ],
-              ),
-            ),
+            // Everything above the footer scrolls, so short screens and
+            // large text keep every entry reachable.
             Expanded(
               child: ListView(
                 padding: EdgeInsets.zero,
                 children: [
+                  Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Row(
+                      children: [
+                        Image(
+                          image: AssetImage(logoAsset),
+                          height: 38,
+                          fit: BoxFit.contain,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                    child: Text(
+                      'Browsing ${board.label}',
+                      style: TextStyle(color: ink(.54)),
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.settings_rounded),
+                    title: const Text('Settings'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => SettingsScreen(state: state),
+                        ),
+                      );
+                    },
+                  ),
+                  SwitchListTile(
+                    secondary: Icon(
+                      state.settings.incognito
+                          ? Icons.visibility_off_rounded
+                          : Icons.visibility_outlined,
+                    ),
+                    title: const Text('Incognito'),
+                    subtitle: const Text("Don't record searches or tags"),
+                    value: state.settings.incognito,
+                    onChanged: state.setIncognito,
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.favorite_rounded),
+                    title: const Text('Favorites'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => SavedPostsScreen(state: state),
+                        ),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.download_done_rounded),
+                    title: const Text('Downloads'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => DownloadsScreen(state: state),
+                        ),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.travel_explore_rounded),
+                    title: const Text('Search all sites'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => MultiSearchScreen(
+                            state: state,
+                            initialTags: state.tags,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    key: const ValueKey('drawer_shorts'),
+                    leading: const Icon(Icons.smart_display_rounded),
+                    title: const Text('booruShorts'),
+                    onTap: () =>
+                        _openFromDrawer((_) => ShortsScreen(state: state)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Websites',
+                            style: TextStyle(
+                              color: ink(.54),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Reorder or hide websites',
+                          visualDensity: VisualDensity.compact,
+                          color: ink(.54),
+                          icon: const Icon(Icons.tune_rounded, size: 20),
+                          onPressed: _editBoardLayout,
+                        ),
+                      ],
+                    ),
+                  ),
                   // The current website stays listed even when hidden
                   // so the drawer always shows where you are.
                   for (final option in state.settings.boardOrder)
