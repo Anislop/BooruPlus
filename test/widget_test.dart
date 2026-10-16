@@ -1436,6 +1436,77 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('booruShorts learns from Like and Not for me, and the '
+      'Following tab asks for followed tags', (tester) async {
+    final repo = FakeRepo([
+      [
+        for (var id = 1; id <= 3; id++)
+          {
+            'id': id,
+            'url': 'https://x/$id.mp4',
+            'previewUrl': '',
+            'tags': 'cat_$id',
+            'rating': 'general',
+          },
+      ],
+    ]);
+    final state = AppState(repository: repo, store: MemoryStore());
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: ShortsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_like')));
+    await tester.pump();
+    expect(find.text('Liked'), findsOneWidget);
+    expect(state.shortsProfile.tagWeights['cat_1'], greaterThan(0));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_dislike')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Showing fewer videos like this.'), findsOneWidget);
+    // Not for me takes the like back and counts against the video.
+    expect(state.shortsProfile.tagWeights['cat_1'], lessThan(0));
+    await tester.tap(find.text('Undo'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(state.shortsProfile.tagWeights, isNot(contains('cat_1')));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_following')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('Follow artists or characters'), findsOneWidget);
+
+    await state.toggleShortsFollow('artist_a');
+    final queries = repo.queries.length;
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_for_you')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_following')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      repo.queries.skip(queries).where((tags) => tags.contains('artist_a')),
+      isNotEmpty,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('shorts_menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_auto_scroll')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('shorts_interests_open')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_interests')), findsOneWidget);
+    expect(find.text('More of'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('Settings switches a website off for booruShorts', (
     tester,
   ) async {

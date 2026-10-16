@@ -6,6 +6,7 @@ import '../core/services.dart';
 import 'blocked_tags.dart';
 import 'onboarding.dart';
 import 'saved_posts.dart';
+import 'shorts_library.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
 import 'theme.dart';
@@ -1295,6 +1296,126 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.skip_next_outlined,
                         title: 'Auto-advance',
                         subtitle: 'Move to the next video when one ends instead of replaying it.',
+                      ),
+                      const SizedBox(height: 8),
+                      Material(
+                        key: const ValueKey('settings_shorts_following'),
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Following'),
+                              const SizedBox(height: 2),
+                              Text(
+                                'The Following tab shows the newest videos with any of these tags. Hold a tag in booruShorts to follow it.',
+                                style: TextStyle(color: ink(.54), fontSize: 13),
+                              ),
+                              const SizedBox(height: 10),
+                              TagInput(
+                                tags: _settings.shortsFollowing,
+                                onChanged: (tags) => setState(
+                                  () => _settings = _settings.copyWith(
+                                    shortsFollowing: tags,
+                                  ),
+                                ),
+                                autocomplete: widget.state.autocomplete,
+                                searchStyle: false,
+                                enabled: !_busy,
+                                hint: 'Add a tag, then press space',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      _switchCard(
+                        value: _settings.shortsPersonalized,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsPersonalized: value,
+                          ),
+                        ),
+                        icon: Icons.auto_awesome_outlined,
+                        title: 'Personalize For you',
+                        subtitle: 'Learn from likes, dislikes, and how long you watch, on this device only. Off plays videos in random order.',
+                      ),
+                      if (_settings.shortsPersonalized)
+                        _choiceCard<ShortsExploration>(
+                          icon: Icons.explore_outlined,
+                          title: 'Discovery',
+                          subtitle: 'How often For you shows something outside your interests.',
+                          values: ShortsExploration.values,
+                          label: (value) => switch (value) {
+                            ShortsExploration.low => 'Less',
+                            ShortsExploration.normal => 'Normal',
+                            ShortsExploration.high => 'More',
+                          },
+                          selected: _settings.shortsExploration,
+                          onChanged: (value) => setState(
+                            () => _settings = _settings.copyWith(
+                              shortsExploration: value,
+                            ),
+                          ),
+                        ),
+                      _choiceCard<int>(
+                        icon: Icons.slow_motion_video_outlined,
+                        title: 'Auto-scroll length',
+                        subtitle: 'During auto-scroll (booruShorts › ⋮), how long each video plays before the next one.',
+                        values: AppSettings.shortsAutoScrollChoices,
+                        label: (value) => value == 0 ? 'Whole' : '${value}s',
+                        selected: _settings.shortsAutoScrollSeconds,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsAutoScrollSeconds: value,
+                          ),
+                        ),
+                      ),
+                      _switchCard(
+                        value: _settings.shortsPictureInPicture,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsPictureInPicture: value,
+                          ),
+                        ),
+                        icon: Icons.picture_in_picture_alt_outlined,
+                        title: 'Picture-in-picture',
+                        subtitle: 'Keep the video playing in a small window when you leave the app. Off while the app lock or Hide in recent apps is on.',
+                      ),
+                      const SizedBox(height: 8),
+                      Material(
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: Column(
+                          children: [
+                            ListTile(
+                              key: const ValueKey('settings_shorts_interests'),
+                              leading: const Icon(Icons.insights_outlined),
+                              title: const Text('Your interests'),
+                              subtitle: const Text(
+                                'What booruShorts learned, muted tags, and reset',
+                              ),
+                              trailing: const Icon(Icons.chevron_right_rounded),
+                              enabled: !_busy,
+                              onTap: () =>
+                                  openShortsInterests(context, widget.state),
+                            ),
+                            ListTile(
+                              key: const ValueKey('settings_shorts_history'),
+                              leading: const Icon(Icons.history_rounded),
+                              title: const Text('Watch history'),
+                              subtitle: const Text(
+                                'Videos you watched in booruShorts',
+                              ),
+                              trailing: const Icon(Icons.chevron_right_rounded),
+                              enabled: !_busy,
+                              onTap: () =>
+                                  openShortsHistory(context, widget.state),
+                            ),
+                          ],
+                        ),
                       ),
                       const SectionLabel('Blocked tags'),
                       Material(
