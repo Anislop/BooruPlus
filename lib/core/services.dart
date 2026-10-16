@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -136,6 +137,46 @@ class MemoryPostStore implements PostStore {
   @override
   Future<void> saveDownloads(Iterable<DownloadRecord> records) async =>
       _downloads = List.unmodifiable(records);
+}
+
+/// Where the booruShorts interest profile ([ShortsProfile.toMap]) is kept.
+abstract interface class ShortsProfileStore {
+  Future<Map<String, dynamic>?> load();
+  Future<void> save(Map<String, dynamic> profile);
+}
+
+class MemoryShortsProfileStore implements ShortsProfileStore {
+  Map<String, dynamic>? profile;
+  @override
+  Future<Map<String, dynamic>?> load() async => profile;
+  @override
+  Future<void> save(Map<String, dynamic> value) async =>
+      profile = jsonDecode(jsonEncode(value)) as Map<String, dynamic>;
+}
+
+class LocalShortsProfileStore implements ShortsProfileStore {
+  LocalShortsProfileStore({SharedPreferences? preferences}) {
+    _preferences = preferences;
+  }
+  SharedPreferences? _preferences;
+  Future<SharedPreferences> get prefs async =>
+      _preferences ??= await SharedPreferences.getInstance();
+  static const _key = 'shortsProfile.v1';
+
+  @override
+  Future<Map<String, dynamic>?> load() async {
+    final value = (await prefs).getString(_key);
+    if (value == null) return null;
+    try {
+      return jsonDecode(value) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> save(Map<String, dynamic> profile) async =>
+      (await prefs).setString(_key, jsonEncode(profile));
 }
 
 class LocalPostStore implements PostStore {
@@ -683,17 +724,66 @@ class DeviceService {
   static final _shortcuts = StreamController<AppShortcut>.broadcast();
   static bool _listening = false;
 
+  /// Calls from the Android host: launcher shortcuts and picture-in-picture
+  /// changes.
+  void _listen() {
+    if (_listening) return;
+    _listening = true;
+    channel.setMethodCallHandler((call) async {
+      if (call.method == 'shortcut' && call.arguments is Map) {
+        _shortcuts.add(AppShortcut.fromMap(call.arguments as Map));
+      } else if (call.method == 'pictureInPicture') {
+        _pictureInPicture.value = call.arguments == true;
+      }
+    });
+  }
+
   /// Launcher shortcuts used while the app is running.
   Stream<AppShortcut> get shortcuts {
-    if (!_listening) {
-      _listening = true;
-      channel.setMethodCallHandler((call) async {
-        if (call.method == 'shortcut' && call.arguments is Map) {
-          _shortcuts.add(AppShortcut.fromMap(call.arguments as Map));
-        }
-      });
-    }
+    _listen();
     return _shortcuts.stream;
+  }
+
+  static final _pictureInPicture = ValueNotifier(false);
+
+  /// Whether the app shows as a small picture-in-picture window.
+  ValueListenable<bool> get pictureInPicture {
+    _listen();
+    return _pictureInPicture;
+  }
+
+  /// Whether leaving the app (Home) shrinks it into a picture-in-picture
+  /// window shaped like [width] x [height].
+  Future<void> setPictureInPicture({
+    required bool auto,
+    int width = 9,
+    int height = 16,
+  }) async {
+    _listen();
+    try {
+      await channel.invokeMethod<void>('setPictureInPicture', {
+        'auto': auto,
+        'width': width,
+        'height': height,
+      });
+    } catch (_) {
+      // Not available in widget tests or without the Android host.
+    }
+  }
+
+  /// Shrinks the app into a picture-in-picture window now. False when the
+  /// device does not allow it.
+  Future<bool> enterPictureInPicture({int width = 9, int height = 16}) async {
+    _listen();
+    try {
+      return await channel.invokeMethod<bool>('enterPictureInPicture', {
+            'width': width,
+            'height': height,
+          }) ??
+          false;
+    } catch (_) {
+      return false;
+    }
   }
 }
 

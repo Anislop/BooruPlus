@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1730,6 +1732,317 @@ void main() {
       expect(store.settings.shortsMuted, isTrue);
       expect(store.settings.shortsOff, [Board.nozomi]);
     });
+
+    test('personalization settings round-trip, normalize, and default', () {
+      final settings = const AppSettings().copyWith(
+        shortsPersonalized: false,
+        shortsExploration: ShortsExploration.high,
+        shortsFollowing: [' Artist_A ', 'artist_a', 'b'],
+        shortsAutoScrollSeconds: 30,
+        shortsPictureInPicture: false,
+      );
+      expect(settings.shortsFollowing, ['artist_a', 'b']);
+      expect(AppSettings.decode(settings.encode()), settings);
+      expect(
+        const AppSettings()
+            .copyWith(shortsAutoScrollSeconds: 7)
+            .shortsAutoScrollSeconds,
+        0,
+      );
+
+      final legacy = AppSettings.decode('{"blacklist": ["a"]}');
+      expect(legacy.shortsPersonalized, isTrue);
+      expect(legacy.shortsExploration, ShortsExploration.normal);
+      expect(legacy.shortsFollowing, isEmpty);
+      expect(legacy.shortsAutoScrollSeconds, 0);
+      expect(legacy.shortsPictureInPicture, isTrue);
+    });
+
+    test('likes weigh artists above general tags and skip tags every '
+        'video has', () {
+      final profile = ShortsProfile();
+      final post = _shortsPost(1, {
+        'artist_a': 'artist',
+        'smile': 'general',
+        'video': 'meta',
+        'animated': 'general',
+      });
+      profile.learn(post, ShortsSignal.like);
+      final weights = profile.tagWeights;
+      expect(weights['artist_a'], greaterThan(weights['smile']!));
+      expect(weights, isNot(contains('animated')));
+      expect(weights, isNot(contains('video')));
+      expect(profile.topTags(3, atLeast: 0), ['artist_a', 'smile']);
+
+      profile.learn(post, ShortsSignal.like, undo: true);
+      expect(profile.tagWeights, isEmpty);
+
+      profile.learn(post, ShortsSignal.dislike);
+      expect(profile.tagWeights['artist_a'], lessThan(0));
+      expect(profile.score(post), lessThan(0));
+    });
+
+    test('interests fade by half every two weeks', () {
+      var now = DateTime(2026, 1, 1);
+      final profile = ShortsProfile(clock: () => now);
+      final post = _shortsPost(1, {'artist_a': 'artist'});
+      profile.learn(post, ShortsSignal.like);
+      final before = profile.tagWeights['artist_a']!;
+      now = now.add(const Duration(days: 14));
+      profile.learnTag('other', .5);
+      expect(profile.tagWeights['artist_a'], closeTo(before / 2, .01));
+    });
+
+    test('watch time gives signals only for videos that could be seen', () {
+      expect(
+        const ShortsWatch(
+          played: Duration.zero,
+          duration: Duration(seconds: 20),
+        ).signals,
+        [ShortsSignal.quickSkip],
+      );
+      expect(
+        const ShortsWatch(
+          played: Duration(seconds: 8),
+          duration: Duration(seconds: 20),
+        ).signals,
+        isEmpty,
+      );
+      expect(
+        const ShortsWatch(
+          played: Duration(seconds: 19),
+          duration: Duration(seconds: 20),
+        ).signals,
+        [ShortsSignal.completed],
+      );
+      expect(
+        const ShortsWatch(
+          played: Duration(seconds: 40),
+          duration: Duration(seconds: 20),
+          loops: 2,
+        ).signals,
+        [ShortsSignal.completed, ShortsSignal.looped, ShortsSignal.looped],
+      );
+      expect(
+        const ShortsWatch(
+          played: Duration.zero,
+          duration: Duration(seconds: 20),
+          visible: false,
+        ).signals,
+        isEmpty,
+      );
+      // A video that never loaded says nothing.
+      expect(
+        const ShortsWatch(
+          played: Duration.zero,
+          duration: Duration.zero,
+        ).signals,
+        isEmpty,
+      );
+    });
+
+    test('the profile round-trips, and muted tags stop matching', () {
+      final profile = ShortsProfile();
+      final liked = _shortsPost(1, {
+        'artist_a': 'artist',
+      }, uploader: 'Uploader');
+      profile
+        ..learn(liked, ShortsSignal.favorite)
+        ..observe(liked, watched: true)
+        ..mute('Gore');
+      final copy = ShortsProfile()..loadMap(profile.toMap());
+      expect(copy.tagWeights, profile.tagWeights);
+      expect(copy.mutedTags, {'gore'});
+      expect(copy.hasSeen(liked), isTrue);
+      expect(copy.history.single.identity, liked.identity);
+      expect(copy.score(liked), closeTo(profile.score(liked), 1e-9));
+      expect(copy.isMuted(_shortsPost(2, {'gore': 'general'})), isTrue);
+
+      // Damaged values are skipped.
+      final damaged = ShortsProfile()
+        ..loadMap({
+          'tags': {'a': 'x', 'b': 9},
+          'boards': {'nowhere': 1, 'e621': 1},
+          'history': ['x', 1],
+        });
+      expect(damaged.tagWeights, {'b': 3.0});
+      expect(damaged.history, isEmpty);
+    });
+
+    test('the ranker puts liked videos first without long runs of one '
+        'artist, and unseen videos before seen ones', () {
+      final profile = ShortsProfile();
+      final liked = [
+        for (var id = 1; id <= 3; id++) _shortsPost(id, {'artist_a': 'artist'}),
+      ];
+      final other = [
+        for (var id = 4; id <= 6; id++)
+          _shortsPost(id, {'artist_$id': 'artist'}),
+      ];
+      profile.learn(liked.first, ShortsSignal.like);
+      final ranker = ShortsRanker(profile, random: _FixedRandom());
+      final picked = ranker.take(
+        [...other, ...liked],
+        6,
+        exploration: ShortsExploration.normal,
+      );
+      expect(picked.take(2), liked.take(2));
+      // A third artist_a video in a row waits for another artist.
+      expect(picked[2].post.id, isNot(3));
+      expect(picked.map((saved) => saved.post.id), contains(3));
+
+      profile.observe(liked[1], watched: false);
+      final again = ShortsRanker(profile, random: _FixedRandom()).take(
+        [liked[1], liked[2], ...other],
+        5,
+        exploration: ShortsExploration.normal,
+      );
+      expect(again.last, liked[1]);
+    });
+
+    test('with interests, For you asks for liked tags and orders by them; '
+        'switched off, it keeps the arrival order', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, null): [
+          for (var id = 1; id <= 6; id++) _video(id, tags: 'plain_$id'),
+          _video(7, tags: 'fox'),
+        ],
+        (Board.danbooru, 'fox'): [_video(8, tags: 'fox')],
+      });
+      final store = MemoryStore();
+      final state = AppState(repository: repo, store: store);
+      await state.initialize();
+      final fox = SavedPost(
+        board: Board.danbooru,
+        post: MediaPost.fromMap(_video(99, tags: 'fox')),
+      );
+      for (var i = 0; i < 3; i++) {
+        state.learnShorts(fox, ShortsSignal.like);
+      }
+      expect(state.shortsProfile.topTags(1), ['fox']);
+
+      final feed = state.shortsFeed(random: _FixedRandom());
+      await feed.start(tags: const [], boards: [Board.danbooru]);
+      expect(feed.personalized, isTrue);
+      expect(feed.interestTags, ['fox']);
+      expect(repo.calls.any((call) => call.tags.contains('fox')), isTrue);
+      expect(feed.posts.take(2).map((saved) => saved.post.id).toSet(), {7, 8});
+      expect(feed.posts, hasLength(5));
+      await feed.loadMore();
+      expect(feed.posts, hasLength(8));
+      feed.dispose();
+
+      store.settings = store.settings.copyWith(shortsPersonalized: false);
+      await state.updateSettings(store.settings);
+      repo.calls.clear();
+      final plain = state.shortsFeed(random: _FixedRandom());
+      await plain.start(tags: const [], boards: [Board.danbooru]);
+      expect(plain.personalized, isFalse);
+      expect(repo.calls.any((call) => call.tags.contains('fox')), isFalse);
+      expect(plain.posts.map((saved) => saved.post.id), [1, 2, 3, 4, 5, 6, 7]);
+      // Nothing is learned while personalization is off.
+      final weights = state.shortsProfile.tagWeights;
+      state.learnShorts(fox, ShortsSignal.dislike);
+      expect(state.shortsProfile.tagWeights, weights);
+      plain.dispose();
+    });
+
+    test('Following asks for the newest videos with followed tags only, and '
+        'muted tags never show', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, 'artist_a'): [
+          _video(1, tags: 'artist_a'),
+          _video(2, tags: 'artist_a gore'),
+        ],
+      });
+      final state = AppState(repository: repo, store: MemoryStore());
+      await state.initialize();
+      await state.muteShortsTag('gore');
+
+      final empty = state.shortsFeed();
+      await empty.start(
+        tags: const [],
+        boards: [Board.danbooru],
+        mode: ShortsMode.following,
+      );
+      expect(repo.calls, isEmpty);
+      expect(empty.posts, isEmpty);
+      expect(empty.hasMore, isFalse);
+      empty.dispose();
+
+      await state.toggleShortsFollow('Artist_A');
+      expect(state.settings.shortsFollowing, ['artist_a']);
+      final feed = state.shortsFeed();
+      await feed.start(
+        tags: state.settings.shortsFollowing,
+        boards: [Board.danbooru],
+        mode: ShortsMode.following,
+      );
+      expect(feed.posts.map((saved) => saved.post.id), [1]);
+      expect(repo.calls.every((call) => !call.random && !call.feed), isTrue);
+      feed.dispose();
+    });
+
+    test('watching records history and seen videos, except in incognito; '
+        'backups carry interests only', () async {
+      final shortsStore = MemoryShortsProfileStore();
+      final store = MemoryStore();
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: store,
+        shortsStore: shortsStore,
+      );
+      await state.initialize();
+      final post = _shortsPost(1, {'artist_a': 'artist'});
+      state.watchedShorts(
+        post,
+        const ShortsWatch(
+          played: Duration(seconds: 10),
+          duration: Duration(seconds: 10),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(state.shortsProfile.history.single.identity, post.identity);
+      expect(state.shortsProfile.tagWeights['artist_a'], greaterThan(0));
+      expect(shortsStore.profile?['history'], hasLength(1));
+
+      final reloaded = AppState(
+        repository: FakeRepo(const [[]]),
+        store: store,
+        shortsStore: shortsStore,
+      );
+      await reloaded.initialize();
+      expect(reloaded.shortsProfile.hasSeen(post), isTrue);
+
+      final backup = jsonDecode(state.exportBackup()) as Map;
+      expect(backup['shortsProfile']['tags'], contains('artist_a'));
+      expect(backup['shortsProfile'], isNot(contains('history')));
+      final fresh = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore(),
+      );
+      await fresh.initialize();
+      await fresh.importBackup(state.exportBackup());
+      expect(fresh.shortsProfile.tagWeights, contains('artist_a'));
+      expect(fresh.shortsProfile.history, isEmpty);
+
+      await state.setIncognito(true);
+      final other = _shortsPost(2, {'artist_b': 'artist'});
+      state.watchedShorts(
+        other,
+        const ShortsWatch(
+          played: Duration(seconds: 10),
+          duration: Duration(seconds: 10),
+        ),
+      );
+      state.learnShorts(other, ShortsSignal.like);
+      expect(state.shortsProfile.hasSeen(other), isFalse);
+      expect(state.shortsProfile.tagWeights, isNot(contains('artist_b')));
+
+      await state.clearShortsHistory();
+      await state.resetShortsInterests();
+      expect(state.shortsProfile.isEmpty, isTrue);
+    });
   });
 }
 
@@ -1984,6 +2297,35 @@ Map<String, dynamic> _video(int id, {String md5 = '', String tags = 'cat'}) => {
   'rating': 'general',
   'md5': md5,
 };
+
+SavedPost _shortsPost(
+  int id,
+  Map<String, String> tags, {
+  Board board = Board.danbooru,
+  String uploader = '',
+}) => SavedPost(
+  board: board,
+  post: MediaPost.fromMap({
+    'id': id,
+    'url': 'https://x/$id.mp4',
+    'tags': tags.keys.join(' '),
+    'tagDetails': [
+      for (final MapEntry(:key, :value) in tags.entries)
+        {'name': key, 'category': value},
+    ],
+    'uploader': uploader,
+  }),
+);
+
+/// Never explores, and adds the same noise to every score.
+class _FixedRandom implements Random {
+  @override
+  double nextDouble() => .99;
+  @override
+  int nextInt(int max) => 0;
+  @override
+  bool nextBool() => false;
+}
 
 /// Answers booruShorts streams by website and Shorts tag (the user's tag
 /// that follows the video query); the first page only.

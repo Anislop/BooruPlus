@@ -2,11 +2,14 @@ package com.booruplus.app
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.app.PictureInPictureParams
 import android.content.ClipData
 import android.content.ContentValues
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.graphics.drawable.Icon
@@ -19,6 +22,7 @@ import android.os.CancellationSignal
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.util.Rational
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -183,6 +187,8 @@ class MainActivity : FlutterActivity() {
                 }
                 null
             }
+            "setPictureInPicture" -> setPictureInPicture(call, result)
+            "enterPictureInPicture" -> enterPictureInPicture(call, result)
             "setShortcuts" -> setShortcuts(call, result)
             "takeShortcut" -> {
                 result.success(pendingShortcut)
@@ -202,6 +208,75 @@ class MainActivity : FlutterActivity() {
             }
             result.success(null)
         }
+    }
+
+    // booruShorts asks to shrink into picture-in-picture when the user
+    // leaves the app (Home) while a video plays.
+    private var pipAuto = false
+    private var pipRatio = Rational(9, 16)
+
+    /** A ratio within the limits Android accepts for picture-in-picture. */
+    private fun pipRatio(call: MethodCall): Rational {
+        val width = (call.argument<Int>("width") ?: 9).coerceAtLeast(1)
+        val height = (call.argument<Int>("height") ?: 16).coerceAtLeast(1)
+        val ratio = width.toDouble() / height
+        return when {
+            ratio > 2.39 -> Rational(239, 100)
+            ratio < 1 / 2.39 -> Rational(100, 239)
+            else -> Rational(width, height)
+        }
+    }
+
+    private fun pipParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder().setAspectRatio(pipRatio)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(pipAuto).setSeamlessResizeEnabled(false)
+        }
+        return builder.build()
+    }
+
+    private fun setPictureInPicture(call: MethodCall, result: MethodChannel.Result) {
+        val auto = call.argument<Boolean>("auto") ?: false
+        val ratio = pipRatio(call)
+        runOnUiThread {
+            pipAuto = auto
+            pipRatio = ratio
+            try {
+                setPictureInPictureParams(pipParams())
+            } catch (_: Exception) {
+                // Picture-in-picture is unavailable on this device.
+            }
+            result.success(null)
+        }
+    }
+
+    private fun enterPictureInPicture(call: MethodCall, result: MethodChannel.Result) {
+        val ratio = pipRatio(call)
+        runOnUiThread {
+            pipRatio = ratio
+            val entered = try {
+                packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+                    enterPictureInPictureMode(pipParams())
+            } catch (_: Exception) { false }
+            result.success(entered)
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // Android 12+ enters by itself through setAutoEnterEnabled.
+        if (pipAuto && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            try {
+                enterPictureInPictureMode(pipParams())
+            } catch (_: Exception) {
+                // Picture-in-picture is unavailable on this device.
+            }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        channel?.invokeMethod("pictureInPicture", isInPictureInPictureMode)
     }
 
     /** Hides the window from the recent-apps screen and screenshots. */
