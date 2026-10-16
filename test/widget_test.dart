@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
+import 'package:booruplus/core/services.dart';
 import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
+import 'package:booruplus/ui/multi_search.dart';
 import 'package:booruplus/ui/onboarding.dart';
 import 'package:booruplus/ui/search_guide.dart';
 import 'package:booruplus/ui/site_catalog.dart';
@@ -221,8 +225,9 @@ void main() {
     expect(find.text('Posts per batch'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Save preferences'),
-      250,
+      500,
       scrollable: find.byType(Scrollable).first,
+      maxScrolls: 200,
     );
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
@@ -277,6 +282,11 @@ void main() {
 
       // Change a slider (e.g. Columns from 3 to 4)
       final slider = find.byType(Slider).first;
+      await tester.scrollUntilVisible(
+        find.text('Columns'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
       await tester.tap(slider);
       await tester.pumpAndSettle();
 
@@ -321,9 +331,11 @@ void main() {
   testWidgets(
     'Learn to search in sidebar is underlined and navigates to SearchGuideScreen',
     (tester) async {
+      // The underlined link is in the classic drawer; the compact one has
+      // an icon button instead.
       final state = AppState(
         repository: FakeRepo(const [[]]),
-        store: MemoryStore(),
+        store: MemoryStore()..settings = const AppSettings(classicDrawer: true),
       );
       await state.initialize();
       await state.chooseBoard(Board.safebooru);
@@ -542,9 +554,11 @@ void main() {
     final store = MemoryStore()
       ..selected = Board.safebooru
       ..settings = const AppSettings(
-        savedQueries: [
-          ['saved_tag'],
-        ],
+        boardSavedQueries: {
+          Board.safebooru: [
+            ['saved_tag'],
+          ],
+        },
         recentSearches: [
           ['recent_tag'],
         ],
@@ -1167,6 +1181,123 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('viewer shows download progress and the original size once '
+      'details open', (tester) async {
+    const channel = MethodChannel('booruplus/test-viewer-download');
+    const progress = MethodChannel('booruplus/test-viewer-progress');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    final saved = Completer<String>();
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method == 'mediaSize') return 2621440;
+      if (call.method == 'download') return saved.future;
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+      downloads: DownloadService(channel: channel, progressChannel: progress),
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap({...post(1), 'url': 'https://x/1.jpg'});
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    // The size is only asked for once the details open.
+    expect(calls.where((call) => call.method == 'mediaSize'), isEmpty);
+
+    await tester.tap(find.byTooltip('Download original media'));
+    await tester.pump();
+    await tester.pump();
+    final download = calls.singleWhere((call) => call.method == 'download');
+    final id = (download.arguments as Map)['id'];
+    expect(id, isA<int>());
+    expect(
+      find.byKey(const ValueKey('viewer_download_progress')),
+      findsOneWidget,
+    );
+    await messenger.handlePlatformMessage(
+      progress.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('progress', {'id': id, 'received': 42, 'total': 100}),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    expect(find.text('42%'), findsOneWidget);
+
+    saved.complete('content://saved');
+    await tester.pump();
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('viewer_download_progress')),
+      findsNothing,
+    );
+
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(
+      (calls.lastWhere((call) => call.method == 'mediaSize').arguments
+          as Map)['url'],
+      media.url,
+    );
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('viewer_details_summary')))
+          .data,
+      contains('2.5 MB'),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('holding a tag offers a search on all sites', (tester) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap(post(1, tags: ['blue_sky']));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = find.widgetWithText(ActionChip, 'blue_sky');
+    await tester.ensureVisible(chip);
+    await tester.pump();
+    await tester.longPress(chip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Search on all sites'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MultiSearchScreen>(find.byType(MultiSearchScreen))
+          .initialTags,
+      ['blue_sky'],
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
   testWidgets('video quality menu lists renditions and saves the choice', (
     tester,
   ) async {
@@ -1300,6 +1431,77 @@ void main() {
     // The unfinished tag is kept, saved, and searched.
     expect(store.settings.shortsTags, ['dog']);
     expect(repo.queries.last, contains('dog'));
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('booruShorts learns from Like and Not for me, and the '
+      'Following tab asks for followed tags', (tester) async {
+    final repo = FakeRepo([
+      [
+        for (var id = 1; id <= 3; id++)
+          {
+            'id': id,
+            'url': 'https://x/$id.mp4',
+            'previewUrl': '',
+            'tags': 'cat_$id',
+            'rating': 'general',
+          },
+      ],
+    ]);
+    final state = AppState(repository: repo, store: MemoryStore());
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: ShortsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_like')));
+    await tester.pump();
+    expect(find.text('Liked'), findsOneWidget);
+    expect(state.shortsProfile.tagWeights['cat_1'], greaterThan(0));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_dislike')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Showing fewer videos like this.'), findsOneWidget);
+    // Not for me takes the like back and counts against the video.
+    expect(state.shortsProfile.tagWeights['cat_1'], lessThan(0));
+    await tester.tap(find.text('Undo'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(state.shortsProfile.tagWeights, isNot(contains('cat_1')));
+
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_following')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('Follow artists or characters'), findsOneWidget);
+
+    await state.toggleShortsFollow('artist_a');
+    final queries = repo.queries.length;
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_for_you')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('shorts_tab_following')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      repo.queries.skip(queries).where((tags) => tags.contains('artist_a')),
+      isNotEmpty,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('shorts_menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_auto_scroll')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('shorts_interests_open')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_interests')), findsOneWidget);
+    expect(find.text('More of'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     state.dispose();

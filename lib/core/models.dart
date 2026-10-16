@@ -125,6 +125,9 @@ extension ThemeChoiceInfo on ThemeChoice {
   };
 }
 
+/// How often booruShorts shows something outside the viewer's interests.
+enum ShortsExploration { low, normal, high }
+
 /// When the viewer loads a website's smaller sample instead of the original.
 enum DataSaverMode { off, mobileData, always }
 
@@ -696,6 +699,15 @@ class DownloadRecord {
 /// The default [AppSettings.filenameTemplate].
 const defaultFilenameTemplate = '{site}_{id}';
 
+/// [bytes] as KB, MB, or GB.
+String formatBytes(int bytes) {
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
 /// The name [post]'s media is saved or shared under: [template] with
 /// `{site}`, `{id}`, `{md5}`, `{artist}`, `{character}`, `{copyright}`,
 /// `{rating}`, `{width}`, and `{height}` filled in, made safe for a file
@@ -798,6 +810,11 @@ class AppSettings {
     this.shortsOff = const [],
     this.shortsMuted = false,
     this.shortsAutoAdvance = false,
+    this.shortsPersonalized = true,
+    this.shortsExploration = ShortsExploration.normal,
+    this.shortsFollowing = const [],
+    this.shortsAutoScrollSeconds = 0,
+    this.shortsPictureInPicture = true,
   });
   final int columns, rows, batchSize;
 
@@ -939,6 +956,23 @@ class AppSettings {
   /// booruShorts moves to the next video when one ends instead of looping.
   final bool shortsAutoAdvance;
 
+  /// booruShorts learns from likes, dislikes, and watch time, and orders
+  /// videos by the viewer's interests.
+  final bool shortsPersonalized;
+  final ShortsExploration shortsExploration;
+
+  /// Tags followed in booruShorts' Following tab (artists, characters).
+  final List<String> shortsFollowing;
+
+  /// The longest a video plays during auto-scroll, in seconds; 0 plays it
+  /// to the end.
+  final int shortsAutoScrollSeconds;
+  static const shortsAutoScrollChoices = [0, 10, 15, 30, 60];
+
+  /// booruShorts shrinks into picture-in-picture when leaving the app
+  /// while a video plays.
+  final bool shortsPictureInPicture;
+
   /// The [savedSearchMarks] key for [query] on [board].
   static String savedSearchKey(Board board, List<String> query) =>
       '${board.name}|${_normalizedTags(query).join(' ')}';
@@ -1025,6 +1059,16 @@ class AppSettings {
     ),
     shortsMuted: shortsMuted,
     shortsAutoAdvance: shortsAutoAdvance,
+    shortsPersonalized: shortsPersonalized,
+    shortsExploration: shortsExploration,
+    shortsFollowing: List.unmodifiable(
+      _normalizedTags(shortsFollowing).take(50),
+    ),
+    shortsAutoScrollSeconds:
+        shortsAutoScrollChoices.contains(shortsAutoScrollSeconds)
+        ? shortsAutoScrollSeconds
+        : 0,
+    shortsPictureInPicture: shortsPictureInPicture,
   );
 
   AppSettings copyWith({
@@ -1078,6 +1122,11 @@ class AppSettings {
     List<Board>? shortsOff,
     bool? shortsMuted,
     bool? shortsAutoAdvance,
+    bool? shortsPersonalized,
+    ShortsExploration? shortsExploration,
+    List<String>? shortsFollowing,
+    int? shortsAutoScrollSeconds,
+    bool? shortsPictureInPicture,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -1132,6 +1181,13 @@ class AppSettings {
     shortsOff: shortsOff ?? this.shortsOff,
     shortsMuted: shortsMuted ?? this.shortsMuted,
     shortsAutoAdvance: shortsAutoAdvance ?? this.shortsAutoAdvance,
+    shortsPersonalized: shortsPersonalized ?? this.shortsPersonalized,
+    shortsExploration: shortsExploration ?? this.shortsExploration,
+    shortsFollowing: shortsFollowing ?? this.shortsFollowing,
+    shortsAutoScrollSeconds:
+        shortsAutoScrollSeconds ?? this.shortsAutoScrollSeconds,
+    shortsPictureInPicture:
+        shortsPictureInPicture ?? this.shortsPictureInPicture,
   ).normalized();
   static const _unset = Object();
 
@@ -1194,6 +1250,11 @@ class AppSettings {
     'shortsOff': shortsOff.map((board) => board.name).toList(),
     'shortsMuted': shortsMuted,
     'shortsAutoAdvance': shortsAutoAdvance,
+    'shortsPersonalized': shortsPersonalized,
+    'shortsExploration': shortsExploration.name,
+    'shortsFollowing': shortsFollowing,
+    'shortsAutoScrollSeconds': shortsAutoScrollSeconds,
+    'shortsPictureInPicture': shortsPictureInPicture,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -1273,6 +1334,15 @@ class AppSettings {
     shortsOff: _boardsFromMap(map['shortsOff']),
     shortsMuted: _asBool(map['shortsMuted'], false),
     shortsAutoAdvance: _asBool(map['shortsAutoAdvance'], false),
+    shortsPersonalized: _asBool(map['shortsPersonalized'], true),
+    shortsExploration:
+        ShortsExploration.values.asNameMap()['${map['shortsExploration']}'] ??
+        ShortsExploration.normal,
+    shortsFollowing: (map['shortsFollowing'] as List? ?? const [])
+        .map((tag) => '$tag')
+        .toList(),
+    shortsAutoScrollSeconds: _asInt(map['shortsAutoScrollSeconds'], 0),
+    shortsPictureInPicture: _asBool(map['shortsPictureInPicture'], true),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -1462,6 +1532,11 @@ class AppSettings {
         !_sameBoards(other.shortsOff, shortsOff) ||
         other.shortsMuted != shortsMuted ||
         other.shortsAutoAdvance != shortsAutoAdvance ||
+        other.shortsPersonalized != shortsPersonalized ||
+        other.shortsExploration != shortsExploration ||
+        !_sameTags(other.shortsFollowing, shortsFollowing) ||
+        other.shortsAutoScrollSeconds != shortsAutoScrollSeconds ||
+        other.shortsPictureInPicture != shortsPictureInPicture ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -1569,6 +1644,11 @@ class AppSettings {
     Object.hashAll(shortsOff),
     shortsMuted,
     shortsAutoAdvance,
+    shortsPersonalized,
+    shortsExploration,
+    Object.hashAll(shortsFollowing),
+    shortsAutoScrollSeconds,
+    shortsPictureInPicture,
     Object.hashAll(
       boardHiddenUploaders.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),
