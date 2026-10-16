@@ -8,6 +8,9 @@ import 'package:flutter/services.dart' show PlatformException;
 
 import 'models.dart';
 import 'services.dart';
+import 'shorts_profile.dart';
+
+export 'shorts_profile.dart';
 
 class AppState extends ChangeNotifier {
   AppState({
@@ -16,6 +19,7 @@ class AppState extends ChangeNotifier {
     PostStore? postStore,
     AccountRepository? accounts,
     DownloadService? downloads,
+    ShortsProfileStore? shortsStore,
   }) : _repository = repository ?? PlatformBoardRepository(),
        _accounts = accounts ?? PlatformAccountRepository(),
        _downloads = downloads ?? DownloadService(),
@@ -24,12 +28,20 @@ class AppState extends ChangeNotifier {
            postStore ??
            (store == null || store is LocalSettingsStore
                ? LocalPostStore()
-               : MemoryPostStore());
+               : MemoryPostStore()),
+       _shortsStore =
+           shortsStore ??
+           (store == null || store is LocalSettingsStore
+               ? LocalShortsProfileStore()
+               : MemoryShortsProfileStore());
   final BoardRepository _repository;
   final AccountRepository _accounts;
   final DownloadService _downloads;
   final SettingsStore _store;
   final PostStore _postStore;
+  final ShortsProfileStore _shortsStore;
+  final ShortsProfile _shortsProfile = ShortsProfile();
+  bool _shortsSaving = false, _shortsDirty = false;
   AppSettings _settings = const AppSettings();
   Future<void> _settingsQueue = Future<void>.value();
   Board? _board;
@@ -302,7 +314,11 @@ class AppState extends ChangeNotifier {
   /// Saves [post]'s original media with the file name template, records it
   /// in the download history, and favorites it when that setting is on.
   /// Returns the saved file's location; platform errors are rethrown.
-  Future<String> downloadPost(MediaPost post, {Board? board}) async {
+  Future<String> downloadPost(
+    MediaPost post, {
+    Board? board,
+    DownloadProgress? onProgress,
+  }) async {
     final display = displayReady(_saved(post, board));
     final url = display.post.url;
     if (url.isEmpty) throw StateError('Missing media URL');
@@ -315,6 +331,7 @@ class AppState extends ChangeNotifier {
         template: _settings.filenameTemplate,
       ),
       directory: _settings.downloadDirectory,
+      onProgress: onProgress,
     );
     final record = DownloadRecord(
       saved: display.sanitized(),
@@ -344,6 +361,13 @@ class AppState extends ChangeNotifier {
   }
 
   static const _maxDownloadRecords = 1000;
+
+  /// The size in bytes of [post]'s original media (what [downloadPost]
+  /// saves), or null when unknown.
+  Future<int?> mediaSize(MediaPost post, {Board? board}) {
+    final url = displayReady(_saved(post, board)).post.url;
+    return url.isEmpty ? Future.value() : _downloads.mediaSize(url);
+  }
 
   /// Downloads [posts] one at a time. Stops early when the download folder
   /// needs to be chosen again.
@@ -711,8 +735,114 @@ class AppState extends ChangeNotifier {
   /// A search across several websites at once; see [MultiSiteSearch].
   MultiSiteSearch multiSiteSearch() => MultiSiteSearch._(this);
 
-  /// The booruShorts video feed; see [ShortsFeed].
-  ShortsFeed shortsFeed() => ShortsFeed._(this);
+  /// The booruShorts video feed; see [ShortsFeed]. [random] makes its
+  /// ranking repeatable in tests.
+  ShortsFeed shortsFeed({Random? random}) => ShortsFeed._(this, random: random);
+
+  /// The booruShorts interests learned on this device.
+  ShortsProfile get shortsProfile => _shortsProfile;
+
+  /// Whether booruShorts learns now: personalization is on and incognito
+  /// is off.
+  bool get _shortsLearning =>
+      _settings.shortsPersonalized && !_settings.incognito;
+
+  /// Learns [signal] from [saved] for booruShorts' order; [undo] takes back
+  /// an earlier one.
+  void learnShorts(SavedPost saved, ShortsSignal signal, {bool undo = false}) {
+    if (!_shortsLearning) return;
+    _shortsProfile.learn(saved, signal, undo: undo);
+    unawaited(_saveShortsProfile());
+  }
+
+  /// Learns interest in one tag, such as one tapped in booruShorts.
+  void learnShortsTag(String tag, {double amount = .5}) {
+    if (!_shortsLearning) return;
+    _shortsProfile.learnTag(tag, amount);
+    unawaited(_saveShortsProfile());
+  }
+
+  /// Remembers one visit to a booruShorts video: it counts as seen, joins
+  /// the watch history when played for two seconds, and its watch time is
+  /// learned from. Nothing is kept in incognito.
+  void watchedShorts(SavedPost saved, ShortsWatch watch) {
+    if (_settings.incognito || watch.duration <= Duration.zero) return;
+    _shortsProfile.observe(
+      saved,
+      watched: watch.played >= const Duration(seconds: 2),
+    );
+    if (_settings.shortsPersonalized) {
+      for (final signal in watch.signals) {
+        _shortsProfile.learn(saved, signal);
+      }
+    }
+    unawaited(_saveShortsProfile());
+  }
+
+  /// Never shows booruShorts videos with [tag] again.
+  Future<void> muteShortsTag(String tag) =>
+      _changeShortsProfile((profile) => profile.mute(tag));
+
+  Future<void> unmuteShortsTag(String tag) =>
+      _changeShortsProfile((profile) => profile.unmute(tag));
+
+  /// Forgets what booruShorts learned about [tag].
+  Future<void> forgetShortsTag(String tag) =>
+      _changeShortsProfile((profile) => profile.forgetTag(tag));
+
+  /// Forgets every booruShorts interest; muted tags and history stay.
+  Future<void> resetShortsInterests() =>
+      _changeShortsProfile((profile) => profile.resetInterests());
+
+  /// Clears the booruShorts watch history and the videos marked seen.
+  Future<void> clearShortsHistory() =>
+      _changeShortsProfile((profile) => profile.clearHistory());
+
+  Future<void> _changeShortsProfile(void Function(ShortsProfile) change) {
+    change(_shortsProfile);
+    notifyListeners();
+    return _saveShortsProfile();
+  }
+
+  /// Saves the profile. Changes made while a save runs are written once it
+  /// finishes, so frequent updates never queue up writes.
+  Future<void> _saveShortsProfile() async {
+    if (_shortsSaving) {
+      _shortsDirty = true;
+      return;
+    }
+    _shortsSaving = true;
+    try {
+      do {
+        _shortsDirty = false;
+        try {
+          await _shortsStore.save(_shortsProfile.toMap());
+        } catch (_) {
+          // The profile is optional; the next change saves it again.
+        }
+      } while (_shortsDirty);
+    } finally {
+      _shortsSaving = false;
+    }
+  }
+
+  /// Saves the tags followed in booruShorts' Following tab.
+  Future<void> setShortsFollowing(List<String> tags) =>
+      _saveQuietly((settings) => settings.copyWith(shortsFollowing: tags));
+
+  bool followsShortsTag(String tag) =>
+      _settings.shortsFollowing.contains(tag.trim().toLowerCase());
+
+  /// Follows or unfollows [tag] in booruShorts.
+  Future<void> toggleShortsFollow(String tag) {
+    final name = tag.trim().toLowerCase();
+    final following = _settings.shortsFollowing;
+    return setShortsFollowing(
+      following.contains(name)
+          ? following.where((other) => other != name).toList()
+          : [...following, name],
+    );
+  }
 
   /// Websites booruShorts can show now: visible, hosting video, switched on
   /// for Shorts, and usable (credentials saved where required).
@@ -805,6 +935,7 @@ class AppState extends ChangeNotifier {
       for (final saved in _favoritePosts) saved.sanitized().toMap(),
     ],
     'hidden': [for (final saved in _hiddenPosts) saved.sanitized().toMap()],
+    'shortsProfile': _shortsProfile.interestsToMap(),
   });
 
   /// Restores an [exportBackup] file: its settings replace the current ones
@@ -859,6 +990,15 @@ class AppState extends ChangeNotifier {
     if (newHidden.isNotEmpty) {
       _setHidden([..._hiddenPosts, ...newHidden]);
       await _postStore.saveHidden(_hiddenPosts);
+    }
+    // Interests only: the watch history stays this device's.
+    final shortsProfile = decoded['shortsProfile'];
+    if (shortsProfile is Map) {
+      _shortsProfile.loadMap({
+        for (final key in ['tags', 'boards', 'uploaders', 'muted', 'updatedAt'])
+          if (shortsProfile.containsKey(key)) key: shortsProfile[key],
+      });
+      await _saveShortsProfile();
     }
     for (final saved in [...newFavorites, ...newHidden]) {
       if (saved.board.supportsAuth &&
@@ -946,6 +1086,12 @@ class AppState extends ChangeNotifier {
         _setDownloads(await _postStore.loadDownloads());
       } catch (_) {
         // History is optional; a damaged list starts empty.
+      }
+      try {
+        final profile = await _shortsStore.load();
+        if (profile != null) _shortsProfile.loadMap(profile);
+      } catch (_) {
+        // The booruShorts profile is optional; a damaged one starts empty.
       }
       for (final saved in [
         ..._favoritePosts,
@@ -2024,24 +2170,54 @@ class MultiSiteSearch extends ChangeNotifier {
   }
 }
 
-/// The booruShorts feed: videos from several websites, in random order,
-/// merged into one list. Each Shorts tag is its own stream per website
-/// (any tag matches), combined with the website's video query, so every
-/// request stays within the website's tag budget. Like [MultiSiteSearch]
-/// it keeps its own generation and never sends `feed`, so it does not
-/// cancel the main feed's requests.
+/// Which booruShorts tab a [ShortsFeed] fills.
+enum ShortsMode {
+  /// Random videos, ordered by the viewer's interests once there are some.
+  forYou,
+
+  /// Newest videos with the followed tags, in the websites' order.
+  following,
+}
+
+/// The booruShorts feed: videos from several websites, merged into one
+/// list. Each Shorts tag is its own stream per website (any tag matches),
+/// combined with the website's video query, so every request stays within
+/// the website's tag budget. Like [MultiSiteSearch] it keeps its own
+/// generation and never sends `feed`, so it does not cancel the main feed's
+/// requests.
+///
+/// Fetched videos wait in a pool. Without interests they move to the feed
+/// in the order they arrived; with interests ([ShortsProfile]) a few at a
+/// time are picked by [ShortsRanker], so feedback changes what comes next
+/// within a few videos, and up to three liked tags get streams of their
+/// own.
 class ShortsFeed extends ChangeNotifier {
-  ShortsFeed._(this._app);
+  ShortsFeed._(this._app, {Random? random}) : _random = random ?? Random();
   final AppState _app;
+  final Random _random;
   static const _pageSize = 40;
   // Streams asked per round, so many tags times many websites do not fire
   // dozens of requests at once.
   static const _perRound = 6;
+  // Videos moved from the pool to the feed at a time while ranking.
+  static const _chunk = 5;
+  // The pool is refilled once fewer unseen videos than this wait in it.
+  static const _refillAt = 20;
+  static const _interestStreams = 3;
 
+  ShortsMode _mode = ShortsMode.forYou;
+  bool _ranked = false;
+  late ShortsRanker _ranker = ShortsRanker(
+    _app._shortsProfile,
+    random: _random,
+  );
   List<String> _tags = const [];
+  List<String> _interestTags = const [];
   List<Board> _boards = const [];
   List<(Board, String?)> _streams = const [];
   List<SavedPost> _posts = const [];
+  List<SavedPost> _pool = [];
+  final Set<String> _explored = {};
   final Map<(Board, String?), int> _pages = {};
   final Set<(Board, String?)> _exhausted = {};
   final Map<(Board, String?), String> _errors = {};
@@ -2055,12 +2231,23 @@ class ShortsFeed extends ChangeNotifier {
   bool _loading = false;
   bool _disposed = false;
 
+  ShortsMode get mode => _mode;
+
   /// The tags this feed matches (any of them); empty for every video.
   List<String> get tags => _tags;
   List<Board> get boards => _boards;
   List<SavedPost> get posts => _posts;
   bool get loading => _loading;
-  bool get hasMore => _streams.any(_active);
+  bool get hasMore => _pool.isNotEmpty || _streams.any(_active);
+
+  /// Whether videos are ordered by the viewer's interests this session.
+  bool get personalized => _ranked;
+
+  /// Liked tags asked for in streams of their own this session.
+  List<String> get interestTags => _interestTags;
+
+  /// Whether [saved] was picked at random rather than for its interests.
+  bool explored(SavedPost saved) => _explored.contains(saved.identity);
 
   /// Why a website stopped returning videos, by website.
   Map<Board, String> get errors => Map.unmodifiable({
@@ -2070,25 +2257,44 @@ class ShortsFeed extends ChangeNotifier {
   bool _active((Board, String?) stream) =>
       !_exhausted.contains(stream) && !_errors.containsKey(stream);
 
+  ShortsProfile get _profile => _app._shortsProfile;
+
   /// Starts over with videos matching any of [tags] on [boards]. Boards
-  /// without video are skipped.
+  /// without video are skipped. The Following tab without [tags] has
+  /// nothing to show.
   Future<void> start({
     required List<String> tags,
     required Iterable<Board> boards,
+    ShortsMode mode = ShortsMode.forYou,
   }) async {
     _generation++;
+    _mode = mode;
+    _ranked =
+        mode == ShortsMode.forYou &&
+        _app.settings.shortsPersonalized &&
+        !_profile.isEmpty;
+    _ranker = ShortsRanker(_profile, random: _random);
     _tags = List.unmodifiable(
       tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toSet(),
     );
     _boards = List.unmodifiable(boards.where((board) => board.hasShorts));
-    _streams = List.unmodifiable([
-      for (final board in _boards)
-        if (_tags.isEmpty)
-          (board, null)
-        else
-          for (final tag in _tags) (board, tag),
-    ]);
+    _interestTags = _ranked && _tags.isEmpty
+        ? List.unmodifiable(_profile.topTags(_interestStreams))
+        : const [];
+    _streams = mode == ShortsMode.following && _tags.isEmpty
+        ? const []
+        : List.unmodifiable([
+            for (final board in _boards)
+              if (_tags.isEmpty)
+                (board, null)
+              else
+                for (final tag in _tags) (board, tag),
+            for (final tag in _interestTags)
+              for (final board in _boards) (board, tag),
+          ]);
     _posts = const [];
+    _pool = [];
+    _explored.clear();
     _pages.clear();
     _exhausted.clear();
     _errors.clear();
@@ -2116,8 +2322,12 @@ class ShortsFeed extends ChangeNotifier {
     await loadMore();
   }
 
+  /// Shows the next videos waiting in the pool, and fetches more once the
+  /// pool runs low.
   Future<void> loadMore() async {
-    if (_loading || !hasMore) return;
+    final committed = _commit();
+    if (committed) _notify();
+    if (_loading || !_streams.any(_active) || _fresh >= _refillAt) return;
     final generation = _generation;
     _loading = true;
     _notify();
@@ -2142,7 +2352,9 @@ class ShortsFeed extends ChangeNotifier {
           any = true;
           if (_accept(batch[i])) {
             merged.add(batch[i]);
-            accepted[b]++;
+            // While ranking, videos already watched wait at the back and
+            // do not keep a stream going.
+            if (!_ranked || !_profile.hasSeen(batch[i])) accepted[b]++;
           }
         }
         if (!any) break;
@@ -2159,17 +2371,42 @@ class ShortsFeed extends ChangeNotifier {
           _exhausted.add(stream);
         }
       }
-      if (merged.isNotEmpty) {
-        _posts = List.unmodifiable([..._posts, ...merged]);
-        added += merged.length;
-      }
+      _pool.addAll(merged);
+      added += accepted.fold(0, (sum, count) => sum + count);
     }
     _loading = false;
+    if (!committed || !_ranked) _commit();
     _notify();
     if (_retryPending) {
       _retryPending = false;
       await retry();
     }
+  }
+
+  /// Unseen videos waiting in the pool.
+  int get _fresh => _ranked
+      ? _pool.where((saved) => !_profile.hasSeen(saved)).length
+      : _pool.length;
+
+  /// Moves the next videos from the pool to the feed: all of them in
+  /// arrival order, or the best few while ranking.
+  bool _commit() {
+    if (_pool.isEmpty) return false;
+    final List<SavedPost> next;
+    if (_ranked) {
+      next = _ranker.take(
+        _pool,
+        _chunk,
+        exploration: _app.settings.shortsExploration,
+        recent: _posts.length > 3 ? _posts.sublist(_posts.length - 3) : _posts,
+        explored: _explored,
+      );
+    } else {
+      next = _pool;
+      _pool = [];
+    }
+    _posts = List.unmodifiable([..._posts, ...next]);
+    return true;
   }
 
   /// The next streams to ask, rotating through the active ones.
@@ -2184,7 +2421,7 @@ class ShortsFeed extends ChangeNotifier {
   }
 
   /// Whether [saved] is new to the feed, by identity and, across websites,
-  /// by file hash.
+  /// by file hash, and not muted (or, while ranking, clearly disliked).
   bool _accept(SavedPost saved) {
     final md5 = saved.post.md5;
     if (_seen.contains(saved.identity) ||
@@ -2193,7 +2430,23 @@ class ShortsFeed extends ChangeNotifier {
     }
     _seen.add(saved.identity);
     if (md5.isNotEmpty) _seen.add('md5:$md5');
-    return true;
+    if (_profile.isMuted(saved)) return false;
+    return !_ranked || !_profile.isDisliked(saved);
+  }
+
+  /// Learns [signal] from [saved] (see [AppState.learnShorts]); videos
+  /// still in the pool are picked with it.
+  void feedback(SavedPost saved, ShortsSignal signal, {bool undo = false}) =>
+      _app.learnShorts(saved, signal, undo: undo);
+
+  /// Learns from one visit to [saved] (see [AppState.watchedShorts]).
+  void watched(SavedPost saved, ShortsWatch watch) =>
+      _app.watchedShorts(saved, watch);
+
+  /// Mutes [tag] and drops the videos with it that wait in the pool.
+  Future<void> muteTag(String tag) async {
+    await _app.muteShortsTag(tag);
+    _pool.removeWhere(_profile.isMuted);
   }
 
   Future<List<SavedPost>> _fetch(
@@ -2203,6 +2456,7 @@ class ShortsFeed extends ChangeNotifier {
     final (board, tag) = stream;
     final page = (_pages[stream] ?? -1) + 1;
     final query = [...board.shortsVideoQuery!, ?tag];
+    final random = _mode == ShortsMode.forYou;
     try {
       final raw = await _app._withSession(
         board,
@@ -2211,8 +2465,8 @@ class ShortsFeed extends ChangeNotifier {
           tags: _app._queryTagsFor(board, query, signedIn: credentials != null),
           limit: _pageSize,
           page: page,
-          random: true,
-          randomSeed: _seed,
+          random: random,
+          randomSeed: random ? _seed : null,
           credentials: credentials,
         ),
       );

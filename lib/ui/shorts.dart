@@ -12,6 +12,7 @@ import '../core/models.dart';
 import '../core/services.dart';
 import 'media_image.dart';
 import 'media_viewer.dart';
+import 'shorts_library.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
 import 'theme.dart';
@@ -41,9 +42,23 @@ class _ShortsScreenState extends State<ShortsScreen>
   int _index = 0;
   late bool _muted = widget.state.settings.shortsMuted;
   bool _userPaused = false;
-  bool _resumed =
-      (WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed) ==
-      AppLifecycleState.resumed;
+  AppLifecycleState _lifecycle =
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
+  // Picture-in-picture keeps playing while the app is inactive.
+  late bool _pip = _device.pictureInPicture.value;
+  bool get _resumed =>
+      _lifecycle == AppLifecycleState.resumed ||
+      (_pip && _lifecycle == AppLifecycleState.inactive);
+  // The last picture-in-picture state sent, so playback ticks do not resend.
+  String? _pipSent;
+  // Set while the share sheet or a browser opens, so leaving for them does
+  // not shrink into picture-in-picture.
+  int _leaving = 0;
+  ShortsMode _mode = ShortsMode.forYou;
+  final Set<String> _liked = {};
+  bool _autoScroll = false;
+  // Watch time of the current video, reported when it is left.
+  _Watch? _watch;
   // Pushed screens (full details) pause playback while they are open.
   int _suspended = 0;
   bool _metered = false;
@@ -63,6 +78,7 @@ class _ShortsScreenState extends State<ShortsScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     if (_resumed) _screenAwake.setEnabled(true);
+    _device.pictureInPicture.addListener(_pipChanged);
     _feed.addListener(_syncClips);
     if (_settings.dataSaver == DataSaverMode.mobileData) {
       _device.isMeteredNetwork().then((metered) {
@@ -81,16 +97,25 @@ class _ShortsScreenState extends State<ShortsScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _resumed = state == AppLifecycleState.resumed;
+    _lifecycle = state;
     _screenAwake.setEnabled(_resumed);
+    _applyPlayback();
+  }
+
+  void _pipChanged() {
+    if (!mounted) return;
+    setState(() => _pip = _device.pictureInPicture.value);
     _applyPlayback();
   }
 
   @override
   void dispose() {
+    _reportWatch();
     WidgetsBinding.instance.removeObserver(this);
+    _device.pictureInPicture.removeListener(_pipChanged);
+    if (_pipSent != null) _device.setPictureInPicture(auto: false);
     _screenAwake.setEnabled(false);
-    _watched?.removeListener(_watchEnd);
+    _watched?.removeListener(_onTick);
     for (final clip in _clips.values) {
       clip.dispose();
     }
@@ -104,6 +129,7 @@ class _ShortsScreenState extends State<ShortsScreen>
   /// Starts the feed over with the saved tags (or this visit's filter) on
   /// the available websites (or the one chosen for this visit).
   void _start() {
+    _reportWatch();
     _disposeClips();
     _index = 0;
     _userPaused = false;
@@ -111,13 +137,53 @@ class _ShortsScreenState extends State<ShortsScreen>
     final filter = _tagFilter;
     final only = _onlyBoard;
     _feed.start(
-      tags: filter != null ? [filter] : _settings.shortsTags,
+      tags: filter != null
+          ? [filter]
+          : _mode == ShortsMode.following
+          ? _settings.shortsFollowing
+          : _settings.shortsTags,
       boards: only != null ? [only] : _available,
+      mode: _mode,
     );
   }
 
+  void _setMode(ShortsMode mode) {
+    if (mode == _mode) return;
+    setState(() {
+      _mode = mode;
+      _tagFilter = null;
+    });
+    _start();
+  }
+
+  /// Reports the current video's watch time, once.
+  void _reportWatch() {
+    final watch = _watch;
+    _watch = null;
+    if (watch == null) return;
+    _feed.watched(
+      watch.saved,
+      ShortsWatch(
+        played: watch.played,
+        duration: watch.duration,
+        loops: watch.loops,
+        visible:
+            watch.played > Duration.zero || !_hiddenBehindBlur(watch.saved),
+      ),
+    );
+  }
+
+  /// Starts timing the current video when it changed.
+  void _trackCurrent() {
+    final posts = _feed.posts;
+    final saved = _index < posts.length ? posts[_index] : null;
+    if (_watch?.saved.identity == saved?.identity) return;
+    _reportWatch();
+    if (saved != null) _watch = _Watch(saved);
+  }
+
   void _disposeClips() {
-    _watched?.removeListener(_watchEnd);
+    _watched?.removeListener(_onTick);
     _watched = null;
     for (final clip in _clips.values) {
       clip.dispose();
@@ -157,7 +223,7 @@ class _ShortsScreenState extends State<ShortsScreen>
       if (wanted.containsKey(key)) continue;
       final clip = _clips.remove(key)!;
       if (identical(clip.controller, _watched)) {
-        _watched?.removeListener(_watchEnd);
+        _watched?.removeListener(_onTick);
         _watched = null;
       }
       clip.dispose();
@@ -196,8 +262,10 @@ class _ShortsScreenState extends State<ShortsScreen>
 
   /// Plays the current video when nothing stops it and pauses the rest.
   void _applyPlayback() {
+    _trackCurrent();
     final current = _currentKey;
-    final loop = !_settings.shortsAutoAdvance;
+    final loop = !_settings.shortsAutoAdvance && !_autoScroll;
+    var playing = false;
     for (final entry in _clips.entries) {
       final clip = entry.value;
       final controller = clip.controller;
@@ -211,22 +279,94 @@ class _ShortsScreenState extends State<ShortsScreen>
           !_hiddenBehindBlur(clip.saved);
       if (play && !controller.value.isPlaying) controller.play();
       if (!play && controller.value.isPlaying) controller.pause();
+      if (play) playing = true;
       if (entry.key == current && !identical(controller, _watched)) {
-        _watched?.removeListener(_watchEnd);
-        _watched = controller..addListener(_watchEnd);
+        _watched?.removeListener(_onTick);
+        _watched = controller..addListener(_onTick);
       }
+    }
+    // The current video has no player yet: stop listening to the previous
+    // one, whose seek back to the start would otherwise be timed.
+    if (_clips[current]?.controller == null && _watched != null) {
+      _watched?.removeListener(_onTick);
+      _watched = null;
+    }
+    _syncPip(playing);
+  }
+
+  bool get _pipAllowed =>
+      !_settings.appLock && !_settings.secureScreen && !_pip;
+
+  /// Lets leaving the app shrink it into picture-in-picture while a video
+  /// plays (Settings › booruShorts), shaped like the video.
+  Future<void> _syncPip(bool playing) async {
+    final auto =
+        playing &&
+        _settings.shortsPictureInPicture &&
+        _pipAllowed &&
+        _leaving == 0 &&
+        _suspended == 0;
+    final (width, height) = _pipShape;
+    final key = auto ? '$width:$height' : 'off';
+    if (key == _pipSent || (_pipSent == null && !auto)) return;
+    _pipSent = key;
+    await _device.setPictureInPicture(auto: auto, width: width, height: height);
+  }
+
+  (int, int) get _pipShape {
+    final size = _clips[_currentKey]?.controller?.value.size ?? Size.zero;
+    return size.width >= 1 && size.height >= 1
+        ? (size.width.round(), size.height.round())
+        : (9, 16);
+  }
+
+  Future<void> _enterPip() async {
+    if (!_pipAllowed) {
+      _notify(
+        'Picture-in-picture is off while the app lock or Hide in recent apps is on.',
+      );
+      return;
+    }
+    final (width, height) = _pipShape;
+    if (!await _device.enterPictureInPicture(width: width, height: height)) {
+      _notify('Picture-in-picture is not available on this device.');
     }
   }
 
-  /// With auto-advance on, moves to the next video when one ends.
-  void _watchEnd() {
-    final controller = _watched;
-    if (controller == null ||
-        !_settings.shortsAutoAdvance ||
-        _advancing ||
-        !mounted) {
-      return;
+  /// Runs [action] (the share sheet, a browser) without shrinking into
+  /// picture-in-picture when it takes the app to the background.
+  Future<T> _leaveFor<T>(Future<T> Function() action) async {
+    _leaving++;
+    await _syncPip(false);
+    try {
+      return await action();
+    } finally {
+      _leaving--;
+      if (mounted) _applyPlayback();
     }
+  }
+
+  /// Times the current video, and moves on when it ends (auto-advance or
+  /// auto-scroll) or plays past the auto-scroll limit.
+  void _onTick() {
+    final controller = _watched;
+    if (controller == null || !mounted) return;
+    final watch = _watch;
+    if (watch != null &&
+        watch.saved.identity == _currentKey &&
+        identical(controller, _clips[_currentKey]?.controller)) {
+      watch.tick(controller.value);
+      final limit = _settings.shortsAutoScrollSeconds;
+      if (_autoScroll &&
+          limit > 0 &&
+          !_advancing &&
+          watch.played >= Duration(seconds: limit)) {
+        _advancing = true;
+        _next();
+        return;
+      }
+    }
+    if (!(_settings.shortsAutoAdvance || _autoScroll) || _advancing) return;
     final value = controller.value;
     if (!value.isInitialized ||
         value.isPlaying ||
@@ -256,6 +396,8 @@ class _ShortsScreenState extends State<ShortsScreen>
   }
 
   void _handlePageChanged(int index) {
+    // Before the seek below, which would read as a replay.
+    _reportWatch();
     final previous = _clips[_currentKey];
     previous?.controller?.pause();
     previous?.controller?.seekTo(Duration.zero);
@@ -269,6 +411,33 @@ class _ShortsScreenState extends State<ShortsScreen>
     }
     _syncClips();
     setState(() {});
+  }
+
+  /// Auto-scroll: moves on by itself when a video ends, or after the time
+  /// limit in Settings › booruShorts.
+  void _toggleAutoScroll() {
+    setState(() {
+      _autoScroll = !_autoScroll;
+      _advancing = false;
+    });
+    _applyPlayback();
+    if (_autoScroll) {
+      final limit = _settings.shortsAutoScrollSeconds;
+      _notify(
+        limit > 0
+            ? 'Auto-scroll is on: each video plays for up to $limit seconds.'
+            : 'Auto-scroll is on: each video plays to the end.',
+      );
+    }
+  }
+
+  /// Opens a screen over Shorts, pausing playback while it is open.
+  Future<void> _openPage(Future<void> Function() open) async {
+    _suspended++;
+    _applyPlayback();
+    await open();
+    _suspended--;
+    if (mounted) _applyPlayback();
   }
 
   void _togglePlay() {
@@ -290,6 +459,7 @@ class _ShortsScreenState extends State<ShortsScreen>
   }
 
   void _filterTag(String tag) {
+    widget.state.learnShortsTag(tag);
     setState(() {
       _tagFilter = tag;
       _onlyBoard = null;
@@ -318,20 +488,140 @@ class _ShortsScreenState extends State<ShortsScreen>
     final uri = Uri.tryParse(url);
     if (uri == null || !['https', 'http'].contains(uri.scheme)) return;
     try {
-      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-        throw StateError('Unavailable');
-      }
+      final opened = await _leaveFor(
+        () => launchUrl(uri, mode: LaunchMode.externalApplication),
+      );
+      if (!opened) throw StateError('Unavailable');
     } catch (_) {
       _notify(failure);
     }
   }
 
-  Future<void> _favorite(SavedPost saved, {bool onlyAdd = false}) async {
-    if (onlyAdd) {
-      await widget.state.favoritePost(saved.post, board: saved.board);
-    } else {
-      await widget.state.toggleFavorite(saved.post, board: saved.board);
+  Future<void> _favorite(SavedPost saved) {
+    final saving = !widget.state.isFavorite(saved.post, board: saved.board);
+    _feed.feedback(saved, ShortsSignal.favorite, undo: !saving);
+    return widget.state.toggleFavorite(saved.post, board: saved.board);
+  }
+
+  void _like(SavedPost saved) {
+    final liked = _liked.contains(saved.identity);
+    setState(() {
+      if (liked) {
+        _liked.remove(saved.identity);
+      } else {
+        _liked.add(saved.identity);
+      }
+    });
+    _feed.feedback(saved, ShortsSignal.like, undo: liked);
+  }
+
+  /// Shows fewer videos like [saved] and moves on, with an undo.
+  void _dislike(SavedPost saved) {
+    if (_liked.remove(saved.identity)) {
+      _feed.feedback(saved, ShortsSignal.like, undo: true);
     }
+    _feed.feedback(saved, ShortsSignal.dislike);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: const Text('Showing fewer videos like this.'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () =>
+                _feed.feedback(saved, ShortsSignal.dislike, undo: true),
+          ),
+        ),
+      );
+    _next();
+  }
+
+  /// Hold a tag: show Shorts with it, follow it, or never see it again.
+  Future<void> _tagMenu(String tag) async {
+    final following = widget.state.followsShortsTag(tag);
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          key: const ValueKey('shorts_tag_menu'),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(
+                '#${_display(tag)}',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.filter_alt_outlined),
+              title: const Text('Show booruShorts with this tag'),
+              onTap: () => Navigator.pop(context, 'filter'),
+            ),
+            ListTile(
+              key: const ValueKey('shorts_tag_follow'),
+              leading: Icon(
+                following
+                    ? Icons.person_remove_outlined
+                    : Icons.person_add_alt_1_outlined,
+              ),
+              title: Text(following ? 'Unfollow' : 'Follow'),
+              subtitle: const Text('Followed tags fill the Following tab'),
+              onTap: () => Navigator.pop(context, 'follow'),
+            ),
+            ListTile(
+              key: const ValueKey('shorts_tag_mute'),
+              leading: const Icon(Icons.not_interested_rounded),
+              title: const Text('Not interested'),
+              subtitle: const Text('Never show videos with this tag here'),
+              onTap: () => Navigator.pop(context, 'mute'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case 'filter':
+        _filterTag(tag);
+      case 'follow':
+        await widget.state.toggleShortsFollow(tag);
+        if (!mounted) return;
+        _notify(
+          following
+              ? 'Unfollowed #${_display(tag)}.'
+              : 'Following #${_display(tag)}. Find it in the Following tab.',
+        );
+        if (_mode == ShortsMode.following && _tagFilter == null) _start();
+      case 'mute':
+        await _feed.muteTag(tag);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text('You won\'t see #${_display(tag)} here again.'),
+              action: SnackBarAction(
+                label: 'Undo',
+                onPressed: () => widget.state.unmuteShortsTag(tag),
+              ),
+            ),
+          );
+    }
+  }
+
+  /// Why the details sheet says [saved] was picked, if it was.
+  String? _why(SavedPost saved) {
+    if (_mode == ShortsMode.following) {
+      return _tagFilter == null ? 'From tags you follow.' : null;
+    }
+    if (!_feed.personalized) return null;
+    if (_feed.explored(saved)) {
+      return 'Something new, outside your usual interests.';
+    }
+    final reasons = widget.state.shortsProfile.reasons(saved);
+    if (reasons.isEmpty) return null;
+    return 'Because you like ${reasons.map((tag) => '#${_display(tag)}').join(', ')}.';
   }
 
   Future<void> _download(SavedPost saved) async {
@@ -339,6 +629,7 @@ class _ShortsScreenState extends State<ShortsScreen>
     setState(() => _downloading = true);
     try {
       await widget.state.downloadPost(saved.post, board: saved.board);
+      _feed.feedback(saved, ShortsSignal.download);
       _notify(
         _settings.autoFavoriteOnDownload
             ? 'Video saved to your download folder and favorited.'
@@ -363,15 +654,18 @@ class _ShortsScreenState extends State<ShortsScreen>
     setState(() => _sharing = true);
     _notify('Preparing to share…');
     try {
-      await _device.shareMedia(
-        url: url,
-        name: mediaFileName(
-          saved.board,
-          saved.post,
-          url,
-          template: _settings.filenameTemplate,
+      await _leaveFor(
+        () => _device.shareMedia(
+          url: url,
+          name: mediaFileName(
+            saved.board,
+            saved.post,
+            url,
+            template: _settings.filenameTemplate,
+          ),
         ),
       );
+      _feed.feedback(saved, ShortsSignal.share);
       if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
     } catch (_) {
       _notify('Unable to share this video. Check your connection.');
@@ -404,12 +698,14 @@ class _ShortsScreenState extends State<ShortsScreen>
   }
 
   Future<void> _showDetails(SavedPost saved) async {
-    final tag = await showModalBottomSheet<String>(
+    _feed.feedback(saved, ShortsSignal.details);
+    final choice = await showModalBottomSheet<({String tag, bool menu})>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => _ShortsDetails(
         saved: saved,
+        why: _why(saved),
         onFullDetails: () {
           Navigator.pop(context);
           _openFullDetails(saved);
@@ -422,7 +718,12 @@ class _ShortsScreenState extends State<ShortsScreen>
             _open(saved.post.source, 'Unable to open this source.'),
       ),
     );
-    if (tag != null && mounted) _filterTag(tag);
+    if (choice == null || !mounted) return;
+    if (choice.menu) {
+      await _tagMenu(choice.tag);
+    } else {
+      _filterTag(choice.tag);
+    }
   }
 
   Future<void> _showSite(SavedPost saved) async {
@@ -533,11 +834,12 @@ class _ShortsScreenState extends State<ShortsScreen>
         _notify('Post link copied.');
       case 'share_link':
         try {
-          await _device.shareText(link);
+          await _leaveFor(() => _device.shareText(link));
         } catch (_) {
           _notify('No app can share this link.');
         }
       case 'hide':
+        _feed.feedback(saved, ShortsSignal.hide);
         await widget.state.hidePost(saved.post, board: saved.board);
         _notify('Post hidden.');
         _next();
@@ -580,7 +882,8 @@ class _ShortsScreenState extends State<ShortsScreen>
   /// The gear sheet: the tags Shorts searches, editable in place. Saved
   /// and applied when the sheet closes, however it is closed.
   Future<void> _editTags() async {
-    final before = _settings.shortsTags;
+    final following = _mode == ShortsMode.following;
+    final before = following ? _settings.shortsFollowing : _settings.shortsTags;
     var tags = before;
     await showModalBottomSheet<void>(
       context: context,
@@ -588,12 +891,20 @@ class _ShortsScreenState extends State<ShortsScreen>
       showDragHandle: true,
       builder: (context) => _ShortsTagsSheet(
         tags: before,
+        title: following ? 'Followed tags' : 'booruShorts tags',
+        description: following
+            ? 'The Following tab shows the newest videos with any of these tags, such as artists or characters.'
+            : 'Shows videos with any of these tags. Leave it empty for every video.',
         autocomplete: widget.state.autocomplete,
         onChanged: (value) => tags = value,
       ),
     );
     if (!mounted || listEquals(tags, before)) return;
-    await widget.state.setShortsTags(tags);
+    if (following) {
+      await widget.state.setShortsFollowing(tags);
+    } else {
+      await widget.state.setShortsTags(tags);
+    }
     if (!mounted) return;
     setState(() => _tagFilter = null);
     _start();
@@ -609,7 +920,7 @@ class _ShortsScreenState extends State<ShortsScreen>
         builder: (context, _) => Stack(
           children: [
             Positioned.fill(child: _body()),
-            Positioned(left: 0, right: 0, top: 0, child: _topBar()),
+            if (!_pip) Positioned(left: 0, right: 0, top: 0, child: _topBar()),
           ],
         ),
       ),
@@ -631,6 +942,7 @@ class _ShortsScreenState extends State<ShortsScreen>
       key: const ValueKey('shorts_pages'),
       controller: _pages,
       scrollDirection: Axis.vertical,
+      physics: _pip ? const NeverScrollableScrollPhysics() : null,
       itemCount: posts.length + 1,
       onPageChanged: _handlePageChanged,
       itemBuilder: (context, index) {
@@ -645,18 +957,22 @@ class _ShortsScreenState extends State<ShortsScreen>
           active: index == _index,
           blurred: _hiddenBehindBlur(saved),
           favorite: widget.state.isFavorite(saved.post, board: saved.board),
+          liked: _liked.contains(saved.identity),
+          compact: _pip,
           downloading: _downloading,
           sharing: _sharing,
           onTogglePlay: _togglePlay,
           onReveal: () => _reveal(saved),
-          onDoubleTap: () => _favorite(saved, onlyAdd: true),
           onFavorite: () => _favorite(saved),
+          onLike: () => _like(saved),
+          onDislike: () => _dislike(saved),
           onDetails: () => _showDetails(saved),
           onSite: () => _showSite(saved),
           onShare: () => _share(saved),
           onDownload: () => _download(saved),
           onMore: () => _showMore(saved),
           onTag: _filterTag,
+          onTagMenu: _tagMenu,
         );
       },
     );
@@ -682,6 +998,16 @@ class _ShortsScreenState extends State<ShortsScreen>
   }
 
   Widget _emptyState() {
+    if (_mode == ShortsMode.following &&
+        _tagFilter == null &&
+        _settings.shortsFollowing.isEmpty) {
+      return _message(
+        icon: Icons.person_add_alt_1_outlined,
+        text: 'Follow artists or characters to see their newest videos here. Hold a tag in booruShorts, or add tags with the gear.',
+        action: 'Add tags',
+        onAction: _editTags,
+      );
+    }
     if (_available.isEmpty) {
       return _message(
         icon: Icons.videocam_off_outlined,
@@ -766,15 +1092,24 @@ class _ShortsScreenState extends State<ShortsScreen>
                   scrollDirection: Axis.horizontal,
                   child: Row(
                     children: [
-                      const Text(
-                        'booruShorts',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 19,
-                          fontWeight: FontWeight.w700,
-                          shadows: shadow,
-                        ),
+                      _Tab(
+                        key: const ValueKey('shorts_tab_for_you'),
+                        label: 'For you',
+                        selected: _mode == ShortsMode.forYou,
+                        onTap: () => _setMode(ShortsMode.forYou),
                       ),
+                      _Tab(
+                        key: const ValueKey('shorts_tab_following'),
+                        label: 'Following',
+                        selected: _mode == ShortsMode.following,
+                        onTap: () => _setMode(ShortsMode.following),
+                      ),
+                      if (_autoScroll)
+                        _FilterChip(
+                          key: const ValueKey('shorts_auto_scroll_chip'),
+                          label: 'Auto-scroll',
+                          onClear: _toggleAutoScroll,
+                        ),
                       if (filter != null)
                         _FilterChip(
                           key: const ValueKey('shorts_tag_filter'),
@@ -802,10 +1137,51 @@ class _ShortsScreenState extends State<ShortsScreen>
               ),
               IconButton(
                 key: const ValueKey('shorts_tags'),
-                tooltip: 'booruShorts tags',
+                tooltip: _mode == ShortsMode.following
+                    ? 'Followed tags'
+                    : 'booruShorts tags',
                 color: Colors.white,
                 icon: const Icon(Icons.settings_rounded, shadows: shadow),
                 onPressed: _editTags,
+              ),
+              PopupMenuButton<String>(
+                key: const ValueKey('shorts_menu'),
+                tooltip: 'More options',
+                iconColor: Colors.white,
+                icon: const Icon(Icons.more_vert_rounded, shadows: shadow),
+                onSelected: (value) => switch (value) {
+                  'auto' => _toggleAutoScroll(),
+                  'pip' => _enterPip(),
+                  'history' => _openPage(
+                    () => openShortsHistory(context, widget.state),
+                  ),
+                  'interests' => _openPage(
+                    () => openShortsInterests(context, widget.state),
+                  ),
+                  _ => null,
+                },
+                itemBuilder: (context) => [
+                  CheckedPopupMenuItem(
+                    key: const ValueKey('shorts_auto_scroll'),
+                    value: 'auto',
+                    checked: _autoScroll,
+                    child: const Text('Auto-scroll'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'pip',
+                    child: Text('Picture-in-picture'),
+                  ),
+                  const PopupMenuItem(
+                    key: ValueKey('shorts_history_open'),
+                    value: 'history',
+                    child: Text('Watch history'),
+                  ),
+                  const PopupMenuItem(
+                    key: ValueKey('shorts_interests_open'),
+                    value: 'interests',
+                    child: Text('Your interests'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -903,25 +1279,32 @@ class _ShortsPage extends StatefulWidget {
     required this.active,
     required this.blurred,
     required this.favorite,
+    required this.liked,
+    required this.compact,
     required this.downloading,
     required this.sharing,
     required this.onTogglePlay,
     required this.onReveal,
-    required this.onDoubleTap,
     required this.onFavorite,
+    required this.onLike,
+    required this.onDislike,
     required this.onDetails,
     required this.onSite,
     required this.onShare,
     required this.onDownload,
     required this.onMore,
     required this.onTag,
+    required this.onTagMenu,
   });
   final SavedPost saved;
   final VideoPlayerController? controller;
-  final bool failed, active, blurred, favorite, downloading, sharing;
-  final VoidCallback onTogglePlay, onReveal, onDoubleTap, onFavorite;
+  final bool failed, active, blurred, favorite, liked, downloading, sharing;
+
+  /// Picture-in-picture: the video only.
+  final bool compact;
+  final VoidCallback onTogglePlay, onReveal, onFavorite, onLike, onDislike;
   final VoidCallback onDetails, onSite, onShare, onDownload, onMore;
-  final ValueChanged<String> onTag;
+  final ValueChanged<String> onTag, onTagMenu;
 
   @override
   State<_ShortsPage> createState() => _ShortsPageState();
@@ -930,8 +1313,9 @@ class _ShortsPage extends StatefulWidget {
 class _ShortsPageState extends State<_ShortsPage> {
   int _flash = 0;
   IconData _flashIcon = Icons.play_arrow_rounded;
-  int _burst = 0;
-  Offset _burstAt = Offset.zero;
+  // Double-tap skips ahead; the badge appears where the finger landed.
+  int _skip = 0;
+  Offset _skipAt = Offset.zero;
   Offset _lastDoubleTap = Offset.zero;
   bool _fast = false;
 
@@ -949,12 +1333,17 @@ class _ShortsPageState extends State<_ShortsPage> {
     });
   }
 
+  static const _skipBy = Duration(seconds: 5);
+
   void _doubleTap() {
-    if (widget.blurred) return;
-    widget.onDoubleTap();
+    final controller = widget.controller;
+    if (widget.blurred || !_ready || controller == null) return;
+    final value = controller.value;
+    final target = value.position + _skipBy;
+    controller.seekTo(target < value.duration ? target : value.duration);
     setState(() {
-      _burst++;
-      _burstAt = _lastDoubleTap;
+      _skip++;
+      _skipAt = _lastDoubleTap;
     });
   }
 
@@ -984,6 +1373,9 @@ class _ShortsPageState extends State<_ShortsPage> {
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     final controller = widget.controller;
+    if (widget.compact) {
+      return ColoredBox(color: Colors.black, child: _media(controller));
+    }
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -1032,7 +1424,20 @@ class _ShortsPageState extends State<_ShortsPage> {
           bottom: bottomInset + 28,
           child: _info(),
         ),
-        Positioned(right: 6, bottom: bottomInset + 28, child: _rail()),
+        // Scaled down to fit short screens and large text.
+        Positioned(
+          right: 6,
+          top: MediaQuery.paddingOf(context).top + 64,
+          bottom: bottomInset + 28,
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.bottomCenter,
+              child: _rail(),
+            ),
+          ),
+        ),
         if (_flash > 0)
           IgnorePointer(
             child: Center(
@@ -1058,13 +1463,13 @@ class _ShortsPageState extends State<_ShortsPage> {
               ),
             ),
           ),
-        if (_burst > 0)
+        if (_skip > 0)
           Positioned(
-            left: _burstAt.dx - 56,
-            top: _burstAt.dy - 56,
+            left: _skipAt.dx - 44,
+            top: _skipAt.dy - 44,
             child: IgnorePointer(
               child: TweenAnimationBuilder<double>(
-                key: ValueKey(_burst),
+                key: ValueKey(_skip),
                 tween: Tween(begin: 0, end: 1),
                 duration: const Duration(milliseconds: 800),
                 builder: (_, value, child) => Opacity(
@@ -1076,11 +1481,32 @@ class _ShortsPageState extends State<_ShortsPage> {
                     child: child,
                   ),
                 ),
-                child: const Icon(
-                  Icons.favorite_rounded,
-                  size: 112,
-                  color: Color(0xFFFF3B5C),
-                  shadows: [Shadow(blurRadius: 16, color: Colors.black45)],
+                child: const SizedBox.square(
+                  key: ValueKey('shorts_skip'),
+                  dimension: 88,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Color(0x66000000),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.fast_forward_rounded,
+                          size: 42,
+                          color: Colors.white,
+                        ),
+                        Text(
+                          '+5s',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1244,6 +1670,7 @@ class _ShortsPageState extends State<_ShortsPage> {
                   child: InkWell(
                     customBorder: const StadiumBorder(),
                     onTap: () => widget.onTag(tag.name),
+                    onLongPress: () => widget.onTagMenu(tag.name),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 10,
@@ -1282,6 +1709,28 @@ class _ShortsPageState extends State<_ShortsPage> {
         ),
         label: widget.favorite ? 'Saved' : 'Favorite',
         onTap: widget.onFavorite,
+      ),
+      _RailButton(
+        key: const ValueKey('shorts_like'),
+        icon: Icon(
+          widget.liked ? Icons.thumb_up_rounded : Icons.thumb_up_outlined,
+          color: widget.liked ? const Color(0xFF4DA3FF) : Colors.white,
+          size: 28,
+          shadows: _RailButton.shadow,
+        ),
+        label: widget.liked ? 'Liked' : 'Like',
+        onTap: widget.onLike,
+      ),
+      _RailButton(
+        key: const ValueKey('shorts_dislike'),
+        icon: const Icon(
+          Icons.thumb_down_outlined,
+          color: Colors.white,
+          size: 28,
+          shadows: _RailButton.shadow,
+        ),
+        label: 'Not for me',
+        onTap: widget.onDislike,
       ),
       _RailButton(
         key: const ValueKey('shorts_details'),
@@ -1382,6 +1831,86 @@ class _RailButton extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// A tab in the top bar: For you or Following.
+class _Tab extends StatelessWidget {
+  const _Tab({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    selected: selected,
+    button: true,
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.white70,
+                fontSize: 16,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                shadows: const [Shadow(blurRadius: 8, color: Colors.black54)],
+              ),
+            ),
+            const SizedBox(height: 3),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              height: 2.5,
+              width: selected ? 22 : 0,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Played media time and loops for one visit to a video. Seeks (the scrub
+/// bar, double-tap) are not counted, and nothing counts while paused.
+class _Watch {
+  _Watch(this.saved);
+  final SavedPost saved;
+  Duration played = Duration.zero;
+  Duration duration = Duration.zero;
+  int loops = 0;
+  Duration? _last;
+
+  void tick(VideoPlayerValue value) {
+    if (!value.isInitialized) return;
+    duration = value.duration;
+    final position = value.position;
+    final last = _last;
+    _last = position;
+    if (last == null || !value.isPlaying) return;
+    final delta = position - last;
+    if (delta > Duration.zero && delta <= const Duration(milliseconds: 2500)) {
+      played += delta;
+    } else if (delta < const Duration(seconds: -1) &&
+        duration > Duration.zero &&
+        last >= duration - const Duration(milliseconds: 1500) &&
+        position <= const Duration(milliseconds: 1500)) {
+      // From the end back to the start: a replay, not a seek.
+      loops++;
+    }
+  }
 }
 
 class _RailProgress extends StatelessWidget {
@@ -1528,18 +2057,26 @@ class _ScrubBarState extends State<_ScrubBar> {
                         ),
                       ),
                     ),
+                  // The track spans the width; played and buffered fill it
+                  // from the left edge.
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 120),
+                    width: double.infinity,
                     height: barHeight,
                     margin: const EdgeInsets.only(bottom: 4),
                     color: const Color(0x33FFFFFF),
                     child: Stack(
+                      fit: StackFit.expand,
                       children: [
                         FractionallySizedBox(
+                          key: const ValueKey('shorts_scrub_buffered'),
+                          alignment: Alignment.centerLeft,
                           widthFactor: buffered.clamp(0.0, 1.0),
                           child: const ColoredBox(color: Color(0x55FFFFFF)),
                         ),
                         FractionallySizedBox(
+                          key: const ValueKey('shorts_scrub_played'),
+                          alignment: Alignment.centerLeft,
                           widthFactor: played,
                           child: const ColoredBox(color: Colors.white),
                         ),
@@ -1561,11 +2098,15 @@ class _ScrubBarState extends State<_ScrubBar> {
 class _ShortsDetails extends StatelessWidget {
   const _ShortsDetails({
     required this.saved,
+    required this.why,
     required this.onFullDetails,
     required this.onOpenPost,
     required this.onOpenSource,
   });
   final SavedPost saved;
+
+  /// Why booruShorts picked this video, when it can tell.
+  final String? why;
   final VoidCallback onFullDetails, onOpenPost, onOpenSource;
 
   static const _order = [
@@ -1618,6 +2159,23 @@ class _ShortsDetails extends StatelessWidget {
               ),
             ],
           ),
+          if (why != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              key: const ValueKey('shorts_why'),
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.auto_awesome_outlined, size: 16, color: ink(.54)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    why!,
+                    style: TextStyle(color: ink(.70), fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 12),
           Wrap(
             spacing: 18,
@@ -1678,13 +2236,20 @@ class _ShortsDetails extends StatelessWidget {
                 runSpacing: 6,
                 children: [
                   for (final tag in grouped[category]!)
-                    ActionChip(
-                      label: Text(
-                        _display(tag.name),
-                        style: TextStyle(color: tagColor(category)),
+                    GestureDetector(
+                      onLongPress: () =>
+                          Navigator.pop(context, (tag: tag.name, menu: true)),
+                      child: ActionChip(
+                        label: Text(
+                          _display(tag.name),
+                          style: TextStyle(color: tagColor(category)),
+                        ),
+                        tooltip: 'Show booruShorts with this tag. Hold to follow or mute it.',
+                        onPressed: () => Navigator.pop(context, (
+                          tag: tag.name,
+                          menu: false,
+                        )),
                       ),
-                      tooltip: 'Show booruShorts with this tag',
-                      onPressed: () => Navigator.pop(context, tag.name),
                     ),
                 ],
               ),
@@ -1701,10 +2266,13 @@ class _ShortsDetails extends StatelessWidget {
 class _ShortsTagsSheet extends StatefulWidget {
   const _ShortsTagsSheet({
     required this.tags,
+    required this.title,
+    required this.description,
     required this.autocomplete,
     required this.onChanged,
   });
   final List<String> tags;
+  final String title, description;
   final Future<List<TagSuggestion>> Function(String query) autocomplete;
   final ValueChanged<List<String>> onChanged;
 
@@ -1736,13 +2304,10 @@ class _ShortsTagsSheetState extends State<_ShortsTagsSheet> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'booruShorts tags',
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
+        Text(widget.title, style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 4),
         Text(
-          'Shows videos with any of these tags. Leave it empty for every video.',
+          widget.description,
           style: TextStyle(color: ink(.60), fontSize: 13),
         ),
         const SizedBox(height: 14),

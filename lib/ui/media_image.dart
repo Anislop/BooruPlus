@@ -19,6 +19,7 @@ class MediaImage extends StatefulWidget {
     this.errorWidget,
     this.loadingWidget,
     this.showProgress = false,
+    this.progressBuilder,
   });
 
   final String url;
@@ -38,6 +39,11 @@ class MediaImage extends StatefulWidget {
   /// Shows a progress bar while loading instead of [loadingWidget]; it fills
   /// as bytes arrive when the size is known (network images).
   final bool showProgress;
+
+  /// Builds the loading indicator from the fraction loaded, which is null
+  /// when the size is unknown (natively fetched media reports no progress).
+  /// Takes precedence over [showProgress] and [loadingWidget].
+  final Widget Function(double? progress)? progressBuilder;
 
   /// Whether [url] is fetched and prepared natively rather than handed to
   /// [NetworkImage]: authenticated Gelbooru media, Sankaku AVIF previews,
@@ -122,14 +128,16 @@ class _MediaImageState extends State<MediaImage> {
       );
 
   Widget _loading([ImageChunkEvent? progress]) {
-    if (!widget.showProgress) {
-      return widget.loadingWidget ??
-          const Center(child: CircularProgressIndicator());
-    }
     final total = progress?.expectedTotalBytes;
     final value = total == null || total <= 0
         ? null
         : (progress!.cumulativeBytesLoaded / total).clamp(0.0, 1.0);
+    final builder = widget.progressBuilder;
+    if (builder != null) return builder(value);
+    if (!widget.showProgress) {
+      return widget.loadingWidget ??
+          const Center(child: CircularProgressIndicator());
+    }
     return Center(
       child: SizedBox(
         width: 200,
