@@ -2349,6 +2349,66 @@ class ShortsFeed extends ChangeNotifier {
     await loadMore();
   }
 
+  /// The feed as it is now, for [restore] after a detour such as a tag
+  /// filter.
+  ShortsFeedSnapshot snapshot() => ShortsFeedSnapshot._(
+    mode: _mode,
+    ranked: _ranked,
+    ranker: _ranker,
+    tags: _tags,
+    interestTags: _interestTags,
+    boards: _boards,
+    streams: _streams,
+    posts: _posts,
+    pool: List.of(_pool),
+    explored: Set.of(_explored),
+    pages: Map.of(_pages),
+    exhausted: Set.of(_exhausted),
+    errors: Map.of(_errors),
+    barren: Map.of(_barren),
+    seen: Set.of(_seen),
+    seed: _seed,
+    cursor: _cursor,
+  );
+
+  /// Returns to [snapshot], dropping any load in progress. Videos muted
+  /// since then leave the pool.
+  void restore(ShortsFeedSnapshot snapshot) {
+    _generation++;
+    _mode = snapshot.mode;
+    _ranked = snapshot.ranked;
+    _ranker = snapshot.ranker;
+    _tags = snapshot.tags;
+    _interestTags = snapshot.interestTags;
+    _boards = snapshot.boards;
+    _streams = snapshot.streams;
+    _posts = snapshot.posts;
+    _pool = List.of(snapshot.pool)..removeWhere(_profile.isMuted);
+    _explored
+      ..clear()
+      ..addAll(snapshot.explored);
+    _pages
+      ..clear()
+      ..addAll(snapshot.pages);
+    _exhausted
+      ..clear()
+      ..addAll(snapshot.exhausted);
+    _errors
+      ..clear()
+      ..addAll(snapshot.errors);
+    _barren
+      ..clear()
+      ..addAll(snapshot.barren);
+    _seen
+      ..clear()
+      ..addAll(snapshot.seen);
+    _seed = snapshot.seed;
+    _cursor = snapshot.cursor;
+    _retryPending = false;
+    _loading = false;
+    _notify();
+  }
+
   /// Asks the websites that stopped with an error again.
   Future<void> retry() async {
     if (_errors.isEmpty) return;
@@ -2540,6 +2600,41 @@ class ShortsFeed extends ChangeNotifier {
     _generation++;
     super.dispose();
   }
+}
+
+/// A [ShortsFeed] saved by [ShortsFeed.snapshot].
+class ShortsFeedSnapshot {
+  const ShortsFeedSnapshot._({
+    required this.mode,
+    required this.ranked,
+    required this.ranker,
+    required this.tags,
+    required this.interestTags,
+    required this.boards,
+    required this.streams,
+    required this.posts,
+    required this.pool,
+    required this.explored,
+    required this.pages,
+    required this.exhausted,
+    required this.errors,
+    required this.barren,
+    required this.seen,
+    required this.seed,
+    required this.cursor,
+  });
+  final ShortsMode mode;
+  final bool ranked;
+  final ShortsRanker ranker;
+  final List<String> tags, interestTags;
+  final List<Board> boards;
+  final List<(Board, String?)> streams;
+  final List<SavedPost> posts, pool;
+  final Set<String> explored, seen;
+  final Map<(Board, String?), int> pages, barren;
+  final Set<(Board, String?)> exhausted;
+  final Map<(Board, String?), String> errors;
+  final int seed, cursor;
 }
 
 /// What [AppState.importBackup] restored.

@@ -1672,6 +1672,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: 'Incognito',
                         subtitle: "Don't record recent searches or searched and browsed tags. Also in the menu.",
                       ),
+                      _switchCard(
+                        value: _settings.noShare,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(noShare: value),
+                        ),
+                        icon: Icons.share_outlined,
+                        title: 'No share',
+                        subtitle: 'Hide all share buttons to not accidentally share something to your boss.',
+                      ),
                       const SectionLabel('Backup'),
                       Container(
                         padding: const EdgeInsets.all(16),

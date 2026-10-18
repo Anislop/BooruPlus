@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/models.dart';
 import 'theme.dart';
@@ -55,6 +56,25 @@ class TagInputState extends State<TagInput> {
     super.initState();
     _controller.addListener(_onTextChanged);
     _focus.addListener(_onFocusChanged);
+    _focus.onKeyEvent = _onKey;
+  }
+
+  // Backspace with nothing typed deletes the last chip, as if it were text.
+  // Keyboards send it as a key event only when there is no text to delete.
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is KeyUpEvent ||
+        event.logicalKey != LogicalKeyboardKey.backspace ||
+        !widget.enabled ||
+        widget.tags.isEmpty) {
+      return KeyEventResult.ignored;
+    }
+    final selection = _controller.selection;
+    if (_controller.text.isNotEmpty &&
+        !(selection.isCollapsed && selection.baseOffset == 0)) {
+      return KeyEventResult.ignored;
+    }
+    widget.onChanged(widget.tags.sublist(0, widget.tags.length - 1));
+    return KeyEventResult.handled;
   }
 
   // Redraws the field's focused outline.
@@ -215,12 +235,48 @@ class TagInputState extends State<TagInput> {
   );
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: widget.suggestionsAbove
-        ? [if (_suggestions.isNotEmpty) _suggestionList(), _field(context)]
-        : [_field(context), if (_suggestions.isNotEmpty) _suggestionList()],
-  );
+  Widget build(BuildContext context) {
+    if (!widget.suggestionsAbove) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _field(context),
+          if (_suggestions.isNotEmpty) _suggestionList(),
+        ],
+      );
+    }
+    // Above the field (one-handed mode), the suggestions take the room the
+    // field leaves, best match nearest the field, so none is cut off at the
+    // top. The field scrolls by itself, its typing line kept in view.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final suggesting = _suggestions.isNotEmpty;
+        final field = SingleChildScrollView(
+          reverse: true,
+          child: _field(context),
+        );
+        if (!constraints.hasBoundedHeight) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [if (suggesting) _suggestionList(), field],
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (suggesting) Flexible(child: _suggestionList()),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: suggesting ? 112 : constraints.maxHeight,
+              ),
+              child: field,
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   Widget _suggestionList() => Container(
     constraints: const BoxConstraints(maxHeight: 190),
@@ -233,6 +289,8 @@ class TagInputState extends State<TagInput> {
     ),
     child: ListView.builder(
       shrinkWrap: true,
+      reverse: widget.suggestionsAbove,
+      padding: EdgeInsets.zero,
       itemCount: _suggestions.length,
       itemBuilder: (context, index) {
         final suggestion = _suggestions[index];

@@ -70,6 +70,8 @@ class _ShortsScreenState extends State<ShortsScreen>
   // Filters for this visit only: one tag, or one website.
   String? _tagFilter;
   Board? _onlyBoard;
+  // The feed before a tag filter, so back or clearing it returns there.
+  ({ShortsFeedSnapshot feed, int index, Board? only})? _beforeFilter;
 
   AppSettings get _settings => widget.state.settings;
 
@@ -152,6 +154,7 @@ class _ShortsScreenState extends State<ShortsScreen>
     setState(() {
       _mode = mode;
       _tagFilter = null;
+      _beforeFilter = null;
     });
     _start();
   }
@@ -475,6 +478,7 @@ class _ShortsScreenState extends State<ShortsScreen>
 
   void _filterTag(String tag) {
     widget.state.learnShortsTag(tag);
+    _beforeFilter ??= (feed: _feed.snapshot(), index: _index, only: _onlyBoard);
     setState(() {
       _tagFilter = tag;
       _onlyBoard = null;
@@ -482,9 +486,31 @@ class _ShortsScreenState extends State<ShortsScreen>
     _start();
   }
 
+  /// Leaves the tag filter for the feed as it was before it, at the video
+  /// that was showing.
   void _clearTagFilter() {
-    setState(() => _tagFilter = null);
-    _start();
+    final before = _beforeFilter;
+    if (before == null) {
+      setState(() => _tagFilter = null);
+      _start();
+      return;
+    }
+    _reportWatch();
+    _disposeClips();
+    _userPaused = false;
+    _advancing = false;
+    setState(() {
+      _tagFilter = null;
+      _beforeFilter = null;
+      _onlyBoard = before.only;
+      _index = before.index;
+    });
+    _feed.restore(before.feed);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _pages.hasClients && _pages.page?.round() != _index) {
+        _pages.jumpToPage(_index);
+      }
+    });
   }
 
   void _setOnlyBoard(Board? board) {
@@ -799,6 +825,8 @@ class _ShortsScreenState extends State<ShortsScreen>
         setState(() {
           _available = _available.where((other) => other != board).toList();
           if (_onlyBoard == board) _onlyBoard = null;
+          // The saved feed still has the hidden website's videos.
+          _beforeFilter = null;
         });
         _start();
         _notify('${board.label} is hidden from booruShorts.');
@@ -821,11 +849,12 @@ class _ShortsScreenState extends State<ShortsScreen>
                 title: const Text('Copy post link'),
                 onTap: () => Navigator.pop(context, 'copy'),
               ),
-              ListTile(
-                leading: const Icon(Icons.share_outlined),
-                title: const Text('Share post link'),
-                onTap: () => Navigator.pop(context, 'share_link'),
-              ),
+              if (!_settings.noShare)
+                ListTile(
+                  leading: const Icon(Icons.share_outlined),
+                  title: const Text('Share post link'),
+                  onTap: () => Navigator.pop(context, 'share_link'),
+                ),
             ],
             ListTile(
               leading: const Icon(Icons.visibility_off_outlined),
@@ -921,22 +950,33 @@ class _ShortsScreenState extends State<ShortsScreen>
       await widget.state.setShortsTags(tags);
     }
     if (!mounted) return;
-    setState(() => _tagFilter = null);
+    setState(() {
+      _tagFilter = null;
+      _beforeFilter = null;
+    });
     _start();
   }
 
   @override
-  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
-    value: SystemUiOverlayStyle.light,
-    child: Scaffold(
-      backgroundColor: Colors.black,
-      body: ListenableBuilder(
-        listenable: Listenable.merge([_feed, widget.state]),
-        builder: (context, _) => Stack(
-          children: [
-            Positioned.fill(child: _body()),
-            if (!_pip) Positioned(left: 0, right: 0, top: 0, child: _topBar()),
-          ],
+  Widget build(BuildContext context) => PopScope<void>(
+    // Back from a tag filter returns to the feed instead of leaving.
+    canPop: _tagFilter == null,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) _clearTagFilter();
+    },
+    child: AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: ListenableBuilder(
+          listenable: Listenable.merge([_feed, widget.state]),
+          builder: (context, _) => Stack(
+            children: [
+              Positioned.fill(child: _body()),
+              if (!_pip)
+                Positioned(left: 0, right: 0, top: 0, child: _topBar()),
+            ],
+          ),
         ),
       ),
     ),
@@ -983,7 +1023,7 @@ class _ShortsScreenState extends State<ShortsScreen>
           onDislike: () => _dislike(saved),
           onDetails: () => _showDetails(saved),
           onSite: () => _showSite(saved),
-          onShare: () => _share(saved),
+          onShare: _settings.noShare ? null : () => _share(saved),
           onDownload: () => _download(saved),
           onMore: () => _showMore(saved),
           onTag: _filterTag,
@@ -1360,7 +1400,10 @@ class _ShortsPage extends StatefulWidget {
   /// Picture-in-picture: the video only.
   final bool compact;
   final VoidCallback onTogglePlay, onReveal, onFavorite, onLike, onDislike;
-  final VoidCallback onDetails, onSite, onShare, onDownload, onMore;
+  final VoidCallback onDetails, onSite, onDownload, onMore;
+
+  /// Null hides the share button (Settings › No share).
+  final VoidCallback? onShare;
   final ValueChanged<String> onTag, onTagMenu;
 
   @override
@@ -1807,18 +1850,19 @@ class _ShortsPageState extends State<_ShortsPage> {
         label: _board.label,
         onTap: widget.onSite,
       ),
-      _RailButton(
-        icon: widget.sharing
-            ? const _RailProgress()
-            : const Icon(
-                Icons.share_rounded,
-                color: Colors.white,
-                size: 28,
-                shadows: _RailButton.shadow,
-              ),
-        label: 'Share',
-        onTap: widget.onShare,
-      ),
+      if (widget.onShare case final onShare?)
+        _RailButton(
+          icon: widget.sharing
+              ? const _RailProgress()
+              : const Icon(
+                  Icons.share_rounded,
+                  color: Colors.white,
+                  size: 28,
+                  shadows: _RailButton.shadow,
+                ),
+          label: 'Share',
+          onTap: onShare,
+        ),
       _RailButton(
         icon: widget.downloading
             ? const _RailProgress()
