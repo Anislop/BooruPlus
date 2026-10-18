@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../core/models.dart';
 import '../core/updates.dart';
 import 'theme.dart';
 
@@ -11,12 +10,10 @@ Future<void> showUpdateDialog(
   BuildContext context, {
   required UpdateService updates,
   required AppRelease release,
-  InstalledVersion? installed,
 }) => showDialog<void>(
   context: context,
   barrierDismissible: false,
-  builder: (_) =>
-      UpdateDialog(updates: updates, release: release, installed: installed),
+  builder: (_) => UpdateDialog(updates: updates, release: release),
 );
 
 class UpdateDialog extends StatefulWidget {
@@ -24,11 +21,9 @@ class UpdateDialog extends StatefulWidget {
     super.key,
     required this.updates,
     required this.release,
-    this.installed,
   });
   final UpdateService updates;
   final AppRelease release;
-  final InstalledVersion? installed;
 
   @override
   State<UpdateDialog> createState() => _UpdateDialogState();
@@ -79,38 +74,46 @@ class _UpdateDialogState extends State<UpdateDialog> {
   @override
   Widget build(BuildContext context) {
     final release = widget.release;
-    final installed = widget.installed;
+    final change = release.change;
     final error = _error;
-    final size = release.size;
     final progress = _progress;
     final caption = TextStyle(color: ink(.54), fontSize: 12, height: 1.5);
     return PopScope(
       canPop: !_downloading,
       child: AlertDialog(
         icon: const Icon(Icons.system_update_rounded, color: accent),
-        title: const Text('Update available'),
+        title: const Text('An update is available.'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text('Version: ${release.label}'),
+              const SizedBox(height: 12),
               Text(
-                'BooruPlus ${release.label} is ready to install'
-                '${size == null ? '' : ' (${formatBytes(size)})'}.',
+                change.title,
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
-              if (installed != null) ...[
-                const SizedBox(height: 4),
-                Text('You have ${installed.label}.', style: caption),
-              ],
-              if (release.notes.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text(
-                  release.notes,
-                  maxLines: 8,
-                  overflow: TextOverflow.ellipsis,
-                  style: caption,
+              const SizedBox(height: 8),
+              // The commit description, set apart like a changelog file.
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 220),
+                decoration: BoxDecoration(
+                  color: ink(.05),
+                  border: Border.all(color: ink(.12)),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-              ],
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    change.description.isEmpty
+                        ? 'No description provided. Might just be some fixes.'
+                        : change.description,
+                    style: caption.copyWith(fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
               if (_downloading) ...[
                 const SizedBox(height: 16),
                 LinearProgressIndicator(value: progress),

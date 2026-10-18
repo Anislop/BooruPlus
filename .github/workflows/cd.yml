@@ -158,16 +158,18 @@ jobs:
             --title "BooruPlus $GITHUB_REF_NAME" \
             --generate-notes
 
-      # The in-app update dialog shows these notes.
+      # The in-app update dialog shows the commit message, up to the marker
+      # (AppRelease.commitEnd in lib/core/updates.dart): its first line as
+      # the title and the rest as the description.
       - name: Publish nightly prerelease
         if: github.ref == 'refs/heads/main'
         env:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           {
-            echo "Latest build of main at ${GITHUB_SHA::7}: ${COMMIT_MESSAGE%%$'\n'*}"
-            echo
-            echo "Install the uncensored APK (*-uncensored.apk). The debug APK is for testing and cannot update the uncensored one."
+            printf '%s\n\n' "$COMMIT_MESSAGE"
+            echo "<!-- end of commit message -->"
+            echo "Built from ${GITHUB_SHA::7}. Install the uncensored APK (*-uncensored.apk). The debug APK is for testing and cannot update the uncensored one."
           } > notes.md
           gh release delete nightly --yes --cleanup-tag || true
           gh release create nightly dist/*.apk \

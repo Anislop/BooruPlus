@@ -43,6 +43,26 @@ class AppRelease {
 
   String get label => '$version (build $build)';
 
+  /// CD writes a nightly's commit message into its notes and ends it with
+  /// this marker; text after it is for the GitHub release page only.
+  static const commitEnd = '<!-- end of commit message -->';
+
+  /// The commit title and description from [notes]. Releases without the
+  /// marker (versioned ones) use the release title and the whole notes.
+  ({String title, String description}) get change {
+    final text = notes.replaceAll('\r\n', '\n');
+    final end = text.indexOf(commitEnd);
+    if (end < 0) return (title: title, description: text.trim());
+    final message = text.substring(0, end).trim();
+    final lineEnd = message.indexOf('\n');
+    final subject = (lineEnd < 0 ? message : message.substring(0, lineEnd))
+        .trim();
+    return (
+      title: subject.isEmpty ? title : subject,
+      description: lineEnd < 0 ? '' : message.substring(lineEnd + 1).trim(),
+    );
+  }
+
   /// CD attaches the release APK as
   /// `booruplus-<version>-<build>-uncensored.apk`.
   static final apkName = RegExp(

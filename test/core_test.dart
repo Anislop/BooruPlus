@@ -1712,6 +1712,32 @@ void main() {
       expect(AppRelease.newest('not a listing', installedBuild: 0), isNull);
     });
 
+    test('splits nightly notes into the commit title and description', () {
+      AppRelease withNotes(String notes) => AppRelease(
+        tag: 'nightly',
+        title: 'Nightly (abc1234)',
+        version: '1.0.0',
+        build: 2,
+        apkUrl: 'https://github.com/o/r/releases/download/nightly/a.apk',
+        pageUrl: 'https://github.com/o/r/releases/tag/nightly',
+        notes: notes,
+      );
+      final full = withNotes(
+        'Fix sign-in\r\n\r\nKeeps the user ID.\r\nAnd the key.\r\n\r\n'
+        '${AppRelease.commitEnd}\r\nBuilt from abc1234.',
+      ).change;
+      expect(full.title, 'Fix sign-in');
+      expect(full.description, 'Keeps the user ID.\nAnd the key.');
+
+      final bare = withNotes('Fix sign-in\n\n${AppRelease.commitEnd}\n').change;
+      expect(bare.title, 'Fix sign-in');
+      expect(bare.description, isEmpty);
+
+      final versioned = withNotes('## What changed\n* Things').change;
+      expect(versioned.title, 'Nightly (abc1234)');
+      expect(versioned.description, '## What changed\n* Things');
+    });
+
     test('ignores APKs hosted outside GitHub', () {
       final listing = [
         {
