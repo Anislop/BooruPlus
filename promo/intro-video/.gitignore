@@ -1,7 +1,0 @@
-# Downloaded third-party artwork and logos (re-fetch with tools/fetch_media.py)
-media/
-# Renderer dependencies and outputs
-tools/node_modules/
-stills*/
-render.log
-*.mp4
