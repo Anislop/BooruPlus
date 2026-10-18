@@ -320,6 +320,8 @@ Live integration tests (`integration_test/`) need a real Android device with net
     - No possibility. Sideloading is hard in iOS, and the full app is sure won't be accepted by Apple themselves. The project itself is written mostly in Android in mind. However, this may change in the future.
 - **Play Store?**
     - Coming soon.
+- **Is this all free?**
+    - Yes. Will always be. You can fork it, you can do whatever you want as long as you follow our license. We will not add ads at all (it's open source anyways)
 
 ---
 
