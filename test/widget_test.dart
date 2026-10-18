@@ -150,6 +150,8 @@ void main() {
       expect(find.textContaining('Welcome to BooruPlus!'), findsOneWidget);
       final button = find.text('Explore Safebooru');
       await tester.scrollUntilVisible(button, 350);
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
       await tester.tap(button);
       await tester.pumpAndSettle();
       expect(find.text('DISCOVER'), findsOneWidget);
@@ -1430,7 +1432,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     // The unfinished tag is kept, saved, and searched.
     expect(store.settings.shortsTags, ['dog']);
-    expect(repo.queries.last, contains('dog'));
+    // A Sankaku media refresh (`id:`) may land after the search.
+    expect(repo.queries.where((tags) => tags.contains('dog')), isNotEmpty);
 
     await tester.pumpWidget(const SizedBox());
     state.dispose();
@@ -1530,7 +1533,7 @@ void main() {
     // Only websites with video are offered.
     expect(
       chips,
-      findsNWidgets(Board.values.where((board) => board.hasShorts).length),
+      findsNWidgets(listedBoards.where((board) => board.hasShorts).length),
     );
     await tester.tap(chips.first);
     await tester.pumpAndSettle();

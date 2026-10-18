@@ -122,6 +122,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     final state = widget.state;
     final board = shortcut.board;
+    if (board?.isRetired == true) return;
     if (board == null) {
       Navigator.of(context).popUntil((route) => route.isFirst);
       Navigator.push(
@@ -690,7 +691,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _pickDate() async {
     final board = widget.state.board;
     if (board == null) return;
-    if (board.usesGelbooruSyntax || board == Board.nozomi) {
+    if (!board.supportsDateSearch) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -711,7 +712,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
     final value = day(date);
     final dateTag = switch (board) {
-      Board.danbooru => 'date:>=$value',
+      // Sakugabooru (Moebooru) ignores created_at:.
+      Board.danbooru || Board.sakugabooru => 'date:>=$value',
       // Sankaku rejects open-ended dates; close the range after today.
       Board.sankaku || Board.idolcomplex =>
         'date:${value}T00:00..${day(DateTime.now().add(const Duration(days: 1)))}T00:00',
@@ -1902,7 +1904,7 @@ class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
     setState(() {
       _order
         ..clear()
-        ..addAll(Board.values);
+        ..addAll(listedBoards);
       _hidden.clear();
     });
     _save();
@@ -3029,7 +3031,7 @@ class FilterBar extends StatelessWidget {
           (tag) => tag.startsWith('created_at:') || tag.startsWith('date:'),
         )
         .firstOrNull;
-    final noFavoriteOrder = board.usesGelbooruSyntax || board.isSankakuFamily;
+    final noFavoriteOrder = !board.supportsFavoriteOrder;
     final sortItems = <PopupMenuEntry<String>>[
       const PopupMenuItem(value: 'none', child: Text('Relevance / default')),
       const PopupMenuItem(value: 'score', child: Text('Popularity / score')),

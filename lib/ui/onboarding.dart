@@ -89,7 +89,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 style: TextStyle(fontSize: 15, height: 1.6, color: ink(.60)),
               ),
               const SectionLabel('Choose a website'),
-              for (final board in Board.values)
+              for (final board in listedBoards)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Material(

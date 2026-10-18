@@ -12,6 +12,12 @@
     "idolcomplex": { "name": "Idol Complex", "accent": "#E88BB5", "surface": "#3A1A2A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=idolcomplex.com" },
     "tbib": { "name": "TBIB", "accent": "#7CC48A", "surface": "#1B2E22", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=tbib.org" },
     "aibooru": { "name": "AIBooru", "accent": "#5FD3C6", "surface": "#163330", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=aibooru.online" },
-    "nozomi": { "name": "Nozomi", "accent": "#E6C65C", "surface": "#352E16", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=nozomi.la" }
+    "nozomi": { "name": "Nozomi", "accent": "#E6C65C", "surface": "#352E16", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=nozomi.la" },
+    "sakugabooru": { "name": "Sakugabooru", "accent": "#E88A6E", "surface": "#38211A", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=sakugabooru.com" },
+    "xbooru": { "name": "XBooru", "accent": "#D98AA8", "surface": "#361E28", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=xbooru.com" },
+    "mspabooru": { "name": "MSPABooru", "accent": "#7DD36F", "surface": "#1C3119", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=mspabooru.com" },
+    "eshuushuu": { "name": "E-Shuushuu", "accent": "#8FB4E6", "surface": "#1D2838", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e-shuushuu.net" },
+    "mikubooru": { "name": "Mikubooru", "accent": "#5CCFD0", "surface": "#163233", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=booru.funmaker.moe" },
+    "nanbooru": { "name": "Nanbooru", "accent": "#B79CE8", "surface": "#2A2238", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=emmytherobot.art" }
   }
 }

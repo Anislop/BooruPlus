@@ -293,6 +293,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// Exempt websites the app still offers; retired ones stay saved but
+  /// are not shown.
+  List<Board> get _listedAiExemptions =>
+      _settings.aiExemptBoards.where((board) => !board.isRetired).toList();
+
   /// Picks the websites where the no-AI setting does not apply.
   Future<void> _chooseAiExemptions() async {
     final chosen = {..._settings.aiExemptBoards};
@@ -919,9 +924,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               leading: const Icon(Icons.rule_rounded),
                               title: const Text('Websites that show AI posts'),
                               subtitle: Text(
-                                _settings.aiExemptBoards.isEmpty
+                                _listedAiExemptions.isEmpty
                                     ? 'None. The setting applies everywhere.'
-                                    : _settings.aiExemptBoards
+                                    : _listedAiExemptions
                                           .map(
                                             (board) =>
                                                 appearanceFor(board).name,
