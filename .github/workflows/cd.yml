@@ -2,6 +2,14 @@ name: CD
 
 # Every push to main publishes both APKs to the rolling `nightly` prerelease;
 # a `v*` tag publishes them as a versioned release.
+#
+# The in-app updater (lib/core/updates.dart) reads this repository's
+# releases and installs the asset named
+# `booruplus-<version>-<build>-uncensored.apk`, comparing <build> (the CD run
+# number, also the APK's versionCode) with the installed build. Keep the
+# release APK's name in that form. Run numbers belong to this workflow:
+# renaming or recreating it restarts them, and installed builds would never
+# see a newer one.
 on:
   push:
     branches: [main]
@@ -44,14 +52,17 @@ jobs:
           cache: true
 
       - run: flutter pub get
-      - run: flutter build apk --debug --build-number=${{ github.run_number }}
+      - run: >-
+          flutter build apk --debug
+          --build-number=${{ github.run_number }}
+          --dart-define=UPDATE_REPOSITORY=${{ github.repository }}
 
       - name: Name the APK
         run: |
           version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-debug.apk \
-            "dist/booruplus-${version}-${{ github.run_number }}-debug.apk"
+            "dist/booruplus-${version}-${{ github.run_number }}-uncensored-debug.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -80,7 +91,8 @@ jobs:
           cache: true
 
       # Without these secrets the release APK falls back to the runner's
-      # throwaway debug key, so it cannot update an installed earlier build.
+      # throwaway debug key, so it cannot update an installed earlier build
+      # (the in-app updater reports a different signing key).
       - name: Set up release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -102,14 +114,18 @@ jobs:
           } > android/key.properties
 
       - run: flutter pub get
-      - run: flutter build apk --release --build-number=${{ github.run_number }}
+      - run: >-
+          flutter build apk --release
+          --build-number=${{ github.run_number }}
+          --dart-define=UPDATE_REPOSITORY=${{ github.repository }}
 
+      # The uncensored edition; the in-app updater installs this asset.
       - name: Name the APK
         run: |
           version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
-            "dist/booruplus-${version}-${{ github.run_number }}-release.apk"
+            "dist/booruplus-${version}-${{ github.run_number }}-uncensored.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -142,12 +158,20 @@ jobs:
             --title "BooruPlus $GITHUB_REF_NAME" \
             --generate-notes
 
+      # The in-app update dialog shows these notes.
       - name: Publish nightly prerelease
         if: github.ref == 'refs/heads/main'
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
+          {
+            echo "Latest build of main at ${GITHUB_SHA::7}: ${COMMIT_MESSAGE%%$'\n'*}"
+            echo
+            echo "Install the uncensored APK (*-uncensored.apk). The debug APK is for testing and cannot update the uncensored one."
+          } > notes.md
           gh release delete nightly --yes --cleanup-tag || true
           gh release create nightly dist/*.apk \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Nightly (${GITHUB_SHA::7})" \
-            --notes "Latest build of main at $GITHUB_SHA. Debug and release APKs are attached separately."
+            --notes-file notes.md

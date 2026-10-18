@@ -1,12 +1,15 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'core/app_state.dart';
 import 'core/models.dart';
 import 'core/services.dart';
+import 'core/updates.dart';
 import 'ui/home.dart';
 import 'ui/onboarding.dart';
 import 'ui/theme.dart';
 import 'ui/site_catalog.dart';
+import 'ui/update_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,9 +17,18 @@ void main() {
 }
 
 class BooruPlusApp extends StatefulWidget {
-  const BooruPlusApp({super.key, required this.state, this.device});
+  const BooruPlusApp({
+    super.key,
+    required this.state,
+    this.device,
+    this.updates,
+  });
   final AppState state;
   final DeviceService? device;
+
+  /// Checks for a newer release at launch. Without one, release builds use
+  /// [UpdateService] and other builds do not check.
+  final UpdateService? updates;
   @override
   State<BooruPlusApp> createState() => _BooruPlusAppState();
 }
@@ -28,6 +40,12 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   static const _lockGrace = Duration(seconds: 30);
 
   late final DeviceService _device = widget.device ?? DeviceService();
+  late final UpdateService? _updates =
+      widget.updates ?? (kReleaseMode ? UpdateService() : null);
+  // Dialogs shown from here (the update offer) need the app's navigator.
+  final _navigator = GlobalKey<NavigatorState>();
+  // A newer release found at launch, until it is offered.
+  AppRelease? _update;
   bool _splashComplete = false;
   // Lock state lives here, outside MaterialApp, so a theme change that
   // rebuilds the app does not lock it again.
@@ -64,6 +82,36 @@ class _BooruPlusAppState extends State<BooruPlusApp>
     setState(() {});
   }
 
+  /// Looks for a newer release once settings load, unless turned off in
+  /// Settings. Failures (offline, rate limited) wait for the next launch.
+  Future<void> _checkForUpdate() async {
+    final updates = _updates;
+    if (updates == null || !widget.state.settings.checkUpdates) return;
+    try {
+      final release = await updates.check();
+      if (release != null && mounted) setState(() => _update = release);
+    } catch (_) {}
+  }
+
+  Future<void> _offerUpdate(AppRelease release) async {
+    final updates = _updates;
+    if (updates == null) return;
+    final installed = await updates.installedVersion();
+    final navigator = _navigator.currentContext;
+    // The setting may have been turned off while the check ran.
+    if (navigator == null ||
+        !navigator.mounted ||
+        !widget.state.settings.checkUpdates) {
+      return;
+    }
+    await showUpdateDialog(
+      navigator,
+      updates: updates,
+      release: release,
+      installed: installed,
+    );
+  }
+
   void _applySettings() {
     final state = widget.state;
     if (!state.initialized) return;
@@ -73,6 +121,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
       // Unlocked from the start only when the lock is off at launch;
       // turning it on later does not lock the running session.
       _unlocked = !settings.appLock;
+      _checkForUpdate();
     }
     if (settings.secureScreen != _secureScreen) {
       _secureScreen = settings.secureScreen;
@@ -196,8 +245,17 @@ class _BooruPlusAppState extends State<BooruPlusApp>
         _prompted = true;
         WidgetsBinding.instance.addPostFrameCallback((_) => _unlock());
       }
+      // Offered once the first screen shows and the app is unlocked.
+      final update = _update;
+      if (update != null && splashComplete && !hidden) {
+        _update = null;
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _offerUpdate(update),
+        );
+      }
       return MaterialApp(
         title: 'BooruPlus',
+        navigatorKey: _navigator,
         debugShowCheckedModeBanner: false,
         theme: theme,
         builder: (context, child) => Stack(

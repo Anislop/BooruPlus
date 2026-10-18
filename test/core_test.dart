@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
+import 'package:booruplus/core/updates.dart';
 
 class MemoryStore implements SettingsStore {
   AppSettings settings = const AppSettings();
@@ -1651,6 +1652,130 @@ void main() {
       expect(state.error, isNotNull);
     },
   );
+
+  group('updates', () {
+    Map<String, Object?> release(
+      String tag,
+      List<String> assets, {
+      bool draft = false,
+      bool prerelease = false,
+    }) => {
+      'tag_name': tag,
+      'name': 'BooruPlus $tag',
+      'body': 'Notes for $tag',
+      'html_url': 'https://github.com/Anislop/BooruPlus/releases/tag/$tag',
+      'draft': draft,
+      'prerelease': prerelease,
+      'assets': [
+        for (final name in assets)
+          {
+            'name': name,
+            'state': 'uploaded',
+            'size': 1024,
+            'browser_download_url':
+                'https://github.com/Anislop/BooruPlus/releases/download/$tag/$name',
+          },
+      ],
+    };
+
+    test('the launch check setting defaults on and round-trips', () {
+      expect(const AppSettings().checkUpdates, isTrue);
+      expect(AppSettings.decode('{"blacklist": ["a"]}').checkUpdates, isTrue);
+      final off = const AppSettings().copyWith(checkUpdates: false);
+      expect(off, isNot(const AppSettings()));
+      expect(AppSettings.decode(off.encode()).checkUpdates, isFalse);
+      expect(AppSettings.decode(off.encode()), off);
+    });
+
+    test('picks the newest uncensored APK built after the installed one', () {
+      final listing = [
+        release('nightly', [
+          'booruplus-1.0.0-42-uncensored.apk',
+          'booruplus-1.0.0-42-uncensored-debug.apk',
+        ], prerelease: true),
+        release('v1.0.0', ['booruplus-1.0.0-40-uncensored.apk']),
+        release('draft', ['booruplus-1.0.0-99-uncensored.apk'], draft: true),
+        release('old-name', ['booruplus-1.0.0-60-release.apk']),
+      ];
+      final newest = AppRelease.newest(listing, installedBuild: 39)!;
+      expect(newest.build, 42);
+      expect(newest.version, '1.0.0');
+      expect(newest.tag, 'nightly');
+      expect(newest.prerelease, isTrue);
+      expect(newest.size, 1024);
+      expect(
+        newest.apkUrl,
+        'https://github.com/Anislop/BooruPlus/releases/download/nightly/'
+        'booruplus-1.0.0-42-uncensored.apk',
+      );
+      expect(AppRelease.newest(listing, installedBuild: 42), isNull);
+      expect(AppRelease.newest('not a listing', installedBuild: 0), isNull);
+    });
+
+    test('ignores APKs hosted outside GitHub', () {
+      final listing = [
+        {
+          'tag_name': 'nightly',
+          'assets': [
+            {
+              'name': 'booruplus-1.0.0-50-uncensored.apk',
+              'browser_download_url': 'https://example.com/booruplus.apk',
+            },
+          ],
+        },
+      ];
+      expect(AppRelease.newest(listing, installedBuild: 1), isNull);
+    });
+
+    test('checks the repository releases against the installed build and '
+        'maps installer refusals', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      const channel = MethodChannel('booruplus/test-updates');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final installs = <Object?>[];
+      var refusal = 'UPDATE_SIGNATURE';
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'appVersion') return {'name': '1.0.0', 'build': 41};
+        installs.add(call.arguments);
+        throw PlatformException(code: refusal);
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final requested = <Uri>[];
+      final updates = UpdateService(
+        channel: channel,
+        repository: 'owner/repo',
+        get: (uri) async {
+          requested.add(uri);
+          return jsonEncode([
+            release('nightly', ['booruplus-1.0.0-42-uncensored.apk']),
+          ]);
+        },
+      );
+      expect((await updates.installedVersion())!.label, '1.0.0 (build 41)');
+      final found = (await updates.check())!;
+      expect(found.build, 42);
+      expect(requested.single.host, 'api.github.com');
+      expect(requested.single.path, '/repos/owner/repo/releases');
+
+      await expectLater(
+        updates.install(found),
+        throwsA(
+          isA<UpdateException>()
+              .having((e) => e.failure, 'failure', UpdateFailure.signature)
+              .having((e) => e.retryable, 'retryable', isFalse),
+        ),
+      );
+      expect((installs.single as Map)['url'], found.apkUrl);
+      refusal = 'REQUEST_FAILED';
+      await expectLater(
+        updates.install(found),
+        throwsA(
+          isA<UpdateException>().having((e) => e.retryable, 'retryable', true),
+        ),
+      );
+    });
+  });
 
   group('booruShorts', () {
     test('settings round-trip and older settings load defaults', () {

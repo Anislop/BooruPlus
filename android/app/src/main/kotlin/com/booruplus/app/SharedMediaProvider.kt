@@ -12,9 +12,10 @@ import java.io.File
 import java.io.FileNotFoundException
 
 /**
- * Serves media saved for the share sheet from the app's private
- * `cache/shared` folder, read-only. It is not exported: receiving apps read
- * a file only through the temporary grant on the share intent.
+ * Serves media saved for the share sheet, and a downloaded update for the
+ * package installer, from the app's private `cache/shared` folder, read-only.
+ * It is not exported: receiving apps read a file only through the temporary
+ * grant on the intent.
  */
 class SharedMediaProvider : ContentProvider() {
     override fun onCreate(): Boolean = true

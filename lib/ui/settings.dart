@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import '../core/updates.dart';
 import 'blocked_tags.dart';
 import 'onboarding.dart';
 import 'saved_posts.dart';
@@ -10,10 +11,12 @@ import 'shorts_library.dart';
 import 'site_catalog.dart';
 import 'tag_input.dart';
 import 'theme.dart';
+import 'update_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.state});
+  const SettingsScreen({super.key, required this.state, this.updates});
   final AppState state;
+  final UpdateService? updates;
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
@@ -23,6 +26,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late AppSettings _settings;
   final _downloads = DownloadService();
   final _device = DeviceService();
+  late final _updates = widget.updates ?? UpdateService();
+  InstalledVersion? _installed;
+  bool _checkingUpdate = false;
   bool _busy = false;
   bool _picking = false;
   bool _backingUp = false;
@@ -83,6 +89,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _settings = widget.state.settings;
     _measureCache();
+    _updates.installedVersion().then((version) {
+      if (mounted) setState(() => _installed = version);
+    });
+  }
+
+  Future<void> _checkForUpdate() async {
+    setState(() => _checkingUpdate = true);
+    try {
+      final release = await _updates.check();
+      if (!mounted) return;
+      if (release == null) {
+        _notify('BooruPlus is up to date.');
+      } else {
+        await showUpdateDialog(
+          context,
+          updates: _updates,
+          release: release,
+          installed: _installed,
+        );
+      }
+    } catch (_) {
+      _notify('Could not check for updates. Please try again.');
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
   }
 
   @override
@@ -1689,6 +1720,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ),
                           ],
                         ),
+                      ),
+                      const SectionLabel('Updates'),
+                      Material(
+                        color: panel,
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: ListTile(
+                          leading: const Icon(Icons.info_outline_rounded),
+                          title: Text(
+                            _installed == null
+                                ? 'BooruPlus'
+                                : 'BooruPlus ${_installed!.label}',
+                          ),
+                          subtitle: const Text(
+                            'Updates are the uncensored edition from GitHub releases.',
+                          ),
+                          trailing: TextButton(
+                            onPressed: _checkingUpdate || _busy
+                                ? null
+                                : _checkForUpdate,
+                            child: Text(
+                              _checkingUpdate ? 'Checking…' : 'Check now',
+                            ),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                          ),
+                        ),
+                      ),
+                      _switchCard(
+                        value: _settings.checkUpdates,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            checkUpdates: value,
+                          ),
+                        ),
+                        icon: Icons.system_update_outlined,
+                        title: 'Check for updates at launch',
+                        subtitle: 'Look for a newer release when BooruPlus starts and offer to install it.',
                       ),
                       const SectionLabel('Website connections'),
                       Text(

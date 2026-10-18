@@ -898,6 +898,7 @@ class AppSettings {
     this.shortsFollowing = const [],
     this.shortsAutoScrollSeconds = 0,
     this.shortsPictureInPicture = true,
+    this.checkUpdates = true,
   });
   final int columns, rows, batchSize;
 
@@ -1057,6 +1058,10 @@ class AppSettings {
   /// while a video plays.
   final bool shortsPictureInPicture;
 
+  /// The app looks for a newer release when it starts and offers to
+  /// install it.
+  final bool checkUpdates;
+
   /// The [savedSearchMarks] key for [query] on [board].
   static String savedSearchKey(Board board, List<String> query) =>
       '${board.name}|${_normalizedTags(query).join(' ')}';
@@ -1153,6 +1158,7 @@ class AppSettings {
         ? shortsAutoScrollSeconds
         : 0,
     shortsPictureInPicture: shortsPictureInPicture,
+    checkUpdates: checkUpdates,
   );
 
   AppSettings copyWith({
@@ -1211,6 +1217,7 @@ class AppSettings {
     List<String>? shortsFollowing,
     int? shortsAutoScrollSeconds,
     bool? shortsPictureInPicture,
+    bool? checkUpdates,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -1272,6 +1279,7 @@ class AppSettings {
         shortsAutoScrollSeconds ?? this.shortsAutoScrollSeconds,
     shortsPictureInPicture:
         shortsPictureInPicture ?? this.shortsPictureInPicture,
+    checkUpdates: checkUpdates ?? this.checkUpdates,
   ).normalized();
   static const _unset = Object();
 
@@ -1339,6 +1347,7 @@ class AppSettings {
     'shortsFollowing': shortsFollowing,
     'shortsAutoScrollSeconds': shortsAutoScrollSeconds,
     'shortsPictureInPicture': shortsPictureInPicture,
+    'checkUpdates': checkUpdates,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -1427,6 +1436,7 @@ class AppSettings {
         .toList(),
     shortsAutoScrollSeconds: _asInt(map['shortsAutoScrollSeconds'], 0),
     shortsPictureInPicture: _asBool(map['shortsPictureInPicture'], true),
+    checkUpdates: _asBool(map['checkUpdates'], true),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -1621,6 +1631,7 @@ class AppSettings {
         !_sameTags(other.shortsFollowing, shortsFollowing) ||
         other.shortsAutoScrollSeconds != shortsAutoScrollSeconds ||
         other.shortsPictureInPicture != shortsPictureInPicture ||
+        other.checkUpdates != checkUpdates ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -1733,6 +1744,7 @@ class AppSettings {
     Object.hashAll(shortsFollowing),
     shortsAutoScrollSeconds,
     shortsPictureInPicture,
+    checkUpdates,
     Object.hashAll(
       boardHiddenUploaders.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),
