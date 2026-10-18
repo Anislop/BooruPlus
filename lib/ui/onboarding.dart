@@ -75,7 +75,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               ),
               const SizedBox(height: 38),
               const Text(
-                'Welcome to BooruPlus!\nDownload images on a plethora of imageboards!',
+                'Welcome to BooruPlus!\n',
                 style: TextStyle(
                   fontSize: 36,
                   height: 1.13,

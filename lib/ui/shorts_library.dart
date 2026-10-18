@@ -207,8 +207,8 @@ class ShortsInterestsScreen extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
               child: Text(
                 state.settings.shortsPersonalized
-                    ? 'Learned on this device from likes, dislikes, and how long you watch. Nothing is sent to the websites.'
-                    : 'Personalization is off in Settings › booruShorts, so videos play in random order and nothing new is learned.',
+                    ? 'Learned on this device from likes, dislikes, and how long you watch. All is stored locally!'
+                    : 'Nothing is here, personalization is turned off in booruShorts settings.',
                 style: TextStyle(color: ink(.60), fontSize: 13, height: 1.4),
               ),
             ),

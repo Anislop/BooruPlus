@@ -1613,7 +1613,7 @@ class _ShortsPageState extends State<_ShortsPage> {
         child: Padding(
           padding: EdgeInsets.all(32),
           child: Text(
-            "This video couldn't be played on this device. Swipe for the next one.",
+            "This video couldn't be played on this device.",
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white70),
           ),
