@@ -10,3 +10,7 @@ coverage/
 *.iml
 .idea/
 *.log
+
+# Local promo material and guides
+promo/
+guides/
