@@ -230,10 +230,16 @@ class _ShortsScreenState extends State<ShortsScreen>
     }
     for (final entry in wanted.entries) {
       _clips.putIfAbsent(entry.key, () {
+        final saved = widget.state.displayReady(entry.value);
         final clip = _Clip(
-          widget.state.displayReady(entry.value),
+          saved,
           maxQuality: _maxQuality,
           onChanged: _clipChanged,
+          streamable: ({required force}) => widget.state.streamablePost(
+            saved.post,
+            board: saved.board,
+            force: force,
+          ),
         );
         clip.start();
         return clip;
@@ -1195,28 +1201,43 @@ class _ShortsScreenState extends State<ShortsScreen>
 /// original), falling back to the original and then the first rendition
 /// when one cannot be played.
 class _Clip {
-  _Clip(this.saved, {required this.maxQuality, required this.onChanged});
+  _Clip(
+    this.saved, {
+    required this.maxQuality,
+    required this.onChanged,
+    required this.streamable,
+  });
   final SavedPost saved;
   final int maxQuality;
   final VoidCallback onChanged;
+
+  /// [AppState.streamablePost] for this clip's post.
+  final Future<MediaPost> Function({required bool force}) streamable;
   VideoPlayerController? controller;
   bool failed = false;
   bool _disposed = false;
   bool? _muted, _loop;
 
   Future<void> start() async {
-    final post = saved.post;
-    final variant = post.videoVariantFor(maxQuality);
-    final original = mediaUrlOf(post);
-    // The chosen rendition, then the original, then the first rendition
-    // (usually H.264, for originals this device cannot decode).
-    final urls = <String>{
-      ?variant?.url,
-      original,
-      if (post.videoVariants.isNotEmpty) post.videoVariants.first.url,
-    };
-    for (final url in urls) {
-      if (await _open(url)) break;
+    final tried = <String>{};
+    // Signed Sankaku URLs expire (403); a failed post is looked up once more.
+    for (final force in saved.board.isSankakuFamily ? [false, true] : [false]) {
+      final post = saved.board.isSankakuFamily
+          ? await streamable(force: force)
+          : saved.post;
+      if (_disposed) return;
+      final variant = post.videoVariantFor(maxQuality);
+      // The chosen rendition, then the original, then the first rendition
+      // (usually H.264, for originals this device cannot decode).
+      final urls = <String>{
+        ?variant?.url,
+        mediaUrlOf(post),
+        if (post.videoVariants.isNotEmpty) post.videoVariants.first.url,
+      };
+      for (final url in urls) {
+        if (!tried.add(url)) continue;
+        if (await _open(url)) return;
+      }
     }
     if (_disposed || controller != null) return;
     failed = true;

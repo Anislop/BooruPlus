@@ -1135,6 +1135,51 @@ void main() {
     );
   });
 
+  test(
+    'Sankaku videos start from a looked-up URL once theirs expired',
+    () async {
+      const stale = 'https://v.example/d/a.mp4?e=1&m=old';
+      const fresh = 'https://v.example/d/a.mp4?e=4102444800&m=new';
+      final repo = _RefreshRepo({
+        'id': 'abc123X',
+        'url': fresh,
+        'previewUrl': 'https://v.example/p/a.avif?e=4102444800',
+      });
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.safebooru,
+        postStore: MemoryPostStore(),
+      );
+      await state.initialize();
+      final expired = MediaPost.fromMap({
+        'id': 'abc123X',
+        'url': stale,
+        'previewUrl': 'https://v.example/p/a.avif?e=1',
+      });
+
+      // The lookup is awaited, unlike displayReady's background refresh.
+      final ready = await state.streamablePost(expired, board: Board.sankaku);
+      expect(ready.url, fresh);
+      expect(repo.refreshQueries.first, ['id:abc123X']);
+
+      // A current URL is used as is unless a failed stream forces a lookup.
+      await pumpEventQueue();
+      final lookups = repo.refreshQueries.length;
+      await state.streamablePost(expired, board: Board.sankaku);
+      expect(repo.refreshQueries, hasLength(lookups));
+      await state.streamablePost(expired, board: Board.sankaku, force: true);
+      expect(repo.refreshQueries, hasLength(lookups + 1));
+
+      // Other boards' URLs pass through without a request.
+      final other = MediaPost.fromMap({'id': 5, 'url': stale});
+      expect(
+        (await state.streamablePost(other, board: Board.danbooru)).url,
+        stale,
+      );
+      expect(repo.refreshQueries, hasLength(lookups + 1));
+    },
+  );
+
   test('settings clamp and directory can be cleared', () {
     final settings = const AppSettings(
       columns: 99,

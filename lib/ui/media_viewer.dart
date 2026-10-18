@@ -354,9 +354,20 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     Duration startAt = Duration.zero,
     bool autoPlay = true,
     VideoVariant? fallback,
+    bool relookup = false,
   }) async {
     final generation = ++_videoGeneration;
-    final post = _post;
+    final board = _currentBoard;
+    var post = _post;
+    if (board.isSankakuFamily) {
+      // Signed Sankaku URLs expire; an expired one answers 403.
+      post = await widget.state.streamablePost(
+        post,
+        board: board,
+        force: relookup,
+      );
+      if (!mounted || generation != _videoGeneration) return;
+    }
     final variant = fallback ?? post.videoVariantFor(_quality);
     final url = variant?.url ?? mediaUrlOf(post);
     if (url.isEmpty) {
@@ -367,7 +378,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: videoHeaders(_currentBoard),
+      httpHeaders: videoHeaders(board),
     );
     _video = video;
     _streamQuality = variant?.quality ?? 0;
@@ -428,6 +439,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       // it must not gate the fallback below.
       video.dispose().ignore();
       if (!mounted || generation != _videoGeneration) return;
+      // A signed URL can be refused before its stated expiry; look the
+      // post up once more and retry with whatever URL comes back.
+      if (board.isSankakuFamily && !relookup) {
+        await _initializeVideo(
+          startAt: startAt,
+          autoPlay: autoPlay,
+          relookup: true,
+        );
+        return;
+      }
       // Some originals use codecs the device cannot decode; a provider
       // rendition (usually H.264 MP4) is the best remaining option.
       if (variant == null && post.videoVariants.isNotEmpty) {
@@ -435,6 +456,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           startAt: startAt,
           autoPlay: autoPlay,
           fallback: post.videoVariants.first,
+          // Already looked up; looking up again would retry endlessly.
+          relookup: relookup,
         );
         return;
       }
