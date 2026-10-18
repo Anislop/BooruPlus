@@ -196,6 +196,9 @@ void main() {
           'https://github.com/owner/repo/releases/download/nightly/'
           'booruplus-1.0.0-42-uncensored.apk',
       pageUrl: 'https://github.com/owner/repo/releases/tag/nightly',
+      notes:
+          'Fix Rule34 sign-in\n\nKeeps the user ID.\n\n'
+          '${AppRelease.commitEnd}\nBuilt from abc1234.',
     );
     final updates = _FakeUpdates(release);
     final state = AppState(
@@ -204,13 +207,15 @@ void main() {
     );
     await tester.pumpWidget(BooruPlusApp(state: state, updates: updates));
     await tester.pumpAndSettle();
-    expect(find.text('Update available'), findsOneWidget);
-    expect(find.textContaining('1.0.0 (build 42)'), findsOneWidget);
-    expect(find.text('You have 1.0.0 (build 41).'), findsOneWidget);
+    expect(find.text('An update is available.'), findsOneWidget);
+    expect(find.text('Version: 1.0.0 (build 42)'), findsOneWidget);
+    expect(find.text('Fix Rule34 sign-in'), findsOneWidget);
+    expect(find.text('Keeps the user ID.'), findsOneWidget);
+    expect(find.textContaining('Built from'), findsNothing);
     expect(find.text('Update'), findsOneWidget);
     await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
-    expect(find.text('Update available'), findsNothing);
+    expect(find.text('An update is available.'), findsNothing);
     expect(updates.checks, 1);
     await tester.pumpWidget(const SizedBox());
     state.dispose();
@@ -222,7 +227,7 @@ void main() {
     );
     await tester.pumpWidget(BooruPlusApp(state: quiet, updates: off));
     await tester.pumpAndSettle();
-    expect(find.text('Update available'), findsNothing);
+    expect(find.text('An update is available.'), findsNothing);
     expect(off.checks, 0);
     await tester.pumpWidget(const SizedBox());
     quiet.dispose();

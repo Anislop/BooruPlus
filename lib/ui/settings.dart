@@ -106,7 +106,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           context,
           updates: _updates,
           release: release,
-          installed: _installed,
         );
       }
     } catch (_) {

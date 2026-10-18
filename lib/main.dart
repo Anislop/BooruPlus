@@ -96,7 +96,6 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   Future<void> _offerUpdate(AppRelease release) async {
     final updates = _updates;
     if (updates == null) return;
-    final installed = await updates.installedVersion();
     final navigator = _navigator.currentContext;
     // The setting may have been turned off while the check ran.
     if (navigator == null ||
@@ -104,12 +103,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
         !widget.state.settings.checkUpdates) {
       return;
     }
-    await showUpdateDialog(
-      navigator,
-      updates: updates,
-      release: release,
-      installed: installed,
-    );
+    await showUpdateDialog(navigator, updates: updates, release: release);
   }
 
   void _applySettings() {
