@@ -1114,7 +1114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         icon: Icons.motion_photos_off_outlined,
                         title: 'Reduce motion',
-                        subtitle: 'Skip the opening animation and turn off the blur behind panels. Better for slower phones.',
+                        subtitle: 'Reduce motion and remove animations. Good for slower phones.',
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),

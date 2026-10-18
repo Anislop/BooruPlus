@@ -232,7 +232,18 @@ class _BooruPlusAppState extends State<BooruPlusApp>
       // Remembered, so turning it off later does not bring the splash back.
       final splashComplete = _splashComplete =
           _splashComplete || (widget.state.initialized && reduceMotion);
-      final theme = buildAppTheme(board: widget.state.board);
+      final baseTheme = buildAppTheme(board: widget.state.board);
+      // Reduce motion swaps screen transitions for instant cuts.
+      final theme = reduceMotion
+          ? baseTheme.copyWith(
+              pageTransitionsTheme: PageTransitionsTheme(
+                builders: {
+                  for (final platform in TargetPlatform.values)
+                    platform: _InstantPageTransitionsBuilder(),
+                },
+              ),
+            )
+          : baseTheme;
       final locked = _locked && splashComplete;
       final hidden = locked || (_covered && splashComplete);
       if (locked && !_prompted) {
@@ -252,16 +263,20 @@ class _BooruPlusAppState extends State<BooruPlusApp>
         navigatorKey: _navigator,
         debugShowCheckedModeBanner: false,
         theme: theme,
-        builder: (context, child) => Stack(
-          fit: StackFit.expand,
-          children: [
-            Visibility(
-              visible: !hidden,
-              maintainState: true,
-              child: child ?? const SizedBox.shrink(),
-            ),
-            if (hidden) _LockScreen(onUnlock: locked ? _unlock : null),
-          ],
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(disableAnimations: reduceMotion),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Visibility(
+                visible: !hidden,
+                maintainState: true,
+                child: child ?? const SizedBox.shrink(),
+              ),
+              if (hidden) _LockScreen(onUnlock: locked ? _unlock : null),
+            ],
+          ),
         ),
         // As the splash logo moves up, the first screen is revealed from
         // the bottom edge, following it up.
@@ -459,4 +474,24 @@ class _SplashScreenState extends State<SplashScreen>
       ),
     ),
   );
+}
+
+/// Shows a pushed or popped screen at once, without sliding or fading.
+class _InstantPageTransitionsBuilder extends PageTransitionsBuilder {
+  const _InstantPageTransitionsBuilder();
+
+  @override
+  Duration get transitionDuration => Duration.zero;
+
+  @override
+  Duration get reverseTransitionDuration => Duration.zero;
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => child;
 }

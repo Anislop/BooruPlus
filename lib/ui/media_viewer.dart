@@ -148,9 +148,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     return true;
   }
 
+  bool get _reduceMotion => widget.state.settings.reduceMotion;
+
   void _turnPage(int delta) {
     final target = _index + delta;
     if (_zoomed || target < 0 || target >= _pageCount) return;
+    if (_reduceMotion) {
+      _pages.jumpToPage(target);
+      return;
+    }
     _pages.animateToPage(
       target,
       duration: const Duration(milliseconds: 260),
@@ -402,7 +408,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         showControlsOnInitialize: false,
         showPlayButton: false,
         pauseOnBackgroundTap: true,
-        customControls: const MaterialControls(),
+        // The viewer's own bar has play and seek; no buttons over the video.
+        customControls: const MaterialControls(showPlayButton: false),
         routePageBuilder: (context, _, _, provider) => Scaffold(
           resizeToAvoidBottomInset: false,
           body: Container(
@@ -1147,7 +1154,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                                     setState(() => _details = !_details),
                                 icon: AnimatedRotation(
                                   turns: _details ? .5 : 0,
-                                  duration: const Duration(milliseconds: 240),
+                                  duration: _reduceMotion
+                                      ? Duration.zero
+                                      : const Duration(milliseconds: 240),
                                   curve: Curves.easeOutCubic,
                                   child: const Icon(Icons.keyboard_arrow_up),
                                 ),
@@ -1180,8 +1189,12 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                         // Details slide up from the header when opened by a tap, the
                         // arrow button, or a swipe, and slide back down when closed.
                         AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 280),
-                          reverseDuration: const Duration(milliseconds: 200),
+                          duration: _reduceMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 280),
+                          reverseDuration: _reduceMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 200),
                           switchInCurve: Curves.easeOutCubic,
                           switchOutCurve: Curves.easeInCubic,
                           transitionBuilder: (child, animation) => ClipRect(
