@@ -869,6 +869,7 @@ class AppSettings {
     this.secureScreen = false,
     this.appLock = false,
     this.incognito = false,
+    this.noShare = false,
     this.dataSaver = DataSaverMode.off,
     this.slideshowSeconds = 5,
     this.doubleTapFavorite = false,
@@ -951,6 +952,9 @@ class AppSettings {
 
   /// Pauses recent searches and searched/browsed tag counts.
   final bool incognito;
+
+  /// Hides every share button and action; copying links stays.
+  final bool noShare;
 
   /// When the viewer shows the website's smaller sample image instead of
   /// the original. Downloads always save the original.
@@ -1114,6 +1118,7 @@ class AppSettings {
     secureScreen: secureScreen,
     appLock: appLock,
     incognito: incognito,
+    noShare: noShare,
     dataSaver: dataSaver,
     slideshowSeconds: slideshowSeconds.clamp(2, 60),
     doubleTapFavorite: doubleTapFavorite,
@@ -1188,6 +1193,7 @@ class AppSettings {
     bool? secureScreen,
     bool? appLock,
     bool? incognito,
+    bool? noShare,
     DataSaverMode? dataSaver,
     int? slideshowSeconds,
     bool? doubleTapFavorite,
@@ -1247,6 +1253,7 @@ class AppSettings {
     secureScreen: secureScreen ?? this.secureScreen,
     appLock: appLock ?? this.appLock,
     incognito: incognito ?? this.incognito,
+    noShare: noShare ?? this.noShare,
     dataSaver: dataSaver ?? this.dataSaver,
     slideshowSeconds: slideshowSeconds ?? this.slideshowSeconds,
     doubleTapFavorite: doubleTapFavorite ?? this.doubleTapFavorite,
@@ -1315,6 +1322,7 @@ class AppSettings {
     'secureScreen': secureScreen,
     'appLock': appLock,
     'incognito': incognito,
+    'noShare': noShare,
     'dataSaver': dataSaver.name,
     'slideshowSeconds': slideshowSeconds,
     'doubleTapFavorite': doubleTapFavorite,
@@ -1389,6 +1397,7 @@ class AppSettings {
     secureScreen: _asBool(map['secureScreen'], false),
     appLock: _asBool(map['appLock'], false),
     incognito: _asBool(map['incognito'], false),
+    noShare: _asBool(map['noShare'], false),
     dataSaver:
         DataSaverMode.values.asNameMap()['${map['dataSaver']}'] ??
         DataSaverMode.off,
@@ -1602,6 +1611,7 @@ class AppSettings {
         other.secureScreen != secureScreen ||
         other.appLock != appLock ||
         other.incognito != incognito ||
+        other.noShare != noShare ||
         other.dataSaver != dataSaver ||
         other.slideshowSeconds != slideshowSeconds ||
         other.doubleTapFavorite != doubleTapFavorite ||
@@ -1716,6 +1726,7 @@ class AppSettings {
     secureScreen,
     appLock,
     incognito,
+    noShare,
     dataSaver,
     slideshowSeconds,
     doubleTapFavorite,

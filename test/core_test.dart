@@ -206,6 +206,14 @@ void main() {
     },
   );
 
+  test('no share defaults off, persists, and changes equality', () {
+    expect(AppSettings.fromMap({'columns': 3}).noShare, isFalse);
+    const settings = AppSettings(noShare: true);
+    expect(AppSettings.decode(settings.encode()).noShare, isTrue);
+    expect(settings, isNot(const AppSettings()));
+    expect(settings.copyWith(noShare: false), const AppSettings());
+  });
+
   test('settings default no-AI and legacy JSON migration are compatible', () {
     expect(const AppSettings().excludeAi, isTrue);
     expect(const AppSettings().gesturesEnabled, isTrue);
@@ -1910,6 +1918,28 @@ void main() {
       await feed.retry();
       expect(feed.errors, isEmpty);
       expect(feed.posts.map((saved) => saved.post.id), contains(9));
+      feed.dispose();
+    });
+
+    test('a snapshot restores the feed after a detour', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, null): [_video(1), _video(2)],
+        (Board.danbooru, 'cat'): [_video(3)],
+      });
+      final state = AppState(repository: repo, store: MemoryStore());
+      await state.initialize();
+      final feed = state.shortsFeed();
+      await feed.start(tags: const [], boards: [Board.danbooru]);
+      final before = feed.posts.map((saved) => saved.post.id).toList();
+      final snapshot = feed.snapshot();
+
+      await feed.start(tags: ['cat'], boards: [Board.danbooru]);
+      expect(feed.posts.map((saved) => saved.post.id), [3]);
+
+      feed.restore(snapshot);
+      expect(feed.tags, isEmpty);
+      expect(feed.posts.map((saved) => saved.post.id), before);
+      expect(feed.loading, isFalse);
       feed.dispose();
     });
 

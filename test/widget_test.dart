@@ -266,6 +266,39 @@ void main() {
     expect(tags, ['cat', 'partial']);
   });
 
+  testWidgets('backspace with nothing typed deletes the last chip', (
+    tester,
+  ) async {
+    var tags = ['blue_sky', 'cat'];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) => TagInput(
+              tags: tags,
+              onChanged: (value) => setState(() => tags = value),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), 'dr');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(tags, ['blue_sky', 'cat']);
+
+    await tester.enterText(find.byType(TextField), '');
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(tags, ['blue_sky']);
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(tags, isEmpty);
+  });
+
   testWidgets('onboarding and settings fit a narrow phone with large text', (
     tester,
   ) async {
@@ -1367,6 +1400,78 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('a tag chosen in the viewer is searched on all sites', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo([
+        [
+          post(1, tags: ['red_sky']),
+        ],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MultiSearchScreen(state: state, initialTags: const ['blue_sky']),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MediaTile).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = find.widgetWithText(ActionChip, 'red_sky');
+    await tester.ensureVisible(chip);
+    await tester.pump();
+    await tester.longPress(chip);
+    await tester.pumpAndSettle();
+    // Searching this tag already searches every website here.
+    expect(find.text('Search on all sites'), findsNothing);
+    await tester.tap(find.text('Search this tag'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(MediaViewer), findsNothing);
+    expect(find.widgetWithText(InputChip, 'red_sky'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, 'blue_sky'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('No share hides the viewer share actions but keeps copying', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()
+        ..selected = Board.danbooru
+        ..settings = const AppSettings(noShare: true),
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap(post(1, tags: ['blue_sky']));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Copy'));
+    await tester.pumpAndSettle();
+    expect(find.text('Share link'), findsNothing);
+    expect(find.text('Share image'), findsNothing);
+    expect(find.text('Copy post link'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('video quality menu lists renditions and saves the choice', (
     tester,
   ) async {
@@ -1572,6 +1677,63 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.byKey(const ValueKey('shorts_interests')), findsOneWidget);
     expect(find.text('More of'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('back from a booruShorts tag returns to the feed', (
+    tester,
+  ) async {
+    final repo = FakeRepo([
+      [
+        for (var id = 1; id <= 3; id++)
+          {
+            'id': id,
+            'url': 'https://x/$id.mp4',
+            'previewUrl': '',
+            'tags': 'cat',
+            'rating': 'general',
+          },
+      ],
+    ]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..settings = const AppSettings(noShare: true),
+    );
+    await state.initialize();
+    final navigator = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigator,
+        theme: appTheme,
+        home: const SizedBox(),
+      ),
+    );
+    navigator.currentState!.push(
+      MaterialPageRoute<void>(builder: (_) => ShortsScreen(state: state)),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    // No share hides the rail's Share button.
+    expect(find.text('Share'), findsNothing);
+
+    await tester.tap(find.text('#cat').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const ValueKey('shorts_tag_filter')), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(ShortsScreen), findsOneWidget);
+    expect(find.byKey(const ValueKey('shorts_tag_filter')), findsNothing);
+    expect(find.byKey(const ValueKey('shorts_pages')), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(ShortsScreen), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     state.dispose();

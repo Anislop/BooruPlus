@@ -51,6 +51,7 @@ class MediaViewer extends StatefulWidget {
     this.savedPosts = const [],
     this.initialIndex = 0,
     this.initialDetails = false,
+    this.allSites = false,
   });
   final MediaPost post;
   final Board board;
@@ -61,6 +62,9 @@ class MediaViewer extends StatefulWidget {
 
   /// Opens with the details panel showing.
   final bool initialDetails;
+
+  /// Opened from Search all sites, which searches a chosen tag itself.
+  final bool allSites;
   @override
   State<MediaViewer> createState() => _MediaViewerState();
 }
@@ -631,59 +635,62 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
   }
 
-  Widget _moreMenu(MediaPost post, String link) => PopupMenuButton<String>(
-    tooltip: 'Share or copy',
-    icon: _sharing
-        ? const SizedBox.square(
-            dimension: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : const Icon(Icons.more_vert_rounded),
-    onSelected: _postAction,
-    itemBuilder: (_) => [
-      if (link.isNotEmpty)
-        const PopupMenuItem(
-          value: 'share_link',
-          child: ListTile(
-            leading: Icon(Icons.share_outlined),
-            title: Text('Share link'),
+  Widget _moreMenu(MediaPost post, String link) {
+    final share = !widget.state.settings.noShare;
+    return PopupMenuButton<String>(
+      tooltip: share ? 'Share or copy' : 'Copy',
+      icon: _sharing
+          ? const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.more_vert_rounded),
+      onSelected: _postAction,
+      itemBuilder: (_) => [
+        if (share && link.isNotEmpty)
+          const PopupMenuItem(
+            value: 'share_link',
+            child: ListTile(
+              leading: Icon(Icons.share_outlined),
+              title: Text('Share link'),
+            ),
           ),
-        ),
-      if (mediaUrlOf(post).isNotEmpty)
-        PopupMenuItem(
-          value: 'share_media',
-          enabled: !_sharing,
-          child: ListTile(
-            leading: const Icon(Icons.ios_share_rounded),
-            title: Text(post.isVideo ? 'Share video' : 'Share image'),
+        if (share && mediaUrlOf(post).isNotEmpty)
+          PopupMenuItem(
+            value: 'share_media',
+            enabled: !_sharing,
+            child: ListTile(
+              leading: const Icon(Icons.ios_share_rounded),
+              title: Text(post.isVideo ? 'Share video' : 'Share image'),
+            ),
           ),
-        ),
-      if (link.isNotEmpty)
-        const PopupMenuItem(
-          value: 'copy_link',
-          child: ListTile(
-            leading: Icon(Icons.link_rounded),
-            title: Text('Copy post link'),
+        if (link.isNotEmpty)
+          const PopupMenuItem(
+            value: 'copy_link',
+            child: ListTile(
+              leading: Icon(Icons.link_rounded),
+              title: Text('Copy post link'),
+            ),
           ),
-        ),
-      if (post.source.trim().isNotEmpty)
-        const PopupMenuItem(
-          value: 'copy_source',
-          child: ListTile(
-            leading: Icon(Icons.content_copy_rounded),
-            title: Text('Copy source'),
+        if (post.source.trim().isNotEmpty)
+          const PopupMenuItem(
+            value: 'copy_source',
+            child: ListTile(
+              leading: Icon(Icons.content_copy_rounded),
+              title: Text('Copy source'),
+            ),
           ),
-        ),
-      if (post.tags.isNotEmpty)
-        const PopupMenuItem(
-          value: 'copy_tags',
-          child: ListTile(
-            leading: Icon(Icons.sell_outlined),
-            title: Text('Copy tags'),
+        if (post.tags.isNotEmpty)
+          const PopupMenuItem(
+            value: 'copy_tags',
+            child: ListTile(
+              leading: Icon(Icons.sell_outlined),
+              title: Text('Copy tags'),
+            ),
           ),
-        ),
-    ],
-  );
+      ],
+    );
+  }
 
   /// Opens the related posts search ([query] such as `parent:123`) in the
   /// feed, or tells the user it is only available from the feed.
@@ -860,11 +867,12 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 title: const Text('Search this tag'),
                 onTap: () => Navigator.pop(context, 'search'),
               ),
-              ListTile(
-                leading: const Icon(Icons.travel_explore_rounded),
-                title: const Text('Search on all sites'),
-                onTap: () => Navigator.pop(context, 'search_all'),
-              ),
+              if (!widget.allSites)
+                ListTile(
+                  leading: const Icon(Icons.travel_explore_rounded),
+                  title: const Text('Search on all sites'),
+                  onTap: () => Navigator.pop(context, 'search_all'),
+                ),
               if (fromFeed) ...[
                 ListTile(
                   leading: const Icon(Icons.add_circle_outline_rounded),

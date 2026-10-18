@@ -88,22 +88,27 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     }
   }
 
-  void _open(List<SavedPost> results, int index) {
+  /// Opens the viewer; a tag chosen there is searched here.
+  Future<void> _open(List<SavedPost> results, int index) async {
     final displayed = [
       for (final saved in results) widget.state.displayReady(saved),
     ];
-    Navigator.push(
+    final result = await Navigator.push<ViewerTagBrowse>(
       context,
-      MaterialPageRoute<void>(
+      MaterialPageRoute(
         builder: (_) => MediaViewer(
           post: displayed[index].post,
           board: displayed[index].board,
           state: widget.state,
           savedPosts: displayed,
           initialIndex: index,
+          allSites: true,
         ),
       ),
     );
+    if (result == null || !mounted) return;
+    setState(() => _tags = [result.tag]);
+    _run();
   }
 
   @override

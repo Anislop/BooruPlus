@@ -428,14 +428,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Flexible(
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                        // Reversed so a long tag list or the suggestions scroll
-                        // while the text being typed stays in view.
+                        // The search lays out its suggestions and scrolls its
+                        // own field within this height.
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxHeight: 260),
-                          child: SingleChildScrollView(
-                            reverse: true,
-                            child: search,
-                          ),
+                          child: search,
                         ),
                       ),
                     ),
