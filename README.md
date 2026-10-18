@@ -333,8 +333,8 @@ The vendored library in `android/imageboard-api/` keeps its own [Apache License 
 
 <div align="center">
 
-<img src="assets/Icon.png" alt="" width="56">
+<img src="assets/anislopFlat.png" alt="" width="128">
 
-**Made with love by the Anislop Department.**
+**Made with love by the [Anislop Department](https://x.com/Anislop_Dept).**
 
 </div>
