@@ -179,6 +179,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _scrollToTop() {
     if (!_scroll.hasClients || _scroll.offset == 0) return;
+    if (widget.state.settings.reduceMotion) {
+      _scroll.jumpTo(0);
+      return;
+    }
     // Long feeds jump most of the way first so the animation stays short.
     if (_scroll.offset > 4000) _scroll.jumpTo(2000);
     _scroll.animateTo(

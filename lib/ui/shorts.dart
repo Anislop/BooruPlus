@@ -390,6 +390,15 @@ class _ShortsScreenState extends State<ShortsScreen>
       return;
     }
     final from = _index;
+    if (_settings.reduceMotion) {
+      // The page after the last post is the loader, as with nextPage.
+      if (from + 1 <= _feed.posts.length) {
+        _pages.jumpToPage(from + 1);
+      } else {
+        _advancing = false;
+      }
+      return;
+    }
     _pages
         .nextPage(
           duration: const Duration(milliseconds: 280),
@@ -1085,31 +1094,50 @@ class _ShortsScreenState extends State<ShortsScreen>
         bottom: false,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              IconButton(
-                tooltip: 'Back',
-                color: Colors.white,
-                icon: const Icon(Icons.arrow_back_rounded, shadows: shadow),
-                onPressed: () => Navigator.maybePop(context),
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Back',
+                    color: Colors.white,
+                    icon: const Icon(Icons.arrow_back_rounded, shadows: shadow),
+                    onPressed: () => Navigator.maybePop(context),
+                  ),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _Tab(
+                            key: const ValueKey('shorts_tab_for_you'),
+                            label: 'For you',
+                            selected: _mode == ShortsMode.forYou,
+                            onTap: () => _setMode(ShortsMode.forYou),
+                          ),
+                          _Tab(
+                            key: const ValueKey('shorts_tab_following'),
+                            label: 'Following',
+                            selected: _mode == ShortsMode.following,
+                            onTap: () => _setMode(ShortsMode.following),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  ..._topActions(),
+                ],
               ),
-              Expanded(
-                child: SingleChildScrollView(
+              // Active filters sit on their own row below the bar so long
+              // tags are not squeezed between the tabs and the buttons.
+              if (_autoScroll || filter != null || only != null)
+                SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.fromLTRB(6, 4, 14, 0),
                   child: Row(
                     children: [
-                      _Tab(
-                        key: const ValueKey('shorts_tab_for_you'),
-                        label: 'For you',
-                        selected: _mode == ShortsMode.forYou,
-                        onTap: () => _setMode(ShortsMode.forYou),
-                      ),
-                      _Tab(
-                        key: const ValueKey('shorts_tab_following'),
-                        label: 'Following',
-                        selected: _mode == ShortsMode.following,
-                        onTap: () => _setMode(ShortsMode.following),
-                      ),
                       if (_autoScroll)
                         _FilterChip(
                           key: const ValueKey('shorts_auto_scroll_chip'),
@@ -1130,70 +1158,78 @@ class _ShortsScreenState extends State<ShortsScreen>
                     ],
                   ),
                 ),
-              ),
-              IconButton(
-                key: const ValueKey('shorts_mute'),
-                tooltip: _muted ? 'Unmute' : 'Mute',
-                color: Colors.white,
-                icon: Icon(
-                  _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-                  shadows: shadow,
-                ),
-                onPressed: _toggleMute,
-              ),
-              IconButton(
-                key: const ValueKey('shorts_tags'),
-                tooltip: _mode == ShortsMode.following
-                    ? 'Followed tags'
-                    : 'booruShorts tags',
-                color: Colors.white,
-                icon: const Icon(Icons.settings_rounded, shadows: shadow),
-                onPressed: _editTags,
-              ),
-              PopupMenuButton<String>(
-                key: const ValueKey('shorts_menu'),
-                tooltip: 'More options',
-                iconColor: Colors.white,
-                icon: const Icon(Icons.more_vert_rounded, shadows: shadow),
-                onSelected: (value) => switch (value) {
-                  'auto' => _toggleAutoScroll(),
-                  'pip' => _enterPip(),
-                  'history' => _openPage(
-                    () => openShortsHistory(context, widget.state),
-                  ),
-                  'interests' => _openPage(
-                    () => openShortsInterests(context, widget.state),
-                  ),
-                  _ => null,
-                },
-                itemBuilder: (context) => [
-                  CheckedPopupMenuItem(
-                    key: const ValueKey('shorts_auto_scroll'),
-                    value: 'auto',
-                    checked: _autoScroll,
-                    child: const Text('Auto-scroll'),
-                  ),
-                  const PopupMenuItem(
-                    value: 'pip',
-                    child: Text('Picture-in-picture'),
-                  ),
-                  const PopupMenuItem(
-                    key: ValueKey('shorts_history_open'),
-                    value: 'history',
-                    child: Text('Watch history'),
-                  ),
-                  const PopupMenuItem(
-                    key: ValueKey('shorts_interests_open'),
-                    value: 'interests',
-                    child: Text('Your interests'),
-                  ),
-                ],
-              ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  List<Widget> _topActions() {
+    const shadow = [Shadow(blurRadius: 8, color: Colors.black54)];
+    return [
+      IconButton(
+        key: const ValueKey('shorts_mute'),
+        tooltip: _muted ? 'Unmute' : 'Mute',
+        color: Colors.white,
+        icon: Icon(
+          _muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+          shadows: shadow,
+        ),
+        onPressed: _toggleMute,
+      ),
+      IconButton(
+        key: const ValueKey('shorts_tags'),
+        tooltip: _mode == ShortsMode.following
+            ? 'Followed tags'
+            : 'booruShorts tags',
+        color: Colors.white,
+        icon: const Icon(Icons.sell_outlined, shadows: shadow),
+        onPressed: _editTags,
+      ),
+      PopupMenuButton<String>(
+        key: const ValueKey('shorts_menu'),
+        tooltip: 'More options',
+        iconColor: Colors.white,
+        icon: const Icon(Icons.settings_rounded, shadows: shadow),
+        onSelected: (value) => switch (value) {
+          'auto' => _toggleAutoScroll(),
+          'pip' => _enterPip(),
+          'history' => _openPage(
+            () => openShortsHistory(context, widget.state),
+          ),
+          'interests' => _openPage(
+            () => openShortsInterests(context, widget.state),
+          ),
+          _ => null,
+        },
+        itemBuilder: (context) => [
+          // A trailing check instead of CheckedPopupMenuItem, whose space
+          // reserved for the check leaves an odd indent while it is off.
+          PopupMenuItem(
+            key: const ValueKey('shorts_auto_scroll'),
+            value: 'auto',
+            child: Row(
+              children: [
+                const Expanded(child: Text('Auto-scroll')),
+                if (_autoScroll) const Icon(Icons.check_rounded, size: 20),
+              ],
+            ),
+          ),
+          const PopupMenuItem(value: 'pip', child: Text('Picture-in-picture')),
+          const PopupMenuItem(
+            key: ValueKey('shorts_history_open'),
+            value: 'history',
+            child: Text('Watch history'),
+          ),
+          const PopupMenuItem(
+            key: ValueKey('shorts_interests_open'),
+            value: 'interests',
+            child: Text('Your interests'),
+          ),
+        ],
+      ),
+    ];
   }
 }
 
@@ -1534,7 +1570,8 @@ class _ShortsPageState extends State<_ShortsPage> {
           ),
         if (_fast)
           Positioned(
-            top: MediaQuery.paddingOf(context).top + 64,
+            // Clear of the top bar, including its row of active filters.
+            top: MediaQuery.paddingOf(context).top + 112,
             left: 0,
             right: 0,
             child: const IgnorePointer(
