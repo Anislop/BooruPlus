@@ -741,9 +741,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: 'Theme',
                         subtitle: switch (_settings.theme) {
                           ThemeChoice.standard =>
-                            'Dark surfaces tinted by the current website.',
-                          ThemeChoice.white => 'Light surfaces with dark text.',
-                          ThemeChoice.amoled => 'Pure black backgrounds that save power on OLED screens.',
+                            'Dark mode.',
+                          ThemeChoice.white => 'Light mode.',
+                          ThemeChoice.amoled => 'Super Dark mode!',
                         },
                         values: ThemeChoice.values,
                         label: (choice) => choice.label,
@@ -806,7 +806,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                       _slider(
                         'Rows',
-                        'Rows per screen. Smaller screens retain a readable minimum tile height.',
+                        'Rows per screen. Small screens have a minimum tile height.',
                         _settings.rows,
                         2,
                         8,
@@ -907,7 +907,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SectionLabel('Discovery'),
                       _slider(
                         'Posts per batch',
-                        'Request 50–200 posts, in steps of 10. Website limits and filtering can return fewer.',
+                        'Request 50–200 posts, in steps of 10. Rate limits and website limits may apply.',
                         _settings.batchSize,
                         50,
                         200,
@@ -934,7 +934,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             secondary: const Icon(Icons.auto_awesome_outlined),
                             title: const Text('No AI-generated posts'),
                             subtitle: const Text(
-                              'Automatically exclude posts tagged ai_generated from search and discovery feeds.',
+                              'No AI-slop content. Unless you want them, you can turn it on. (applies to all websites)',
                             ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16,
@@ -956,7 +956,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               title: const Text('Websites that show AI posts'),
                               subtitle: Text(
                                 _listedAiExemptions.isEmpty
-                                    ? 'None. The setting applies everywhere.'
+                                    ? 'No websites yet.'
                                     : _listedAiExemptions
                                           .map(
                                             (board) =>
@@ -1017,7 +1017,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         icon: Icons.back_hand_outlined,
                         title: 'One-handed mode',
-                        subtitle: 'Move search, filters, and feed actions to the bottom of the screen, with a button to jump back to the top.',
+                        subtitle: 'Ease of use, and better way to do what you need to do.',
                       ),
                       if (_settings.oneHanded)
                         _choiceCard<Handedness>(
@@ -1053,7 +1053,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           padding: const EdgeInsets.only(top: 16),
                           child: _slider(
                             'One-handed panel opacity',
-                            'How solid the bottom panel is over the feed. Lower values show more of the feed behind it.',
+                            'How solid the bottom panel is over the feed.',
                             _settings.panelOpacity,
                             20,
                             100,
@@ -1069,7 +1069,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         padding: const EdgeInsets.only(top: 16),
                         child: _slider(
                           'Post details opacity',
-                          'How solid the viewer\'s tags and details are over the image. Lower values show more of the image behind them.',
+                          'How solid the viewer\'s tags and details are over the image.',
                           _settings.detailsOpacity,
                           20,
                           100,
@@ -1097,7 +1097,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         'Surface blur',
                         _settings.reduceMotion
                             ? 'Off while Reduce motion is on.'
-                            : 'How much the content behind those surfaces is blurred. 0 turns blurring off.',
+                            : 'How much the content behind those surfaces is blurred.',
                         _settings.surfaceBlur,
                         0,
                         30,
@@ -1115,7 +1115,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         icon: Icons.motion_photos_off_outlined,
                         title: 'Reduce motion',
-                        subtitle: 'Skip the opening animation and turn off the blur behind panels. Helps on slower phones.',
+                        subtitle: 'Skip the opening animation and turn off the blur behind panels. Better for slower phones.',
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 8),
@@ -1127,7 +1127,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             leading: const Icon(Icons.high_quality_outlined),
                             title: const Text('Video quality'),
                             subtitle: const Text(
-                              'Stream a lower resolution when the website offers one (e621 and e926). Others always play the original.',
+                              'Stream a lower resolution when the website offers one (e621 and e926). Some websites don\'t have this feature.',
                             ),
                             trailing: DropdownButton<int>(
                               value:
@@ -1190,11 +1190,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _choiceCard<DataSaverMode>(
                         icon: Icons.data_saver_on_outlined,
                         title: 'Data saver',
-                        subtitle: "Show the website's smaller sample image when it has one. Tap Load original for full size.",
+                        subtitle: "Show the website's smaller sample image when it has one. Tap \"Load Original\" for full size.",
                         values: DataSaverMode.values,
                         label: (mode) => switch (mode) {
                           DataSaverMode.off => 'Off',
-                          DataSaverMode.mobileData => 'Mobile data',
+                          DataSaverMode.mobileData => 'Mobile Data',
                           DataSaverMode.always => 'Always',
                         },
                         selected: _settings.dataSaver,
@@ -1205,7 +1205,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(height: 16),
                       _slider(
                         'Slideshow interval',
-                        'Seconds each image shows during a slideshow. Videos move on when they finish.',
+                        'Seconds each image shows during a slideshow. Videos will play until the end though.',
                         _settings.slideshowSeconds,
                         2,
                         60,
@@ -1236,7 +1236,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         icon: Icons.volume_up_outlined,
                         title: 'Volume keys turn pages',
-                        subtitle: 'Volume down shows the next post and volume up the previous one while viewing.',
+                        subtitle: 'True one-hand experience. Volume down = next post, Volume down = previous post.',
                       ),
                       const SectionLabel('booruShorts'),
                       Material(
@@ -1374,14 +1374,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                         icon: Icons.auto_awesome_outlined,
-                        title: 'Personalize For you',
-                        subtitle: 'Learn from likes, dislikes, and how long you watch, on this device only. Off plays videos in random order.',
+                        title: 'Personalize For You',
+                        subtitle: 'Learn from likes, dislikes, and how long you watch, on this device only. Turning this off just shows random videos.',
                       ),
                       if (_settings.shortsPersonalized)
                         _choiceCard<ShortsExploration>(
                           icon: Icons.explore_outlined,
                           title: 'Discovery',
-                          subtitle: 'How often For you shows something outside your interests.',
+                          subtitle: 'How often For You shows something outside your interests.',
                           values: ShortsExploration.values,
                           label: (value) => switch (value) {
                             ShortsExploration.low => 'Less',
@@ -1400,7 +1400,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: 'Auto-scroll length',
                         subtitle: 'During auto-scroll (booruShorts › ⋮), how long each video plays before the next one.',
                         values: AppSettings.shortsAutoScrollChoices,
-                        label: (value) => value == 0 ? 'Whole' : '${value}s',
+                        label: (value) => value == 0 ? 'Full' : '${value}s',
                         selected: _settings.shortsAutoScrollSeconds,
                         onChanged: (value) => setState(
                           () => _settings = _settings.copyWith(

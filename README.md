@@ -313,7 +313,7 @@ Live integration tests (`integration_test/`) need a real Android device with net
 
 ## AI Disclosure
 
-**Is this a vibe-coded project?** No, not entirely. AI was used only for commit messages, comments. API creation, UI layouts were mostly handwritten code. We use only AI to guide and assist our work to make things faster.
+**Is this a vibe-coded project?** No, not entirely. AI was used only for commit messages, comments, integrating tests and regression tests. API creation, UI layouts were mostly handwritten code. We use only AI to guide and assist our work to make things faster.
 
 ## FAQs
 - **iOS Support?**

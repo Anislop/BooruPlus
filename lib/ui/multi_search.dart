@@ -177,7 +177,7 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
         child: Padding(
           padding: const EdgeInsets.all(32),
           child: Text(
-            'Enter tags, then search. Each website uses its own tag names, so results vary.',
+            'Enter tags, then search. Some websites have their own tag systems, so results may vary.',
             textAlign: TextAlign.center,
             style: TextStyle(color: ink(.54)),
           ),

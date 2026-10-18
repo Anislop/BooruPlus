@@ -873,7 +873,7 @@ class AppSettings {
     this.slideshowSeconds = 5,
     this.doubleTapFavorite = false,
     this.volumeKeyPaging = false,
-    this.oneHanded = false,
+    this.oneHanded = true,
     this.handedness = Handedness.right,
     this.classicDrawer = false,
     this.surfaceOpacity = 80,
