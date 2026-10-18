@@ -522,7 +522,7 @@ class AppState extends ChangeNotifier {
   /// Websites that can search now: those not needing credentials, or with
   /// credentials saved.
   Future<List<Board>> searchableBoards({Iterable<Board>? among}) async {
-    final boards = (among ?? Board.values).toList();
+    final boards = (among ?? listedBoards).toList();
     for (final board in boards) {
       if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
         try {
@@ -548,7 +548,7 @@ class AppState extends ChangeNotifier {
     final md5 = post.md5;
     if (md5.isEmpty) return const [];
     final boards = await searchableBoards(
-      among: Board.values.where((other) => other != board),
+      among: listedBoards.where((other) => other != board),
     );
     final found = await Future.wait(
       boards.map((other) async {
@@ -1066,7 +1066,11 @@ class AppState extends ChangeNotifier {
   Future<void> initialize() async {
     try {
       final settings = await _store.loadSettings();
-      final board = await _store.loadBoard();
+      final stored = await _store.loadBoard();
+      // A retired website reopens on the first website the drawer shows.
+      final board = stored?.isRetired == true
+          ? settings.visibleBoards.firstOrNull
+          : stored;
       final credentials = board == null
           ? null
           : await _store.loadCredentials(board);
@@ -2312,7 +2316,9 @@ class ShortsFeed extends ChangeNotifier {
     _tags = List.unmodifiable(
       tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toSet(),
     );
-    _boards = List.unmodifiable(boards.where((board) => board.hasShorts));
+    _boards = List.unmodifiable(
+      boards.where((board) => board.hasShorts && !board.isRetired),
+    );
     _interestTags = _ranked && _tags.isEmpty
         ? List.unmodifiable(_profile.topTags(_interestStreams))
         : const [];

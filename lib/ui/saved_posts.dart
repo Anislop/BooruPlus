@@ -184,7 +184,7 @@ class _SavedPostsScreenState extends State<SavedPostsScreen> {
       final all = _hidden ? _state.hiddenPosts : _state.favoritePosts;
       final present = {for (final saved in all) saved.identity};
       _selected.removeWhere((identity) => !present.contains(identity));
-      final boards = Board.values
+      final boards = listedBoards
           .where((board) => all.any((saved) => saved.board == board))
           .toList();
       if (_board != null && !boards.contains(_board)) _board = null;

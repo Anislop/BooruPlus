@@ -14,7 +14,18 @@ enum Board {
   tbib,
   aibooru,
   nozomi,
+  sakugabooru,
+  xbooru,
+  mspabooru,
+  eshuushuu,
+  mikubooru,
+  nanbooru,
 }
+
+/// Websites the app offers, in enum order: every board except retired ones.
+final List<Board> listedBoards = List.unmodifiable(
+  Board.values.where((board) => !board.isRetired),
+);
 
 extension BoardInfo on Board {
   String get label => switch (this) {
@@ -31,6 +42,12 @@ extension BoardInfo on Board {
     Board.tbib => 'TBIB',
     Board.aibooru => 'AIBooru',
     Board.nozomi => 'Nozomi',
+    Board.sakugabooru => 'Sakugabooru',
+    Board.xbooru => 'XBooru',
+    Board.mspabooru => 'MSPABooru',
+    Board.eshuushuu => 'E-Shuushuu',
+    Board.mikubooru => 'Mikubooru',
+    Board.nanbooru => 'Nanbooru',
   };
 
   String get host => switch (this) {
@@ -48,6 +65,13 @@ extension BoardInfo on Board {
     // aibooru.org is a parked domain; the site and its API live here.
     Board.aibooru => 'aibooru.online',
     Board.nozomi => 'nozomi.la',
+    Board.sakugabooru => 'www.sakugabooru.com',
+    Board.xbooru => 'xbooru.com',
+    Board.mspabooru => 'mspabooru.com',
+    Board.eshuushuu => 'e-shuushuu.net',
+    // Mikubooru (Hybooru) and Nanbooru (Shimmie) live on these hosts.
+    Board.mikubooru => 'booru.funmaker.moe',
+    Board.nanbooru => 'emmytherobot.art',
   };
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
@@ -55,14 +79,39 @@ extension BoardInfo on Board {
   /// Boards searched with Gelbooru 0.2 syntax: `sort:` ordering, no date
   /// searches, and ratings filtered locally.
   bool get usesGelbooruSyntax =>
-      this == Board.gelbooru || this == Board.rule34 || this == Board.tbib;
+      this == Board.gelbooru ||
+      this == Board.rule34 ||
+      this == Board.tbib ||
+      this == Board.xbooru ||
+      this == Board.mspabooru;
 
-  /// Whether posts carry a rating. Nozomi does not rate posts, so rating
-  /// filters do not apply there.
-  bool get hasRatings => this != Board.nozomi;
+  /// Whether posts carry a rating. Nozomi, E-Shuushuu, Mikubooru, and
+  /// Nanbooru do not rate posts, so rating filters do not apply there.
+  bool get hasRatings => !const {
+    Board.nozomi,
+    Board.eshuushuu,
+    Board.mikubooru,
+    Board.nanbooru,
+  }.contains(this);
+
+  /// Whether a search can start at an upload date (Dart sends
+  /// `created_at:>=` or `date:`; native clients translate it).
+  bool get supportsDateSearch =>
+      !usesGelbooruSyntax && this != Board.nozomi && this != Board.mikubooru;
+
+  /// Whether searches can order by favorite count.
+  bool get supportsFavoriteOrder =>
+      !usesGelbooruSyntax &&
+      !isSankakuFamily &&
+      this != Board.sakugabooru &&
+      this != Board.mikubooru;
 
   /// Boards made of AI-generated media, where the no-AI setting is ignored.
   bool get isAiBoard => this == Board.aibooru;
+
+  /// Boards the app no longer offers. Their code and saved data stay, but
+  /// they are left out of the website lists, searches, and booruShorts.
+  bool get isRetired => this == Board.aibooru;
 
   /// Boards served by Sankaku's API (Sankaku Complex and Idol Complex): the
   /// same search syntax, tag limits, keyset paging, and signed media URLs.
@@ -78,7 +127,8 @@ extension BoardInfo on Board {
 
   /// The query that limits a search to videos, for booruShorts; null on
   /// boards without usable video (Safebooru and TBIB return only GIFs for
-  /// `video`; Konachan and Yande.re host images). See docs/booru-shorts.md.
+  /// `video`; Konachan, Yande.re, MSPABooru, E-Shuushuu, and Mikubooru host
+  /// images). See docs/booru-shorts.md.
   List<String>? get shortsVideoQuery => switch (this) {
     // A metatag: it does not count toward the anonymous tag limit.
     Board.danbooru || Board.aibooru => const ['filetype:mp4,webm'],
@@ -87,8 +137,18 @@ extension BoardInfo on Board {
     Board.rule34 ||
     Board.sankaku ||
     Board.idolcomplex ||
-    Board.nozomi => const ['video'],
-    Board.safebooru || Board.tbib || Board.konachan || Board.yandere => null,
+    Board.nozomi ||
+    Board.xbooru ||
+    Board.nanbooru => const ['video'],
+    // Sakugabooru's clips are tagged `animated`.
+    Board.sakugabooru => const ['animated'],
+    Board.safebooru ||
+    Board.tbib ||
+    Board.konachan ||
+    Board.yandere ||
+    Board.mspabooru ||
+    Board.eshuushuu ||
+    Board.mikubooru => null,
   };
 
   bool get hasShorts => shortsVideoQuery != null;
@@ -699,6 +759,29 @@ class DownloadRecord {
 /// The default [AppSettings.filenameTemplate].
 const defaultFilenameTemplate = '{site}_{id}';
 
+/// The drawer order before the user changes it: [listedBoards], as a
+/// constant for [AppSettings]'s default.
+const _defaultBoardOrder = [
+  Board.safebooru,
+  Board.danbooru,
+  Board.konachan,
+  Board.yandere,
+  Board.e926,
+  Board.e621,
+  Board.gelbooru,
+  Board.rule34,
+  Board.sankaku,
+  Board.idolcomplex,
+  Board.tbib,
+  Board.nozomi,
+  Board.sakugabooru,
+  Board.xbooru,
+  Board.mspabooru,
+  Board.eshuushuu,
+  Board.mikubooru,
+  Board.nanbooru,
+];
+
 /// [bytes] as KB, MB, or GB.
 String formatBytes(int bytes) {
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
@@ -777,7 +860,7 @@ class AppSettings {
     this.searchedTagCounts = const {},
     this.browsedTagCounts = const {},
     this.videoQuality = 0,
-    this.boardOrder = Board.values,
+    this.boardOrder = _defaultBoardOrder,
     this.hiddenBoards = const [],
     this.boardBlacklists = const {},
     this.boardSavedQueries = const {},
@@ -842,8 +925,9 @@ class AppSettings {
   final List<Board> hiddenBoards;
 
   /// Websites shown in the drawer, in the user's order.
-  List<Board> get visibleBoards =>
-      boardOrder.where((board) => !hiddenBoards.contains(board)).toList();
+  List<Board> get visibleBoards => boardOrder
+      .where((board) => !board.isRetired && !hiddenBoards.contains(board))
+      .toList();
 
   /// Blocked tags that apply to one website only; [blacklist] applies to
   /// every website.
@@ -1440,16 +1524,16 @@ class AppSettings {
   }
 
   // Unknown or missing boards (e.g. ones added in a later version) are
-  // appended in their default position order.
+  // appended in their default position order; retired boards are dropped.
   static List<Board> _normalizedBoardOrder(Iterable<Board> values) {
-    final result = <Board>{...values, ...Board.values};
-    return List.unmodifiable(result);
+    final result = <Board>{...values, ...listedBoards};
+    return List.unmodifiable(result.where((board) => !board.isRetired));
   }
 
   static List<Board> _normalizedHiddenBoards(Iterable<Board> values) {
     final hidden = values.toSet();
-    if (hidden.length >= Board.values.length) return const [];
-    return List.unmodifiable(Board.values.where(hidden.contains));
+    if (listedBoards.every(hidden.contains)) return const [];
+    return List.unmodifiable(listedBoards.where(hidden.contains));
   }
 
   static List<Rating> _normalizedRatings(Iterable<Rating> values) =>

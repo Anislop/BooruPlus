@@ -19,7 +19,7 @@ Browse, search, save, and swipe through imageboards from a single, fast, ad-free
 ![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)
 ![Flutter](https://img.shields.io/badge/Flutter-Dart%203.13-02569B?style=for-the-badge&logo=flutter&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-bridge-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
-![Websites](https://img.shields.io/badge/websites-13-F20B3D?style=for-the-badge)
+![Websites](https://img.shields.io/badge/websites-18-F20B3D?style=for-the-badge)
 
 [Highlights](#-highlights) · [All features](#-all-features) · [Websites](#-supported-websites) · [Build](#-build-from-source) · [Privacy](#-privacy)
 
@@ -119,7 +119,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 
 ---
 
-## 📋 All features
+## All features
 
 <details open>
 <summary><b>Browsing and search</b></summary>
@@ -127,13 +127,13 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Feature | Details |
 | --- | --- |
 | Discover feed | A random feed for each website, kept in the same order while you scroll. |
-| Tag search | Tags become chips inside the search field, with autocomplete and post counts. |
+| Tag search | Includes autocompletion, post counts (if supported) and turn to chips when selected. |
 | Typed tags | Artist, character, copyright, species, meta, and lore tags each have their own color where the website provides categories. |
 | Sort | Relevance, popularity, favorites, quality, newest, or oldest, depending on what the website supports. |
-| Date and rating filters | Narrow results by upload date and by rating (general, sensitive, questionable, explicit) on websites that have ratings. |
+| Date and Rating filters | Narrow results by upload date and by rating (general, sensitive, questionable, explicit) on websites that have ratings. |
 | Saved searches | Bookmark searches per website, or share one list across every website. New-post counts show what arrived since your last visit. |
 | Recent searches | Your search history, with suggestions ranked by how often you use each tag. |
-| Search all sites | One query across several websites in one merged, interleaved grid. |
+| Search all sites | Search on all websites at once, you could also hide some. |
 | Search guides | In-app syntax help for each website's search features. |
 | Back navigation | Going back restores the previous feed exactly where you left it. |
 | Rate-limit handling | Waits and retries when a website says it is busy, with a countdown when it keeps refusing. |
@@ -172,7 +172,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Tag menu | Hold a tag: search it, search on all sites, add or exclude it, block it on one or all websites, or copy it. |
 | Related posts | Parent and child posts, pools (Danbooru, e621, e926), and related posts that share artists or characters. |
 | Find on other sites | Finds the same file on other websites. |
-| Download and share | Downloads with a progress ring; shares the media or the link. |
+| Download and share | Download posts locally on your device. |
 
 </details>
 
@@ -189,7 +189,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Controls | Scrub bar, double-tap to skip 5 seconds, hold for 2× speed, mute. |
 | Auto-scroll and auto-advance | Play each video for a set time, or move on when a video ends. |
 | Picture-in-picture | Keep watching in a small window after leaving the app. |
-| Watch history and interests | Review what you watched and what For you learned; forget a tag or reset everything. |
+| Watch history and interests | Review what you watched and what For you learned, you may forget a tag or reset everything. Up to you. |
 | Per-website control | Watch one website only for a visit, or switch a website off for booruShorts. |
 
 </details>
@@ -215,7 +215,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Feature | Details |
 | --- | --- |
 | Blocked tags | Block tags on every website or on one website. They are excluded from searches and filtered again on the device. |
-| No AI-generated posts | Hides posts tagged `ai_generated`, with per-website exceptions (AIBooru is exempt by default). |
+| No AI-generated posts | Hides posts tagged `ai_generated`, with per-website exceptions. |
 | Blur | Blur explicit or questionable previews and media until revealed. |
 | Ratings | Pick which ratings appear in feeds. |
 
@@ -239,7 +239,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 
 ---
 
-## 🌍 Supported websites
+## Supported websites
 
 <div align="center">
 
@@ -256,13 +256,19 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Sankaku Complex | Optional sign-in | ✅ | |
 | Idol Complex | — | ✅ | |
 | TBIB | — | — | |
-| AIBooru | — | ✅ | AI-generated art |
 | Nozomi | — | ✅ | No ratings; sorts by newest or popular |
+| Sakugabooru | — | ✅ | Animation clips, credited by animator |
+| XBooru | — | ✅ | |
+| MSPABooru | — | — | Homestuck and MS Paint Adventures art |
+| E-Shuushuu | — | — | All-ages anime art; no ratings |
+| Mikubooru | — | — | Hatsune Miku and VOCALOID art; no ratings |
+| Nanbooru | — | ✅ | Emmy the Robot and Nandroid art; no ratings |
 
 </div>
 
 > [!NOTE]
-> BooruPlus does not host any content. Every post comes from the website it is shown with, under that website's rules. Several websites carry adult content: use blocked tags, rating filters, and blur to shape what you see, and follow the laws where you live.
+> BooruPlus does not host any content. Every post comes from the website it is shown with, under that website's rules. 
+> Several websites carry adult content: use blocked tags, rating filters, and blur to shape what you see.
 
 ---
 
@@ -289,24 +295,24 @@ Live integration tests (`integration_test/`) need a real Android device with net
 
 ---
 
-## 🔒 Privacy
+## Privacy
 
 - No accounts, analytics, or ads. The app talks only to the websites you choose.
 - booruShorts learns on your phone. Turn **Personalize For you** off, or use incognito, to stop it.
 - API keys and sign-in sessions live in Android's encrypted storage and are never written to backups. Sankaku passwords are exchanged for a session and not stored.
+- **We do not send or store anything about you to the websites and servers.** Check the source code to see.
 
 ---
 
-## 🧭 Project layout
+## AI Disclosure
 
-| Path | What lives there |
-| --- | --- |
-| `lib/` | The Flutter app: `core/` for state, models, and storage; `ui/` for screens |
-| `android/app/` | Kotlin platform bridge: website requests, downloads, sharing, picture-in-picture |
-| `android/imageboard-api/` | Vendored Java imageboard library |
-| `assets/` | Logo and icon artwork, website appearance, search guides |
-| `docs/` | Design notes, including [how booruShorts recommends videos](docs/booru-shorts.md) |
-| `test/`, `integration_test/` | Unit, widget, and live device tests |
+**Is this a vibe-coded project?** No, not entirely. AI was used only for commit messages, comments. API creation, UI layouts were mostly handwritten code. We use only AI to guide and assist our work to make things faster.
+
+## FAQs
+- **iOS Support?**
+    - No possibility. Sideloading is hard in iOS, and the full app is sure won't be accepted by Apple themselves. The project itself is written mostly in Android in mind. However, this may change in the future.
+- **Play Store?**
+    - Coming soon.
 
 ---
 

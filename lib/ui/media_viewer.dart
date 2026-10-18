@@ -2036,7 +2036,11 @@ String postBrowserUrl(Board board, MediaPost post) {
     Board.sankaku ||
     Board.idolcomplex => 'https://${board.host}/posts/${post.displayId}',
     Board.konachan ||
-    Board.yandere => 'https://${board.host}/post/show/${post.id}',
+    Board.yandere ||
+    Board.sakugabooru => 'https://${board.host}/post/show/${post.id}',
+    Board.eshuushuu => 'https://${board.host}/image/${post.id}',
+    Board.mikubooru => 'https://${board.host}/posts/${post.id}',
+    Board.nanbooru => 'https://${board.host}/post/view/${post.id}',
     _ => 'https://${board.host}/index.php?page=post&s=view&id=${post.id}',
   };
 }

@@ -24,9 +24,11 @@ Checked live on 2026-10-18:
 | --- | --- | --- |
 | Danbooru, AIBooru | `filetype:mp4,webm` | A metatag, so it does not count toward the anonymous two-tag limit (`filetype:mp4,webm 1girl -solo` is accepted). |
 | e621, e926 | `~type:webm ~type:mp4` | e621 OR syntax. |
-| Gelbooru, Rule34, Sankaku, Idol Complex, Nozomi | `video` | Sankaku returned only `video/*` files; Nozomi serves `nozomi/video.nozomi`. Gelbooru/Rule34 need credentials and were not probed. |
+| Gelbooru, Rule34, Sankaku, Idol Complex, Nozomi, XBooru, Nanbooru | `video` | Sankaku returned only `video/*` files; Nozomi serves `nozomi/video.nozomi`. Gelbooru/Rule34 need credentials and were not probed. |
+| Sakugabooru | `animated` | Its clips are MP4/WebM tagged `animated`. |
 | Safebooru, TBIB | (excluded) | `video` and `webm` return only GIFs. |
-| Konachan, Yande.re | (excluded) | Image-only websites. |
+| Konachan, Yande.re, MSPABooru, E-Shuushuu, Mikubooru | (excluded) | Image-only websites. |
+| AIBooru | (excluded) | Retired: no longer offered anywhere in the app. |
 
 The video query goes through `AppState._queryTagsFor`, so rating syntax and
 blocked-tag exclusions are added within each website's budget. The local

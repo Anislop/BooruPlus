@@ -16,13 +16,14 @@ import kotlin.random.Random
 
 /*
  * Small JSON clients for boards the vendored library does not model:
- * TBIB (a Gelbooru 0.2 DAPI without file URLs), AIBooru (a Danbooru fork
- * whose absolute CDN URLs the library's Danbooru entity rewrites onto
+ * Gelbooru 0.2 DAPI boards (TBIB, XBooru, MSPABooru), AIBooru (a Danbooru
+ * fork whose absolute CDN URLs the library's Danbooru entity rewrites onto
  * danbooru.donmai.us), and Nozomi (binary post-ID indexes plus one JSON file
  * per post). Each returns the same post maps as MainActivity.mapImage.
+ * MoreBoards.kt holds the clients for boards on other engines.
  */
 
-private fun OkHttpClient.getBody(url: HttpUrl, userAgent: String, headers: Map<String, String> = emptyMap()): String? {
+internal fun OkHttpClient.getBody(url: HttpUrl, userAgent: String, headers: Map<String, String> = emptyMap()): String? {
     val builder = Request.Builder().url(url).header("User-Agent", userAgent)
     headers.forEach { (name, value) -> builder.header(name, value) }
     newCall(builder.build()).execute().use { response ->
@@ -33,21 +34,46 @@ private fun OkHttpClient.getBody(url: HttpUrl, userAgent: String, headers: Map<S
 }
 
 /** Splits a space-separated tag string, dropping blanks. */
-private fun splitTags(value: String?): List<String> =
+internal fun splitTags(value: String?): List<String> =
     value?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: emptyList()
 
 /** A page offset for unfiltered discovery, so each random session starts somewhere new. */
-private fun discoveryOffset(random: Boolean, tags: List<String>, seed: Int): Int =
+internal fun discoveryOffset(random: Boolean, tags: List<String>, seed: Int): Int =
     if (random && tags.isEmpty()) Random(seed).nextInt(21) else 0
 
+/** [value] resolved against `https://<host>/`, or null unless it is a plain HTTPS URL. */
+internal fun httpsUrl(host: String, value: String?): String? {
+    if (value.isNullOrBlank() || value == "null") return null
+    return try {
+        val url = java.net.URI("https://$host/").resolve(value.trim())
+        url.takeIf { it.scheme == "https" && !it.host.isNullOrBlank() && it.userInfo == null }?.toString()
+    } catch (_: Exception) { null }
+}
+
+internal val MD5_PATTERN = Regex("^[0-9a-f]{32}$")
+
+/** A board client with its own HTTP requests; MainActivity dispatches to it by board ID. */
+internal interface BoardClient {
+    fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>>
+    fun autocomplete(query: String, limit: Int): List<Map<String, Any?>>
+}
+
 /**
- * TBIB (tbib.org): Gelbooru 0.2 DAPI JSON. Posts carry `directory` and
- * `image` instead of file URLs; an empty search answers with an empty body.
- * Ratings mix the old (`safe`) and new (`general`) names, so Dart filters
- * ratings locally instead of sending `rating:`.
+ * Gelbooru 0.2 DAPI JSON boards: TBIB (tbib.org), XBooru (xbooru.com), and
+ * MSPABooru (mspabooru.com). XBooru sends file URLs; TBIB and MSPABooru send
+ * only `directory` and `image`, and their thumbnails end in `.jpg` (TBIB) or
+ * keep the image's extension (MSPABooru, [keepsThumbnailExtension]). An empty
+ * search answers with an empty body. Ratings mix the old (`safe`) and new
+ * (`general`) names, so Dart filters ratings locally instead of sending
+ * `rating:`.
  */
-internal class TbibApi(private val client: OkHttpClient, private val userAgent: String) {
-    fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
+internal class Gelbooru02Api(
+    private val client: OkHttpClient,
+    private val userAgent: String,
+    private val host: String,
+    private val keepsThumbnailExtension: Boolean = false,
+) : BoardClient {
+    override fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
         if (cancelled()) throw IOException("Cancelled")
         val pid = page + discoveryOffset(random, tags, seed)
         val posts = request(tags, pid, limit)
@@ -56,7 +82,7 @@ internal class TbibApi(private val client: OkHttpClient, private val userAgent: 
     }
 
     private fun request(tags: List<String>, pid: Int, limit: Int): List<Map<String, Any?>> {
-        val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegment("index.php")
+        val url = HttpUrl.Builder().scheme("https").host(host).addPathSegment("index.php")
             .addQueryParameter("page", "dapi").addQueryParameter("s", "post")
             .addQueryParameter("q", "index").addQueryParameter("json", "1")
             .addQueryParameter("limit", limit.coerceIn(1, 200).toString())
@@ -71,52 +97,62 @@ internal class TbibApi(private val client: OkHttpClient, private val userAgent: 
 
     private fun mapPost(post: JSONObject): Map<String, Any?>? {
         val id = post.optLong("id").takeIf { it > 0 } ?: return null
-        val directory = post.optString("directory").takeIf { it.isNotBlank() } ?: return null
-        val image = post.optString("image").takeIf { it.isNotBlank() && !it.contains('/') } ?: return null
-        val base = image.substringBeforeLast('.')
+        val directory = post.optString("directory").takeIf { it.isNotBlank() }
+        val image = post.optString("image").takeIf { it.isNotBlank() && !it.contains('/') }
+        val base = image?.substringBeforeLast('.')
+        val thumbnailExtension = if (keepsThumbnailExtension) image?.substringAfterLast('.', "jpg") else "jpg"
+        val original = httpsUrl(host, post.optString("file_url"))
+            ?: if (directory != null && image != null) "https://$host/images/$directory/$image" else return null
+        val preview = httpsUrl(host, post.optString("preview_url"))
+            ?: if (directory != null && base != null) "https://$host/thumbnails/$directory/thumbnail_$base.$thumbnailExtension" else original
+        val sample = if (post.optBoolean("sample")) {
+            httpsUrl(host, post.optString("sample_url"))
+                ?: if (directory != null && base != null) "https://$host/samples/$directory/sample_$base.$thumbnailExtension" else null
+        } else null
         val tags = splitTags(post.optString("tags"))
-        val original = "https://$HOST/images/$directory/$image"
         return mapOf(
             "id" to id.toString(),
             "url" to original,
-            "previewUrl" to "https://$HOST/thumbnails/$directory/thumbnail_$base.jpg",
+            "previewUrl" to preview,
             "tags" to tags,
             "tagDetails" to tags.map { mapOf("name" to it, "category" to "general") },
-            "postUrl" to "https://$HOST/index.php?page=post&s=view&id=$id",
+            "postUrl" to "https://$host/index.php?page=post&s=view&id=$id",
             "rating" to post.optString("rating", "Unknown"),
             "uploader" to post.optString("owner"),
             "source" to post.optString("source"),
             "width" to post.optInt("width"), "height" to post.optInt("height"),
             "score" to post.optInt("score"), "description" to "",
             "videoVariants" to emptyList<Map<String, Any?>>(),
-            "md5" to post.optString("hash").lowercase().takeIf { MD5.matches(it) }.orEmpty(),
+            "md5" to post.optString("hash").lowercase().takeIf { MD5_PATTERN.matches(it) }.orEmpty(),
             "parentId" to post.optLong("parent_id").takeIf { it > 0 }?.toString(),
             "hasChildren" to false,
-            "sampleUrl" to if (post.optBoolean("sample")) "https://$HOST/samples/$directory/sample_$base.jpg" else "",
+            "sampleUrl" to (sample?.takeIf { it != original && it != preview } ?: ""),
             "pools" to emptyList<String>(),
         )
     }
 
-    fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
+    override fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
         val term = query.trim()
         if (term.isEmpty()) return emptyList()
-        val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegment("autocomplete.php")
+        val url = HttpUrl.Builder().scheme("https").host(host).addPathSegment("autocomplete.php")
             .addQueryParameter("q", term).build()
         val body = client.getBody(url, userAgent)?.trim().orEmpty()
         if (!body.startsWith("[")) return emptyList()
         val array = JSONArray(body)
         return (0 until minOf(array.length(), limit)).mapNotNull { index ->
-            val item = array.optJSONObject(index) ?: return@mapNotNull null
-            val name = item.optString("value").trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            // Labels read "name (count)".
-            val count = Regex("\\((\\d+)\\)\\s*$").find(item.optString("label"))?.groupValues?.get(1)?.toIntOrNull()
+            // TBIB and XBooru send {label: "name (count)", value}; MSPABooru sends bare names.
+            val item = array.optJSONObject(index)
+            val name = (item?.optString("value") ?: array.optString(index)).trim().takeIf { it.isNotEmpty() }
+                ?: return@mapNotNull null
+            val count = item?.let { Regex("\\((\\d+)\\)\\s*$").find(it.optString("label"))?.groupValues?.get(1)?.toIntOrNull() }
             mapOf("name" to name, "category" to "unknown", "postCount" to count)
         }
     }
 
     companion object {
-        const val HOST = "tbib.org"
-        private val MD5 = Regex("^[0-9a-f]{32}$")
+        const val TBIB_HOST = "tbib.org"
+        const val XBOORU_HOST = "xbooru.com"
+        const val MSPABOORU_HOST = "mspabooru.com"
     }
 }
 
@@ -125,8 +161,8 @@ internal class TbibApi(private val client: OkHttpClient, private val userAgent: 
  * with absolute CDN URLs on cdn.aibooru.download. Anonymous searches allow
  * four tags. Its extra `model` tag category is shown as meta.
  */
-internal class AiBooruApi(private val client: OkHttpClient, private val userAgent: String) {
-    fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
+internal class AiBooruApi(private val client: OkHttpClient, private val userAgent: String) : BoardClient {
+    override fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
         if (cancelled()) throw IOException("Cancelled")
         val offset = discoveryOffset(random, tags, seed)
         val posts = request(tags, page + offset, limit)
@@ -183,13 +219,9 @@ internal class AiBooruApi(private val client: OkHttpClient, private val userAgen
         )
     }
 
-    private fun mediaUrl(value: String?): String? {
-        if (value.isNullOrBlank() || value == "null") return null
-        val url = java.net.URI("https://$HOST/").resolve(value.trim())
-        return url.takeIf { it.scheme == "https" && !it.host.isNullOrBlank() && it.userInfo == null }?.toString()
-    }
+    private fun mediaUrl(value: String?): String? = httpsUrl(HOST, value)
 
-    fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
+    override fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
         val term = query.trim()
         if (term.isEmpty()) return emptyList()
         val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegment("autocomplete.json")

@@ -108,6 +108,42 @@ const _defaults = <Board, BoardAppearance>{
     accent: Color(0xFFE6C65C),
     surface: Color(0xFF352E16),
   ),
+  Board.sakugabooru: BoardAppearance(
+    name: 'Sakugabooru',
+    icon: Icons.movie_filter_outlined,
+    accent: Color(0xFFE88A6E),
+    surface: Color(0xFF38211A),
+  ),
+  Board.xbooru: BoardAppearance(
+    name: 'XBooru',
+    icon: Icons.grid_view_outlined,
+    accent: Color(0xFFD98AA8),
+    surface: Color(0xFF361E28),
+  ),
+  Board.mspabooru: BoardAppearance(
+    name: 'MSPABooru',
+    icon: Icons.menu_book_outlined,
+    accent: Color(0xFF7DD36F),
+    surface: Color(0xFF1C3119),
+  ),
+  Board.eshuushuu: BoardAppearance(
+    name: 'E-Shuushuu',
+    icon: Icons.brush_outlined,
+    accent: Color(0xFF8FB4E6),
+    surface: Color(0xFF1D2838),
+  ),
+  Board.mikubooru: BoardAppearance(
+    name: 'Mikubooru',
+    icon: Icons.music_note_outlined,
+    accent: Color(0xFF5CCFD0),
+    surface: Color(0xFF163233),
+  ),
+  Board.nanbooru: BoardAppearance(
+    name: 'Nanbooru',
+    icon: Icons.smart_toy_outlined,
+    accent: Color(0xFFB79CE8),
+    surface: Color(0xFF2A2238),
+  ),
 };
 
 final boardAppearances = <Board, BoardAppearance>{..._defaults};

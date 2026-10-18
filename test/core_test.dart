@@ -283,6 +283,30 @@ void main() {
     expect(state.posts, isEmpty);
   });
 
+  test('AIBooru is retired from website lists and the startup board', () async {
+    final legacy = AppSettings.fromMap({
+      'boardOrder': ['aibooru', 'danbooru'],
+      'hiddenBoards': ['aibooru'],
+    });
+    expect(legacy.boardOrder, isNot(contains(Board.aibooru)));
+    expect(legacy.boardOrder.first, Board.danbooru);
+    // Websites added later are appended.
+    expect(legacy.boardOrder, containsAll([Board.sakugabooru, Board.nanbooru]));
+    expect(legacy.hiddenBoards, isEmpty);
+    // The constant default must list every offered website.
+    expect(const AppSettings().boardOrder, listedBoards);
+
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()
+        ..settings = legacy
+        ..selected = Board.aibooru,
+    );
+    await state.initialize();
+    expect(state.board, Board.danbooru);
+    expect(await state.searchableBoards(), isNot(contains(Board.aibooru)));
+  });
+
   test('rating filters skip Nozomi and stay local on TBIB', () async {
     final repo = FakeRepo([
       [
@@ -1652,11 +1676,15 @@ void main() {
       expect(Board.danbooru.shortsVideoQuery, ['filetype:mp4,webm']);
       expect(Board.e621.shortsVideoQuery, ['~type:webm', '~type:mp4']);
       expect(Board.sankaku.shortsVideoQuery, ['video']);
+      expect(Board.sakugabooru.shortsVideoQuery, ['animated']);
       for (final board in [
         Board.safebooru,
         Board.tbib,
         Board.konachan,
         Board.yandere,
+        Board.mspabooru,
+        Board.eshuushuu,
+        Board.mikubooru,
       ]) {
         expect(board.hasShorts, isFalse, reason: board.name);
       }

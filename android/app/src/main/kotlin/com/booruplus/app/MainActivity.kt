@@ -87,8 +87,19 @@ class MainActivity : FlutterActivity() {
     private val konachanNet by lazy { ImageBoard(client, KonachanBoard.NET, KonachanImage::class.java) }
     private val sankaku by lazy { SankakuApi(client, USER_AGENT) }
     private val idolComplex by lazy { SankakuApi.idolComplex(client, USER_AGENT) }
-    private val tbib by lazy { TbibApi(client, USER_AGENT) }
-    private val aiBooru by lazy { AiBooruApi(client, USER_AGENT) }
+    private val hybooruClient = lazy { HybooruApi(client, USER_AGENT) }
+    // Boards with their own HTTP clients (ExtraBoards.kt, MoreBoards.kt),
+    // created on first use.
+    private val boardClients: Map<String, Lazy<BoardClient>> = mapOf(
+        "tbib" to lazy { Gelbooru02Api(client, USER_AGENT, Gelbooru02Api.TBIB_HOST) },
+        "aibooru" to lazy { AiBooruApi(client, USER_AGENT) },
+        "sakugabooru" to lazy { SakugabooruApi(client, USER_AGENT) },
+        "xbooru" to lazy { Gelbooru02Api(client, USER_AGENT, Gelbooru02Api.XBOORU_HOST) },
+        "mspabooru" to lazy { Gelbooru02Api(client, USER_AGENT, Gelbooru02Api.MSPABOORU_HOST, keepsThumbnailExtension = true) },
+        "eshuushuu" to lazy { EShuushuuApi(client, USER_AGENT) },
+        "mikubooru" to hybooruClient,
+        "nanbooru" to lazy { ShimmieApi(client, USER_AGENT) },
+    )
     private val nozomiClient = lazy { NozomiApi(client, USER_AGENT) }
     private val nozomi by nozomiClient
     private var directoryResult: MethodChannel.Result? = null
@@ -504,11 +515,8 @@ class MainActivity : FlutterActivity() {
         if (board in setOf("konachan", "yandere")) { result.success(emptyList<Map<String, Any?>>()); return }
         // Sankaku sends its optional session's access token as apiKey.
         sankakuFamily(board)?.let { api -> background(result) { api.autocomplete(query, limit, key) }; return }
-        when (board) {
-            "tbib" -> { background(result) { tbib.autocomplete(query, limit) }; return }
-            "aibooru" -> { background(result) { aiBooru.autocomplete(query, limit) }; return }
-            "nozomi" -> { background(result) { nozomi.autocomplete(query, limit) }; return }
-        }
+        boardClients[board]?.let { api -> background(result) { api.value.autocomplete(query, limit) }; return }
+        if (board == "nozomi") { background(result) { nozomi.autocomplete(query, limit) }; return }
         background(result) {
             val api = when (board) {
                 "rule34" -> ImageBoards.createRule34(key!!, user!!, client)
@@ -662,16 +670,16 @@ class MainActivity : FlutterActivity() {
             result.error("AUTH_REQUIRED", "A user ID and API key are required", null); return
         }
         val feed = if (call.argument<Boolean>("feed") == true) startFeed(result) else null
-        // Boards with their own JSON clients (ExtraBoards.kt).
-        when (board) {
-            "tbib" -> { background(result, feed = feed) { tbib.fetch(tags, page, limit, random, seed) { cancelled() } }; return }
-            "aibooru" -> { background(result, feed = feed) { aiBooru.fetch(tags, page, limit, random, seed) { cancelled() } }; return }
-            "nozomi" -> {
-                background(result, feed = feed) {
-                    nozomi.fetch(tags, page, limit, random, seed, makeCursorKey("nozomi", tags, limit, random, if (random) seed else 0)) { cancelled() }
-                }
-                return
+        // Boards with their own HTTP clients (ExtraBoards.kt, MoreBoards.kt).
+        boardClients[board]?.let { api ->
+            background(result, feed = feed) { api.value.fetch(tags, page, limit, random, seed) { cancelled() } }
+            return
+        }
+        if (board == "nozomi") {
+            background(result, feed = feed) {
+                nozomi.fetch(tags, page, limit, random, seed, makeCursorKey("nozomi", tags, limit, random, if (random) seed else 0)) { cancelled() }
             }
+            return
         }
         val sankakuApi = sankakuFamily(board)
         if (sankakuApi != null) {
@@ -1344,6 +1352,7 @@ class MainActivity : FlutterActivity() {
         pending.toList().forEach { if (pending.remove(it)) it.error("CANCELLED", "Activity closed", null) }
         client.dispatcher.cancelAll()
         if (nozomiClient.isInitialized()) nozomi.close()
+        if (hybooruClient.isInitialized()) hybooruClient.value.close()
         executor.shutdownNow()
         mediaExecutor.shutdownNow()
         super.onDestroy()
@@ -1372,7 +1381,7 @@ class MainActivity : FlutterActivity() {
         private const val TAG_CACHE_LIMIT = 512
         private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
         private const val GELBOORU_REFERER = "https://gelbooru.com/"
-        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to TbibApi.HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST)
+        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }
