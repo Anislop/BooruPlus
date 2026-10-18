@@ -73,6 +73,9 @@ class AppState extends ChangeNotifier {
   // identity, and attempts are throttled so a deleted post is not re-queried
   // on every rebuild.
   final Map<String, MediaPost> _refreshedMedia = {};
+  // On-demand media lookups in flight, by post identity, so a viewer and
+  // Shorts opening the same post share one request.
+  final Map<String, Future<bool>> _mediaLookups = {};
   final Map<String, DateTime> _refreshAttempts = {};
   final Map<String, SavedPost> _refreshQueue = {};
   bool _refreshScheduled = false;
@@ -1896,6 +1899,62 @@ class AppState extends ChangeNotifier {
     Future<void>(_refreshExpiredMedia);
   }
 
+  /// [post] with media URLs that can be streamed now. Sankaku's signed URLs
+  /// expire about an hour after a fetch and then answer 403, so a player
+  /// must not start from one that is (nearly) expired; such a post is looked
+  /// up again first. [force] looks it up even when the URLs look current,
+  /// for a stream that failed anyway. Other boards, and failed lookups,
+  /// return the URLs [displayPost] would.
+  Future<MediaPost> streamablePost(
+    MediaPost post, {
+    required Board board,
+    bool force = false,
+  }) async {
+    final ready = displayReady(SavedPost(board: board, post: post));
+    if (!board.isSankakuFamily || !ready.post.hasId) return ready.post;
+    if (!force && !_mediaExpired(ready.post)) return ready.post;
+    final key = ready.identity;
+    final lookup = _mediaLookups[key] ??= _lookUpMedia(board, [ready])
+        .whenComplete(
+          // A block body: returning the removed future would await itself.
+          () {
+            _mediaLookups.remove(key);
+          },
+        );
+    if (await lookup) notifyListeners();
+    return displayReady(SavedPost(board: board, post: post)).post;
+  }
+
+  /// Fetches [batch] (one board's posts) again and keeps their current
+  /// media URLs in [_refreshedMedia]; whether any arrived.
+  Future<bool> _lookUpMedia(Board board, List<SavedPost> batch) async {
+    final wanted = {for (final saved in batch) saved.identity};
+    var changed = false;
+    try {
+      final raw = await _withSession(
+        board,
+        (credentials) => _repository.fetch(
+          board: board,
+          tags: ['id:${batch.map((saved) => saved.post.displayId).join(',')}'],
+          limit: batch.length,
+          page: 0,
+          random: false,
+          credentials: credentials,
+        ),
+      );
+      for (final fresh in raw.map(MediaPost.fromMap)) {
+        final identity = SavedPost(board: board, post: fresh).identity;
+        if (!wanted.contains(identity)) continue;
+        _refreshedMedia.remove(identity);
+        _refreshedMedia[identity] = fresh;
+        changed = true;
+      }
+    } catch (_) {
+      // Keep the stored URLs; the post is retried after the cooldown.
+    }
+    return changed;
+  }
+
   Future<void> _refreshExpiredMedia() async {
     _refreshScheduled = false;
     final queued = _refreshQueue.values.toList(growable: false);
@@ -1905,31 +1964,7 @@ class AppState extends ChangeNotifier {
       final posts = queued.where((saved) => saved.board == board).toList();
       for (var start = 0; start < posts.length; start += 40) {
         final batch = posts.skip(start).take(40).toList(growable: false);
-        final wanted = {for (final saved in batch) saved.identity};
-        try {
-          final raw = await _withSession(
-            board,
-            (credentials) => _repository.fetch(
-              board: board,
-              tags: [
-                'id:${batch.map((saved) => saved.post.displayId).join(',')}',
-              ],
-              limit: batch.length,
-              page: 0,
-              random: false,
-              credentials: credentials,
-            ),
-          );
-          for (final fresh in raw.map(MediaPost.fromMap)) {
-            final identity = SavedPost(board: board, post: fresh).identity;
-            if (!wanted.contains(identity)) continue;
-            _refreshedMedia.remove(identity);
-            _refreshedMedia[identity] = fresh;
-            changed = true;
-          }
-        } catch (_) {
-          // Keep the stored URLs; the post is retried after the cooldown.
-        }
+        if (await _lookUpMedia(board, batch)) changed = true;
       }
     }
     while (_refreshedMedia.length > 500) {
