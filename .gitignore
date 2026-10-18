@@ -14,3 +14,6 @@ coverage/
 # Local promo material and guides
 promo/
 guides/
+
+# Local planning notes, kept out of every remote
+analysis/
