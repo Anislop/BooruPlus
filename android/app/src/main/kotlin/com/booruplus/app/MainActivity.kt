@@ -6,6 +6,7 @@ import android.app.PictureInPictureParams
 import android.content.ClipData
 import android.content.ContentValues
 import android.content.Intent
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -53,6 +54,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.LinkedHashMap
 import kotlin.random.Random
@@ -205,6 +207,11 @@ class MainActivity : FlutterActivity() {
                 result.success(pendingShortcut)
                 pendingShortcut = null
             }
+            "appVersion" -> {
+                val info = installedPackage()
+                result.success(mapOf("name" to (info.versionName ?: ""), "build" to versionCode(info)))
+            }
+            "installUpdate" -> installUpdate(call, result)
             else -> result.notImplemented()
         }
     }
@@ -588,6 +595,7 @@ class MainActivity : FlutterActivity() {
                     is IllegalArgumentException -> "INVALID_REQUEST"
                     is SankakuAuthException -> if (error.expired) "AUTH_EXPIRED" else "AUTH_REJECTED"
                     is SankakuTagLimitException -> "TAG_LIMIT"
+                    is UpdateRejectedException -> error.code
                     else -> if (rateLimit(error) != null) "RATE_LIMITED" else "REQUEST_FAILED"
                 }
                 // Only the provider's numeric tag limit or retry delay is passed on as details.
@@ -1274,6 +1282,101 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Downloads the release APK at `url` (GitHub only, redirects included)
+     * into the share cache, checks that it is a newer build of this app signed
+     * with the same key, and opens the package installer with it. Reports
+     * progress like [download] when given an `id`.
+     */
+    private fun installUpdate(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url")
+        val host = try { URI(url ?: "").host } catch (_: Exception) { null }
+        if (!secureHttps(url) || host == null || !isUpdateHost(host)) {
+            result.error("INVALID_URL", "Updates come from GitHub releases only", null); return
+        }
+        val progressId = call.argument<Number>("id")?.toLong()
+        background(result, mediaExecutor) {
+            val directory = File(cacheDir, SharedMediaProvider.DIRECTORY).apply { mkdirs() }
+            val file = File(directory, UPDATE_FILE)
+            try {
+                val connection = openSecureConnection(url!!, allowHost = { isUpdateHost(it) })
+                val length = connection.contentLengthLong.takeIf { it > 0 }
+                downloadStream(connection).use { input ->
+                    if (length != null && length > MAX_UPDATE_BYTES) throw IOException("Update too large")
+                    file.outputStream().use { output ->
+                        val buffer = ByteArray(65536)
+                        var received = 0L
+                        var reported = -1L
+                        while (true) {
+                            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            received += count
+                            if (received > MAX_UPDATE_BYTES) throw IOException("Update too large")
+                            output.write(buffer, 0, count)
+                            val step = if (length != null) received * 100 / length else received / (512L * 1024L)
+                            if (progressId != null && step != reported) {
+                                reported = step
+                                reportProgress(progressId, received, length)
+                            }
+                        }
+                    }
+                }
+                checkUpdate(file)
+            } catch (error: Exception) {
+                file.delete()
+                throw error
+            }
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(SharedMediaProvider.uriFor(this, file.name), APK_MIME_TYPE)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            val opened = FutureTask { try { startActivity(intent); true } catch (_: Exception) { false } }
+            runOnUiThread(opened)
+            if (!opened.get()) throw UpdateRejectedException("UPDATE_INVALID", "No package installer")
+            null
+        }
+    }
+
+    /** Rejects an APK that is not a newer build of this app signed with the same key. */
+    private fun checkUpdate(file: File) {
+        @Suppress("DEPRECATION")
+        val archive = packageManager.getPackageArchiveInfo(file.path, signerFlags())
+            ?: throw UpdateRejectedException("UPDATE_INVALID", "Not an app package")
+        val installed = installedPackage()
+        if (archive.packageName != packageName) throw UpdateRejectedException("UPDATE_INVALID", "A different app")
+        if (versionCode(archive) <= versionCode(installed)) {
+            throw UpdateRejectedException("UPDATE_NOT_NEWER", "Not newer than the installed build")
+        }
+        // Some archives report no signers; the installer still compares keys then.
+        val incoming = signers(archive)
+        val current = signers(installed)
+        if (incoming.isNotEmpty() && current.isNotEmpty() && incoming.none(current::contains)) {
+            throw UpdateRejectedException("UPDATE_SIGNATURE", "Signed with a different key")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installedPackage(): PackageInfo = packageManager.getPackageInfo(packageName, signerFlags())
+
+    @Suppress("DEPRECATION")
+    private fun signerFlags(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+
+    @Suppress("DEPRECATION")
+    private fun versionCode(info: PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+
+    /** Signing certificates, including earlier ones the current key was rotated from. */
+    @Suppress("DEPRECATION")
+    private fun signers(info: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.let { if (it.hasMultipleSigners()) it.apkContentsSigners else it.signingCertificateHistory }
+        } else {
+            info.signatures
+        }
+        return signatures.orEmpty().map { it.toCharsString() }.toSet()
+    }
+
     private fun openSecureDownload(value: String): InputStream = downloadStream(openSecureConnection(value))
 
     private fun downloadStream(connection: HttpURLConnection): InputStream = try {
@@ -1282,15 +1385,20 @@ class MainActivity : FlutterActivity() {
         }
     } catch (error: Exception) { connection.disconnect(); throw error }
 
-    /** Follows up to six HTTPS-only redirects; returns a connected 2xx response. */
+    /**
+     * Follows up to six HTTPS-only redirects, each to a host [allowHost]
+     * accepts; returns a connected 2xx response.
+     */
     private fun openSecureConnection(
         value: String,
         method: String = "GET",
+        allowHost: (String) -> Boolean = { true },
         configure: (HttpURLConnection) -> Unit = {},
     ): HttpURLConnection {
         var current = URI(value)
         repeat(6) {
             if (!secureHttps(current.toString())) throw IOException("Insecure URL")
+            if (!allowHost(current.host)) throw IOException("Unexpected host")
             val connection = current.toURL().openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
@@ -1381,6 +1489,12 @@ class MainActivity : FlutterActivity() {
         private const val TAG_CACHE_LIMIT = 512
         private const val USER_AGENT = "BooruPlus/1.0 Android (imageboard browser)"
         private const val GELBOORU_REFERER = "https://gelbooru.com/"
+        // A downloaded update, served to the package installer by SharedMediaProvider.
+        private const val UPDATE_FILE = "booruplus-update.apk"
+        private const val MAX_UPDATE_BYTES = 300L * 1024L * 1024L
+        private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        // GitHub release downloads redirect to its asset storage.
+        private fun isUpdateHost(host: String): Boolean = host == "github.com" || host.endsWith(".githubusercontent.com")
         private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
@@ -1394,8 +1508,12 @@ internal fun mediaMimeType(name: String) = when (name.substringAfterLast('.', ""
     "avif" -> "image/avif"
     "mp4" -> "video/mp4"
     "webm" -> "video/webm"
+    "apk" -> "application/vnd.android.package-archive"
     else -> "application/octet-stream"
 }
+
+/** A downloaded update that must not be installed; [code] is sent to Dart. */
+internal class UpdateRejectedException(val code: String, message: String) : IOException(message)
 
 /** Danbooru/e621 pool records as `{id, name, postCount}`; names use spaces. */
 internal fun parsePools(body: String): List<Map<String, Any?>> {

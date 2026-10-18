@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:booruplus/core/app_state.dart';
 import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
+import 'package:booruplus/core/updates.dart';
 import 'package:booruplus/main.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
@@ -20,6 +21,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'core_test.dart' show FakeAccounts, MemoryStore, FakeRepo;
+
+/// Finds [release] without the network or the Android host.
+class _FakeUpdates extends UpdateService {
+  _FakeUpdates(this.release);
+  final AppRelease? release;
+  int checks = 0;
+
+  @override
+  Future<InstalledVersion?> installedVersion() async =>
+      const InstalledVersion(name: '1.0.0', build: 41);
+
+  @override
+  Future<AppRelease?> check() async {
+    checks++;
+    return release;
+  }
+}
 
 void main() {
   testWidgets('Sankaku sign-in sheet reports a refused password', (
@@ -165,6 +183,50 @@ void main() {
       state.dispose();
     },
   );
+
+  testWidgets('offers a newer release at launch unless the check is off', (
+    tester,
+  ) async {
+    const release = AppRelease(
+      tag: 'nightly',
+      title: 'Nightly',
+      version: '1.0.0',
+      build: 42,
+      apkUrl:
+          'https://github.com/owner/repo/releases/download/nightly/'
+          'booruplus-1.0.0-42-uncensored.apk',
+      pageUrl: 'https://github.com/owner/repo/releases/tag/nightly',
+    );
+    final updates = _FakeUpdates(release);
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    await tester.pumpWidget(BooruPlusApp(state: state, updates: updates));
+    await tester.pumpAndSettle();
+    expect(find.text('Update available'), findsOneWidget);
+    expect(find.textContaining('1.0.0 (build 42)'), findsOneWidget);
+    expect(find.text('You have 1.0.0 (build 41).'), findsOneWidget);
+    expect(find.text('Update'), findsOneWidget);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(find.text('Update available'), findsNothing);
+    expect(updates.checks, 1);
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+
+    final off = _FakeUpdates(release);
+    final quiet = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..settings = const AppSettings(checkUpdates: false),
+    );
+    await tester.pumpWidget(BooruPlusApp(state: quiet, updates: off));
+    await tester.pumpAndSettle();
+    expect(find.text('Update available'), findsNothing);
+    expect(off.checks, 0);
+    await tester.pumpWidget(const SizedBox());
+    quiet.dispose();
+  });
 
   testWidgets('space tokenizes tags, preserves partial input, X removes tag', (
     tester,

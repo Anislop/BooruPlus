@@ -446,6 +446,24 @@ class DownloadService {
     String? directory,
     DownloadProgress? onProgress,
   }) async {
+    final value = await reporting(
+      onProgress,
+      (id) => channel.invokeMethod<String>('download', {
+        'url': url,
+        'name': name,
+        'directory': directory,
+        'id': ?id,
+      }),
+    );
+    return value ?? '';
+  }
+
+  /// Runs a native [request] that sends `progress` calls with the id it is
+  /// given; they reach [onProgress]. The id is null without [onProgress].
+  Future<T> reporting<T>(
+    DownloadProgress? onProgress,
+    Future<T> Function(int? id) request,
+  ) async {
     int? id;
     if (onProgress != null) {
       _listen();
@@ -453,13 +471,7 @@ class DownloadService {
       _listeners[id] = onProgress;
     }
     try {
-      final value = await channel.invokeMethod<String>('download', {
-        'url': url,
-        'name': name,
-        'directory': directory,
-        'id': ?id,
-      });
-      return value ?? '';
+      return await request(id);
     } finally {
       _listeners.remove(id);
     }

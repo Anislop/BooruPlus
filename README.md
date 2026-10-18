@@ -21,7 +21,7 @@ Browse, search, save, and swipe through imageboards from a single, fast, ad-free
 ![Kotlin](https://img.shields.io/badge/Kotlin-bridge-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
 ![Websites](https://img.shields.io/badge/websites-18-F20B3D?style=for-the-badge)
 
-[Highlights](#-highlights) · [All features](#-all-features) · [Websites](#-supported-websites) · [Build](#-build-from-source) · [Privacy](#-privacy)
+[Highlights](#-highlights) · [All features](#-all-features) · [Websites](#-supported-websites) · [Install](#-install) · [Build](#-build-from-source) · [Privacy](#-privacy)
 
 </div>
 
@@ -234,6 +234,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Backup and restore | Export settings, favorites, and hidden posts to a file and restore them later. Credentials are never included. |
 | Cache | See how much space the cache uses and clear it. |
 | Website connections | Add API keys or sign in where a website needs it. Credentials stay in Android's encrypted storage. |
+| Updates | Checks GitHub releases at launch and offers the newest uncensored APK: **Update** installs it, **Not now** asks again next time. Turn the check off or check by hand in Settings. |
 
 </details>
 
@@ -272,6 +273,12 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 
 ---
 
+## 📦 Install
+
+Download `booruplus-<version>-<build>-uncensored.apk` from [Releases](https://github.com/Anislop/BooruPlus/releases) and open it on your phone. The `nightly` prerelease is the latest build of `main`. After that, BooruPlus offers newer releases by itself.
+
+---
+
 ## 🛠️ Build from source
 
 **You need:** the Flutter SDK (Dart 3.13 or newer), the Android SDK, and JDK 17. The app runs on Android 8.0 (API 26) and newer. iOS is not supported.
@@ -297,7 +304,7 @@ Live integration tests (`integration_test/`) need a real Android device with net
 
 ## Privacy
 
-- No accounts, analytics, or ads. The app talks only to the websites you choose.
+- No accounts, analytics, or ads. The app talks only to the websites you choose, and to GitHub to look for updates (you can turn that off in Settings).
 - booruShorts learns on your phone. Turn **Personalize For you** off, or use incognito, to stop it.
 - API keys and sign-in sessions live in Android's encrypted storage and are never written to backups. Sankaku passwords are exchanged for a session and not stored.
 - **We do not send or store anything about you to the websites and servers.** Check the source code to see.
