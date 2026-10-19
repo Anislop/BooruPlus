@@ -1496,6 +1496,41 @@ void main() {
     expect(repo.calls, greaterThanOrEqualTo(2));
   });
 
+  test('excluded and either-or tags reach the provider query', () async {
+    final repo = FakeRepo([[]]);
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.safebooru,
+    );
+    await state.initialize();
+    await state.updateSettings(const AppSettings(excludeAi: false));
+    await state.search(['-1girl', '~cat', '~dog', 'solo']);
+    expect(repo.queries.last.take(4), ['-1girl', '~cat', '~dog', 'solo']);
+  });
+
+  test('Gelbooru-syntax boards group either-or tags', () {
+    expect(
+      AppState.providerSyntax(Board.gelbooru, [
+        '-1girl',
+        '~cat',
+        'solo',
+        '~dog',
+      ]),
+      ['-1girl', '{cat ~ dog}', 'solo'],
+    );
+    expect(AppState.providerSyntax(Board.rule34, ['~cat', '~dog']), [
+      '( cat ~ dog )',
+    ]);
+    expect(AppState.providerSyntax(Board.tbib, ['~cat', 'solo']), [
+      'cat',
+      'solo',
+    ]);
+    expect(AppState.providerSyntax(Board.danbooru, ['~cat', '~dog']), [
+      '~cat',
+      '~dog',
+    ]);
+  });
+
   test('new search invalidates an older in-flight request', () async {
     final first = Completer<List<Map<String, dynamic>>>();
     final repo = _DelayedRepo(first);

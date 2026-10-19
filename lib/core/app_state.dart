@@ -1715,9 +1715,10 @@ class AppState extends ChangeNotifier {
   /// and blocked-tag exclusions within the website's tag budget.
   List<String> _queryTagsFor(
     Board? board,
-    List<String> tags, {
+    List<String> userTags, {
     bool signedIn = false,
   }) {
+    final tags = providerSyntax(board, userTags);
     final exclusions = [
       ..._settings.blacklistFor(board).map((tag) => '-$tag'),
       if (_excludesAiOn(board)) '-${_aiTagFor(board)}',
@@ -1768,6 +1769,37 @@ class AppState extends ChangeNotifier {
         'rating:${board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
       ...exclusions,
     ];
+  }
+
+  /// The user's [tags] in [board]'s search syntax. `-tag` excludes on every
+  /// website. Danbooru-style boards take `~a ~b` (either tag) as typed;
+  /// Gelbooru 0.2 boards need it grouped: `{a ~ b}`, or `( a ~ b )` on
+  /// Rule34. A lone `~tag` is a plain required tag there.
+  @visibleForTesting
+  static List<String> providerSyntax(Board? board, List<String> tags) {
+    if (board?.usesGelbooruSyntax != true) return tags;
+    final either = [
+      for (final tag in tags)
+        if (tag.startsWith('~') && tag.length > 1) tag.substring(1),
+    ];
+    if (either.isEmpty) return tags;
+    final group = either.length == 1
+        ? either.single
+        : board == Board.rule34
+        ? '( ${either.join(' ~ ')} )'
+        : '{${either.join(' ~ ')}}';
+    // The group takes the place of the first `~` tag.
+    final result = <String>[];
+    var placed = false;
+    for (final tag in tags) {
+      if (!tag.startsWith('~')) {
+        result.add(tag);
+      } else if (!placed) {
+        result.add(group);
+        placed = true;
+      }
+    }
+    return result;
   }
 
   Rating? _singleProviderRatingFor(Board? board) =>
