@@ -557,7 +557,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state.board != board) return;
     final tag = result.tag;
     bool sameTag(String value) {
-      final bare = value.startsWith('-') ? value.substring(1) : value;
+      final bare = value.substring(searchPrefix(value).length);
       return bare.toLowerCase() == tag.toLowerCase();
     }
 

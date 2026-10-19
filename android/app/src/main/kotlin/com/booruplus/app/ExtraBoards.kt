@@ -277,15 +277,18 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
         if (cancelled()) throw IOException("Cancelled")
         val popular = tags.any { it.equals("order:popular", ignoreCase = true) }
         val terms = tags.filterNot { it.contains(':') }.map { it.lowercase() }
-        val required = terms.filterNot { it.startsWith("-") }.distinct()
         val excluded = terms.filter { it.startsWith("-") }.map { it.substring(1) }.filter { it.isNotEmpty() }.toSet()
+        // `~a ~b`: a post needs at least one of them. A lone `~a` is required.
+        val either = terms.filter { it.startsWith("~") }.map { it.substring(1) }.filter { it.isNotEmpty() }.toSet()
+        val anyOf = if (either.size > 1) either else emptySet()
+        val required = (terms.filterNot { it.startsWith("-") || it.startsWith("~") } + either.filter { anyOf.isEmpty() }).distinct()
         // Read the smallest required tag's index; check the rest per post.
         val source = required.map { indexPath(it, popular) }
             .minByOrNull { total(it) } ?: indexPath(null, popular)
         val total = total(source)
         if (total <= 0) return emptyList()
         val others = required.filter { indexPath(it, popular) != source }.toSet()
-        val filtering = others.isNotEmpty() || excluded.isNotEmpty()
+        val filtering = others.isNotEmpty() || excluded.isNotEmpty() || anyOf.isNotEmpty()
         if (page == 0) positions.keys.filter { it.startsWith(cursorKey) }.forEach { positions.remove(it) }
         if (positions.size > 256) positions.keys.take(128).forEach { positions.remove(it) }
         val key = "$cursorKey\u0003$page"
@@ -313,6 +316,7 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
                 @Suppress("UNCHECKED_CAST")
                 val postTags = (post["tags"] as List<String>).map { it.lowercase() }.toSet()
                 if (!postTags.containsAll(others) || excluded.any { it in postTags }) continue
+                if (anyOf.isNotEmpty() && anyOf.none { it in postTags }) continue
                 result.add(post)
                 // The next page resumes right after this post and reads the
                 // rest of the chunk again.

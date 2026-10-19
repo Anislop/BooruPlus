@@ -195,6 +195,9 @@ internal class EShuushuuApi(private val client: OkHttpClient, private val userAg
         }
         val included = ArrayList<Long>()
         val excluded = ArrayList<Long>()
+        // `~a ~b`: posts with either tag. Unknown names cannot match.
+        val either = LinkedHashMap<Long, String>()
+        var eitherTerms = 0
         var sort = "image_id" to "DESC"
         var from: String? = null
         var exclusionLookups = 0
@@ -210,8 +213,12 @@ internal class EShuushuuApi(private val client: OkHttpClient, private val userAg
                 "order:id_asc", "order:id" -> { sort = "image_id" to "ASC"; continue }
             }
             // Other metatags have no equivalent; titles may hold colons ("re:zero").
-            if (tag.removePrefix("-").substringBefore(':', "") in METATAGS) continue
-            if (tag.startsWith("-")) {
+            if (tag.removePrefix("-").removePrefix("~").substringBefore(':', "") in METATAGS) continue
+            if (tag.startsWith("~")) {
+                if (tag.length < 2) continue
+                eitherTerms++
+                tagId(tag.substring(1), cancelled)?.let { either[it] = tag.substring(1) }
+            } else if (tag.startsWith("-")) {
                 // Bounded: a long blocklist would otherwise cost one lookup per tag.
                 if (tag.length < 2 || exclusionLookups++ >= MAX_EXCLUSION_LOOKUPS) continue
                 tagId(tag.substring(1), cancelled)?.let(excluded::add)
@@ -219,6 +226,12 @@ internal class EShuushuuApi(private val client: OkHttpClient, private val userAg
                 included += tagId(tag, cancelled) ?: return emptyList()
             }
         }
+        if (eitherTerms > 0 && either.isEmpty()) return emptyList()
+        // One `~` tag is simply required. Several are sent as an any-match
+        // search on their own, or checked per post next to required tags.
+        if (either.size == 1) included += either.keys.first()
+        val anyOf = if (included.isEmpty() && either.size > 1) either.keys.toList() else emptyList()
+        val anyNames = if (included.isNotEmpty() && either.size > 1) either.values.toSet() else emptySet()
         val since = from
         val start = page + discoveryOffset(random, tags, seed)
         fun read(first: Int): List<Map<String, Any?>> = pagedWindow(first, limit, MAX_PAGE_SIZE, cancelled) { index, size ->
@@ -230,6 +243,9 @@ internal class EShuushuuApi(private val client: OkHttpClient, private val userAg
                     if (included.isNotEmpty()) {
                         addQueryParameter("tags", included.joinToString(","))
                         addQueryParameter("tags_mode", "all")
+                    } else if (anyOf.isNotEmpty()) {
+                        addQueryParameter("tags", anyOf.joinToString(","))
+                        addQueryParameter("tags_mode", "any")
                     }
                     if (excluded.isNotEmpty()) addQueryParameter("exclude_tags", excluded.joinToString(","))
                     since?.let { addQueryParameter("date_from", it) }
@@ -238,7 +254,10 @@ internal class EShuushuuApi(private val client: OkHttpClient, private val userAg
             images(client.getBody(url, userAgent))
         }
         val posts = read(start)
-        val result = if (posts.isEmpty() && start != page) read(page) else posts
+        val unfiltered = if (posts.isEmpty() && start != page) read(page) else posts
+        @Suppress("UNCHECKED_CAST")
+        val result = if (anyNames.isEmpty()) unfiltered
+        else unfiltered.filter { post -> (post["tags"] as List<String>).any { it in anyNames } }
         return if (random) result.shuffled(Random(seed xor page)) else result
     }
 

@@ -85,14 +85,16 @@ class TagInputState extends State<TagInput> {
   void _onTextChanged() {
     widget.onDraftChanged?.call(_controller.text);
     _debounce?.cancel();
-    final query = _currentDraft;
+    // `-tag` and `~tag` suggest the bare tag; the prefix is kept on select.
+    final draft = _currentDraft;
+    final query = draft.substring(searchPrefix(draft).length);
     if (widget.autocomplete == null || query.length < 2) {
       if (_suggestions.isNotEmpty) setState(() => _suggestions = const []);
       return;
     }
     _debounce = Timer(const Duration(milliseconds: 260), () async {
       final result = await widget.autocomplete!(query);
-      if (mounted && _currentDraft == query) {
+      if (mounted && _currentDraft == draft) {
         setState(() => _suggestions = result);
       }
     });
@@ -109,7 +111,8 @@ class TagInputState extends State<TagInput> {
     final text = _controller.text;
     final draft = RegExp(r'\S*$').firstMatch(text);
     final start = draft?.start ?? text.length;
-    final replacement = '${text.substring(0, start)}${suggestion.name} ';
+    final prefix = searchPrefix(draft?.group(0) ?? '');
+    final replacement = '${text.substring(0, start)}$prefix${suggestion.name} ';
     _controller.value = TextEditingValue(
       text: replacement,
       selection: TextSelection.collapsed(offset: replacement.length),
@@ -127,7 +130,8 @@ class TagInputState extends State<TagInput> {
     final remainder = all ? '' : parts.removeLast();
     final tokens = {
       ...widget.tags,
-      ...parts.where((t) => t.isNotEmpty),
+      // A bare `-` or `~` is not a tag yet.
+      ...parts.where((t) => t.isNotEmpty && searchPrefix(t) != t),
     }.toList();
     _controller.value = TextEditingValue(
       text: remainder,
@@ -146,10 +150,10 @@ class TagInputState extends State<TagInput> {
     super.dispose();
   }
 
-  /// Counts are shown for plain included tags only.
+  /// Counts are shown for included tags only, `~` (either) tags included.
   int? _chipCount(String tag) {
     if (tag.startsWith('-') || tag.contains(':')) return null;
-    return widget.postCount?.call(tag);
+    return widget.postCount?.call(tag.substring(searchPrefix(tag).length));
   }
 
   void _submit() {
@@ -189,9 +193,13 @@ class TagInputState extends State<TagInput> {
         children: [
           for (final tag in widget.tags)
             InputChip(
+              avatar: searchPrefix(tag).isEmpty ? null : _PrefixBadge(tag),
+              labelPadding: searchPrefix(tag).isEmpty
+                  ? null
+                  : const EdgeInsets.only(left: 4, right: 4),
               label: Text.rich(
                 TextSpan(
-                  text: tag,
+                  text: tag.substring(searchPrefix(tag).length),
                   children: [
                     if (_chipCount(tag) case final count?)
                       TextSpan(
@@ -345,3 +353,44 @@ Color _categoryColor(TagCategory category) => switch (category) {
   TagCategory.lore => tagTone(const Color(0xFFC1A7FF)),
   _ => ink(.70),
 };
+
+/// The search operator leading [tag]: `-` (exclude) or `~` (either of the
+/// `~` tags), or '' for a plain tag. A lone operator is returned whole.
+String searchPrefix(String tag) =>
+    tag.startsWith('-') || tag.startsWith('~') ? tag[0] : '';
+
+/// A chip's `-` or `~`, set apart in a tinted box of its own: red for an
+/// excluded tag, blue for an either-or tag.
+class _PrefixBadge extends StatelessWidget {
+  const _PrefixBadge(this.tag);
+  final String tag;
+
+  @override
+  Widget build(BuildContext context) {
+    final excluded = searchPrefix(tag) == '-';
+    final color = tagTone(
+      excluded ? Colors.redAccent : const Color(0xFF81D4FA),
+    );
+    return Semantics(
+      label: excluded ? 'Excluded' : 'Either',
+      excludeSemantics: true,
+      child: Container(
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .18),
+          border: Border.all(color: color.withValues(alpha: .5)),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          excluded ? '\u2212' : '~',
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w700,
+            fontSize: 14,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -525,6 +525,72 @@ void main() {
     },
   );
 
+  testWidgets(
+    'excluded and either-or drafts suggest the bare tag and keep the prefix',
+    (tester) async {
+      var tags = <String>[];
+      final queries = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: appTheme,
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => TagInput(
+                tags: tags,
+                onChanged: (value) => setState(() => tags = value),
+                autocomplete: (query) async {
+                  queries.add(query);
+                  return const [
+                    TagSuggestion(
+                      name: 'frieren',
+                      category: TagCategory.character,
+                    ),
+                  ];
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), '-frie');
+      await tester.pump(const Duration(milliseconds: 280));
+      await tester.pump();
+      expect(queries, ['frie']);
+      await tester.tap(find.text('frieren'));
+      await tester.pump();
+      expect(tags, ['-frieren']);
+
+      await tester.enterText(find.byType(TextField), '~frie');
+      await tester.pump(const Duration(milliseconds: 280));
+      await tester.pump();
+      await tester.tap(find.text('frieren').last);
+      await tester.pump();
+      expect(tags, ['-frieren', '~frieren']);
+
+      // The operator sits in its own box inside the chip, apart from the
+      // tag's name; a bare operator is not committed.
+      expect(find.byType(InputChip), findsNWidgets(2));
+      expect(
+        find.descendant(
+          of: find.byType(InputChip).first,
+          matching: find.text('\u2212'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(InputChip).last,
+          matching: find.text('~'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('frieren', findRichText: true), findsNWidgets(2));
+      await tester.enterText(find.byType(TextField), '~ ');
+      await tester.pump();
+      expect(tags, ['-frieren', '~frieren']);
+    },
+  );
+
   testWidgets('result tiles render typed tags with their category color', (
     tester,
   ) async {
