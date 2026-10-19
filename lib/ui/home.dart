@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:video_player/video_player.dart';
@@ -21,8 +22,12 @@ import 'tag_input.dart';
 import 'theme.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.state});
+  const HomeScreen({super.key, required this.state, this.locked});
   final AppState state;
+
+  /// Whether the app lock hides the app; launcher shortcuts wait until it
+  /// opens.
+  final ValueListenable<bool>? locked;
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -89,19 +94,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     });
     widget.state.addListener(_showNotice);
+    widget.locked?.addListener(_openPendingShortcut);
     _shortcutSubscription = _device.shortcuts.listen((shortcut) {
       // Clears the native copy kept for a cold start, so it is not reopened.
       _device.takeShortcut();
-      _openShortcut(shortcut);
+      _receiveShortcut(shortcut);
     });
     _device.takeShortcut().then((shortcut) {
-      if (shortcut != null) _openShortcut(shortcut);
+      if (shortcut != null) _receiveShortcut(shortcut);
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.locked?.removeListener(_openPendingShortcut);
     _shortcutSubscription?.cancel();
     widget.state.removeListener(_showNotice);
     _scroll.dispose();
@@ -117,12 +124,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (open != _keyboardOpen) setState(() => _keyboardOpen = open);
   }
 
+  /// A launcher shortcut, kept until the app lock opens. Any app can start
+  /// this activity with shortcut extras, so nothing runs behind the lock.
+  AppShortcut? _pendingShortcut;
+
+  void _receiveShortcut(AppShortcut shortcut) {
+    _pendingShortcut = shortcut;
+    _openPendingShortcut();
+  }
+
+  void _openPendingShortcut() {
+    final shortcut = _pendingShortcut;
+    if (shortcut == null || widget.locked?.value == true) return;
+    _pendingShortcut = null;
+    _openShortcut(shortcut);
+  }
+
   /// Opens favorites or runs the saved search a launcher shortcut names.
+  /// Searches run only when they are one of the website's saved searches,
+  /// which the shortcuts are made from.
   Future<void> _openShortcut(AppShortcut shortcut) async {
     if (!mounted) return;
     final state = widget.state;
     final board = shortcut.board;
     if (board?.isRetired == true) return;
+    if (board != null) {
+      final query = shortcut.tags.join(' ');
+      final saved = state.settings
+          .savedQueriesFor(board)
+          .any((tags) => tags.join(' ') == query);
+      if (!saved) return;
+    }
     if (board == null) {
       Navigator.of(context).popUntil((route) => route.isFirst);
       Navigator.push(
@@ -2051,10 +2083,9 @@ class _MediaTileState extends State<MediaTile> {
             ),
             progressBuilder: (value) => TileProgress(value: value),
           )
-        : Image.network(
-            url,
+        : Image(
+            image: boundedImage(NetworkImage(url), width: 480),
             fit: BoxFit.cover,
-            cacheWidth: 480,
             loadingBuilder: (context, child, progress) => progress == null
                 ? child
                 : TileProgress(
@@ -2678,10 +2709,12 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
                   errorWidget: const SizedBox.shrink(),
                   loadingWidget: const SizedBox.shrink(),
                 )
-              : Image.network(
-                  post.previewUrl,
+              : Image(
+                  image: boundedImage(
+                    NetworkImage(post.previewUrl),
+                    width: 480,
+                  ),
                   fit: BoxFit.contain,
-                  cacheWidth: 480,
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
                 )
         : null;
@@ -2700,10 +2733,12 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
                 ? broken
                 : const SizedBox.shrink(),
           )
-        : Image.network(
-            mediaUrl,
+        : Image(
+            image: boundedImage(
+              NetworkImage(mediaUrl),
+              width: post.isVideo ? 480 : cacheWidth,
+            ),
             fit: BoxFit.contain,
-            cacheWidth: post.isVideo ? 480 : cacheWidth,
             errorBuilder: (_, _, _) =>
                 placeholder == null ? broken : const SizedBox.shrink(),
           );

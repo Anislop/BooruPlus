@@ -16,6 +16,7 @@ import 'package:booruplus/ui/tag_input.dart';
 import 'package:booruplus/ui/theme.dart';
 import 'package:booruplus/ui/settings.dart';
 import 'package:booruplus/ui/shorts.dart';
+import 'package:booruplus/ui/update_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1896,6 +1897,151 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     state.dispose();
   });
+
+  testWidgets('a launcher shortcut waits for the app lock and a saved search', (
+    tester,
+  ) async {
+    const channel = MethodChannel('booruplus/platform');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    var verified = false;
+    final shortcuts = <Map<String, String>>[];
+    messenger.setMockMethodCallHandler(
+      channel,
+      (call) async => switch (call.method) {
+        'authenticate' => verified,
+        'takeShortcut' => shortcuts.isEmpty ? null : shortcuts.removeAt(0),
+        _ => null,
+      },
+    );
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    Future<FakeRepo> launch(AppSettings settings) async {
+      final repo = FakeRepo(const [[]]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()
+          ..selected = Board.safebooru
+          ..settings = settings,
+      );
+      addTearDown(state.dispose);
+      await tester.pumpWidget(BooruPlusApp(state: state));
+      await tester.pumpAndSettle();
+      return repo;
+    }
+
+    bool searched(FakeRepo repo, String tag) =>
+        repo.queries.any((tags) => tags.contains(tag));
+
+    shortcuts.add({'kind': 'search', 'board': 'safebooru', 'tags': 'cat'});
+    final locked = await launch(
+      const AppSettings(
+        appLock: true,
+        boardSavedQueries: {
+          Board.safebooru: [
+            ['cat'],
+          ],
+        },
+      ),
+    );
+    expect(find.text('BooruPlus is locked'), findsOneWidget);
+    expect(searched(locked, 'cat'), isFalse);
+    verified = true;
+    await tester.tap(find.text('Unlock'));
+    await tester.pumpAndSettle();
+    expect(find.text('BooruPlus is locked'), findsNothing);
+    expect(searched(locked, 'cat'), isTrue);
+    await tester.pumpWidget(const SizedBox());
+
+    // Another app can start the activity with any search; only saved ones run.
+    shortcuts.add({'kind': 'search', 'board': 'safebooru', 'tags': 'dog'});
+    final open = await launch(const AppSettings());
+    expect(searched(open, 'dog'), isFalse);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a release signed with another key is not offered by hand', (
+    tester,
+  ) async {
+    const release = AppRelease(
+      tag: 'nightly',
+      title: 'Nightly',
+      version: '1.0.0',
+      build: 42,
+      apkUrl:
+          'https://github.com/owner/repo/releases/download/nightly/'
+          'booruplus-1.0.0-42-uncensored.apk',
+      pageUrl: 'https://github.com/owner/repo/releases/tag/nightly',
+      notes: 'Fixes',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: Scaffold(
+          body: UpdateDialog(updates: _RefusedUpdates(), release: release),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Update'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('cannot be verified'), findsOneWidget);
+    expect(find.text('Open release'), findsNothing);
+    expect(find.text('Try again'), findsNothing);
+    expect(find.text('Not now'), findsOneWidget);
+  });
+
+  testWidgets('media images decode within a bound when none is given', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Column(
+          children: [
+            SizedBox(
+              width: 100,
+              height: 100,
+              child: MediaImage(
+                url: 'https://x/poster.jpg',
+                board: Board.safebooru,
+              ),
+            ),
+            SizedBox(
+              width: 100,
+              height: 100,
+              child: MediaImage(
+                url: 'https://x/tile.jpg',
+                board: Board.safebooru,
+                cacheWidth: 480,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(
+      [
+        for (final image in tester.widgetList<Image>(find.byType(Image)))
+          switch (image.image) {
+            ResizeImage(:final width, :final height, :final policy) => (
+              width,
+              height,
+              policy,
+            ),
+            _ => null,
+          },
+      ],
+      [
+        (maxDecodeSide, maxDecodeSide, ResizeImagePolicy.fit),
+        (480, maxDecodeSide, ResizeImagePolicy.fit),
+      ],
+    );
+  });
+}
+
+/// Refuses every update the way a release signed with another key is.
+class _RefusedUpdates extends UpdateService {
+  @override
+  Future<void> install(AppRelease release, {DownloadProgress? onProgress}) =>
+      Future.error(const UpdateException(UpdateFailure.signature));
 }
 
 /// Network URLs of every rendered [Image], unwrapping decode-size wrappers.

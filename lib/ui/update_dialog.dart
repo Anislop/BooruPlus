@@ -17,11 +17,7 @@ Future<void> showUpdateDialog(
 );
 
 class UpdateDialog extends StatefulWidget {
-  const UpdateDialog({
-    super.key,
-    required this.updates,
-    required this.release,
-  });
+  const UpdateDialog({super.key, required this.updates, required this.release});
   final UpdateService updates;
   final AppRelease release;
 
@@ -149,7 +145,9 @@ class _UpdateDialogState extends State<UpdateDialog> {
               onPressed: _downloading ? null : _update,
               child: Text(error == null ? 'Update' : 'Try again'),
             )
-          else
+          // A release signed with another key cannot be trusted, so the
+          // dialog does not send the user to download it by hand.
+          else if (error.failure != UpdateFailure.signature)
             FilledButton(
               onPressed: _openReleasePage,
               child: const Text('Open release'),

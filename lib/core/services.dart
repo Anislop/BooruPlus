@@ -631,8 +631,9 @@ class DeviceService {
   }
 
   /// Shows the device's biometric or screen-lock prompt. Returns false when
-  /// the prompt is dismissed; throws [DeviceLockUnavailableException] when
-  /// the device has no screen lock.
+  /// the prompt is dismissed or cannot start; throws
+  /// [DeviceLockUnavailableException] only when the device has no screen
+  /// lock.
   Future<bool> authenticate({String title = 'Unlock BooruPlus'}) async {
     _authenticating = true;
     try {

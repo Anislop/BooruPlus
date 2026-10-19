@@ -10,10 +10,12 @@ import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import java.io.File
 import java.io.FileNotFoundException
+import java.util.UUID
 
 /**
  * Serves media saved for the share sheet, and a downloaded update for the
  * package installer, from the app's private `cache/shared` folder, read-only.
+ * Each file sits in its own randomly named folder, which is part of its URI.
  * It is not exported: receiving apps read a file only through the temporary
  * grant on the intent.
  */
@@ -21,12 +23,15 @@ class SharedMediaProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
 
     private fun fileFor(uri: Uri): File? {
-        val name = uri.lastPathSegment ?: return null
-        if (uri.pathSegments.size != 1 || name.startsWith(".")) return null
+        val segments = uri.pathSegments
+        if (segments.size != 2) return null
+        val (token, name) = segments
+        if (!TOKEN.matches(token) || name.isEmpty() || name.startsWith(".") ||
+            name.contains('/') || name.contains('\\')) return null
         val context = context ?: return null
-        val directory = File(context.cacheDir, DIRECTORY).canonicalFile
-        val file = File(directory, name).canonicalFile
-        return if (file.parentFile == directory && file.isFile) file else null
+        val folder = File(File(context.cacheDir, DIRECTORY).canonicalFile, token)
+        val file = File(folder, name).canonicalFile
+        return if (file.parentFile == folder && file.isFile) file else null
     }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
@@ -65,11 +70,17 @@ class SharedMediaProvider : ContentProvider() {
 
     companion object {
         const val DIRECTORY = "shared"
+        private val TOKEN = Regex("^[0-9a-f]{32}$")
 
-        fun uriFor(context: Context, name: String): Uri = Uri.Builder()
+        /** A random folder name for one shared file. */
+        fun newToken(): String = UUID.randomUUID().toString().replace("-", "")
+
+        /** The URI of [file], kept in a [newToken] folder of [DIRECTORY]. */
+        fun uriFor(context: Context, file: File): Uri = Uri.Builder()
             .scheme("content")
             .authority("${context.packageName}.shared")
-            .appendPath(name)
+            .appendPath(file.parentFile?.name.orEmpty())
+            .appendPath(file.name)
             .build()
     }
 }

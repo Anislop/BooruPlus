@@ -127,9 +127,11 @@ class UpdateException implements Exception {
 
   String get message => switch (failure) {
     UpdateFailure.signature =>
-      'This update is signed with a different key than the installed app, '
-          'so Android cannot install it over this one. Export a backup, '
-          'uninstall BooruPlus, then install the update from the release page.',
+      'This update is not signed with the same key as the installed app, so '
+          'it cannot be verified as a genuine BooruPlus release and was not '
+          'installed. Keep this version, and do not uninstall BooruPlus to '
+          'install it. Confirm the release with the developer through a '
+          'channel you already trust.',
     UpdateFailure.notNewer =>
       'This update is not newer than the installed app.',
     UpdateFailure.invalid => 'The downloaded file is not a BooruPlus update.',
