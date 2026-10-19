@@ -762,12 +762,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             children: [
                               _blurSwitch(
                                 'Blur explicit media',
-                                'Obscure explicit previews and viewer media until revealed.',
+                                'Obscure explicit previews, viewer media, and booruShorts videos until revealed.',
                                 true,
                               ),
                               _blurSwitch(
                                 'Blur questionable media',
-                                'Obscure questionable previews and viewer media until revealed.',
+                                'Obscure questionable previews, viewer media, and booruShorts videos until revealed.',
                                 false,
                               ),
                               ListTile(
@@ -1306,6 +1306,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ],
                               ),
                             ],
+                          ),
+                        ),
+                      ),
+                      _choiceCard<ShortsContent>(
+                        icon: Icons.shield_outlined,
+                        title: 'Content',
+                        subtitle: switch (_settings.shortsContent) {
+                          ShortsContent.all => 'booruShorts shows every rating your feed filter allows.',
+                          ShortsContent.noExplicit => 'Leaves explicit videos out of booruShorts, and websites without ratings.',
+                          ShortsContent.safeOnly => 'Leaves explicit and suggestive (questionable) videos out of booruShorts, and websites without ratings.',
+                        },
+                        values: ShortsContent.values,
+                        label: (value) => value.label,
+                        selected: _settings.shortsContent,
+                        onChanged: (value) => setState(
+                          () => _settings = _settings.copyWith(
+                            shortsContent: value,
                           ),
                         ),
                       ),

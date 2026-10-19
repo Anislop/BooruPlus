@@ -1677,6 +1677,58 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('booruShorts blurs explicit videos until revealed and sets '
+      'its content filter from the gear', (tester) async {
+    final repo = FakeRepo([
+      [
+        {
+          'id': 1,
+          'url': 'https://x/1.mp4',
+          'previewUrl': 'https://x/1.jpg',
+          'tags': 'cat',
+          'rating': 'explicit',
+        },
+      ],
+    ]);
+    final store = MemoryStore()
+      ..settings = const AppSettings(blurExplicit: true);
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: ShortsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byKey(const ValueKey('shorts_blurred_poster')), findsOneWidget);
+    await tester.tap(find.text('Reveal'));
+    // The page's double-tap gesture holds single taps for a moment.
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byKey(const ValueKey('shorts_blurred_poster')), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('shorts_tags')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Safe only'));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('shorts_tags_done')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(store.settings.shortsContent, ShortsContent.safeOnly);
+    // The feed starts over without the explicit video.
+    expect(find.byKey(const ValueKey('shorts_blurred_poster')), findsNothing);
+    expect(state.settings.shortsContent, ShortsContent.safeOnly);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('booruShorts learns from Like and Not for me, and the '
       'Following tab asks for followed tags', (tester) async {
     final repo = FakeRepo([

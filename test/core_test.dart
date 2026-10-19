@@ -1924,6 +1924,45 @@ void main() {
       feed.dispose();
     });
 
+    test('the Shorts content setting drops explicit, questionable, and '
+        'unrated videos', () async {
+      final repo = _ShortsRepo({
+        (Board.danbooru, null): [
+          _video(1),
+          _video(2, rating: 'q'),
+          _video(3, rating: 'explicit'),
+        ],
+        (Board.nozomi, null): [_video(4, rating: '')],
+      });
+      Future<List<String>> shown(ShortsContent content) async {
+        final store = MemoryStore()
+          ..settings = AppSettings(shortsContent: content);
+        final state = AppState(repository: repo, store: store);
+        await state.initialize();
+        final feed = state.shortsFeed();
+        await feed.start(
+          tags: const [],
+          boards: [Board.danbooru, Board.nozomi],
+        );
+        final posts = [
+          for (final saved in feed.posts)
+            '${saved.board.name}:${saved.post.id}',
+        ];
+        feed.dispose();
+        return posts;
+      }
+
+      expect(
+        await shown(ShortsContent.all),
+        unorderedEquals(['danbooru:1', 'danbooru:2', 'danbooru:3', 'nozomi:4']),
+      );
+      expect(
+        await shown(ShortsContent.noExplicit),
+        unorderedEquals(['danbooru:1', 'danbooru:2']),
+      );
+      expect(await shown(ShortsContent.safeOnly), ['danbooru:1']);
+    });
+
     test('without tags every video is asked for', () async {
       final repo = _ShortsRepo({
         (Board.sankaku, null): [_video(7)],
@@ -2016,7 +2055,9 @@ void main() {
       await state.setShortsTags(['Cat']);
       await state.setShortsMuted(true);
       await state.setShortsOff([Board.nozomi]);
+      await state.setShortsContent(ShortsContent.noExplicit);
       expect(repo.calls, calls);
+      expect(store.settings.shortsContent, ShortsContent.noExplicit);
       expect(store.settings.shortsTags, ['cat']);
       expect(store.settings.shortsMuted, isTrue);
       expect(store.settings.shortsOff, [Board.nozomi]);
@@ -2026,6 +2067,7 @@ void main() {
       final settings = const AppSettings().copyWith(
         shortsPersonalized: false,
         shortsExploration: ShortsExploration.high,
+        shortsContent: ShortsContent.safeOnly,
         shortsFollowing: [' Artist_A ', 'artist_a', 'b'],
         shortsAutoScrollSeconds: 30,
         shortsPictureInPicture: false,
@@ -2042,6 +2084,11 @@ void main() {
       final legacy = AppSettings.decode('{"blacklist": ["a"]}');
       expect(legacy.shortsPersonalized, isTrue);
       expect(legacy.shortsExploration, ShortsExploration.normal);
+      expect(legacy.shortsContent, ShortsContent.all);
+      expect(
+        AppSettings.decode('{"shortsContent": "unknown"}').shortsContent,
+        ShortsContent.all,
+      );
       expect(legacy.shortsFollowing, isEmpty);
       expect(legacy.shortsAutoScrollSeconds, 0);
       expect(legacy.shortsPictureInPicture, isTrue);
@@ -2579,11 +2626,16 @@ class _FailingBoardStore extends MemoryStore {
       Future.error(StateError('board write failed'));
 }
 
-Map<String, dynamic> _video(int id, {String md5 = '', String tags = 'cat'}) => {
+Map<String, dynamic> _video(
+  int id, {
+  String md5 = '',
+  String tags = 'cat',
+  String rating = 'general',
+}) => {
   'id': id,
   'url': 'https://x/$id.mp4',
   'tags': tags,
-  'rating': 'general',
+  'rating': rating,
   'md5': md5,
 };
 

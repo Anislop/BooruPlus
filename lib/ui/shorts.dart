@@ -923,12 +923,15 @@ class _ShortsScreenState extends State<ShortsScreen>
     }
   }
 
-  /// The gear sheet: the tags Shorts searches, editable in place. Saved
-  /// and applied when the sheet closes, however it is closed.
+  /// The gear sheet: the tags Shorts searches and the ratings it keeps,
+  /// editable in place. Saved and applied when the sheet closes, however
+  /// it is closed.
   Future<void> _editTags() async {
     final following = _mode == ShortsMode.following;
     final before = following ? _settings.shortsFollowing : _settings.shortsTags;
+    final contentBefore = _settings.shortsContent;
     var tags = before;
+    var content = contentBefore;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -941,13 +944,21 @@ class _ShortsScreenState extends State<ShortsScreen>
             : 'Shows videos with any of these tags. Leave it empty for every video.',
         autocomplete: widget.state.autocomplete,
         onChanged: (value) => tags = value,
+        content: contentBefore,
+        onContentChanged: (value) => content = value,
       ),
     );
-    if (!mounted || listEquals(tags, before)) return;
-    if (following) {
-      await widget.state.setShortsFollowing(tags);
-    } else {
-      await widget.state.setShortsTags(tags);
+    final tagsChanged = !listEquals(tags, before);
+    if (!mounted || (!tagsChanged && content == contentBefore)) return;
+    if (content != contentBefore) {
+      await widget.state.setShortsContent(content);
+    }
+    if (tagsChanged) {
+      if (following) {
+        await widget.state.setShortsFollowing(tags);
+      } else {
+        await widget.state.setShortsTags(tags);
+      }
     }
     if (!mounted) return;
     setState(() {
@@ -1651,9 +1662,27 @@ class _ShortsPageState extends State<_ShortsPage> {
 
   Widget _media(VideoPlayerController? controller) {
     if (widget.blurred) {
+      // Like the viewer: the poster stays recognizable as a shape only,
+      // and the video waits until it is revealed.
       return Stack(
         alignment: Alignment.center,
         children: [
+          if (_preview.isNotEmpty)
+            Positioned.fill(
+              key: const ValueKey('shorts_blurred_poster'),
+              child: ClipRect(
+                child: ImageFiltered(
+                  imageFilter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+                  child: MediaImage(
+                    url: _preview,
+                    board: _board,
+                    fit: BoxFit.contain,
+                    maxDimension: 320,
+                    errorWidget: const SizedBox.shrink(),
+                  ),
+                ),
+              ),
+            ),
           const Icon(
             Icons.visibility_off_outlined,
             size: 42,
@@ -2362,9 +2391,9 @@ class _ShortsDetails extends StatelessWidget {
   }
 }
 
-/// The gear sheet: the tags booruShorts searches. Reports every edit,
-/// including a tag still being typed, so closing the sheet any way keeps
-/// it.
+/// The gear sheet: the tags booruShorts searches and the ratings it
+/// keeps. Reports every edit, including a tag still being typed, so
+/// closing the sheet any way keeps it.
 class _ShortsTagsSheet extends StatefulWidget {
   const _ShortsTagsSheet({
     required this.tags,
@@ -2372,11 +2401,15 @@ class _ShortsTagsSheet extends StatefulWidget {
     required this.description,
     required this.autocomplete,
     required this.onChanged,
+    required this.content,
+    required this.onContentChanged,
   });
   final List<String> tags;
   final String title, description;
   final Future<List<TagSuggestion>> Function(String query) autocomplete;
   final ValueChanged<List<String>> onChanged;
+  final ShortsContent content;
+  final ValueChanged<ShortsContent> onContentChanged;
 
   @override
   State<_ShortsTagsSheet> createState() => _ShortsTagsSheetState();
@@ -2384,6 +2417,7 @@ class _ShortsTagsSheet extends StatefulWidget {
 
 class _ShortsTagsSheetState extends State<_ShortsTagsSheet> {
   late List<String> _tags = List.of(widget.tags);
+  late ShortsContent _content = widget.content;
   String _draft = '';
 
   List<String> get _result {
@@ -2426,6 +2460,25 @@ class _ShortsTagsSheetState extends State<_ShortsTagsSheet> {
           autocomplete: widget.autocomplete,
           searchStyle: false,
           hint: 'Add a tag, then press space',
+        ),
+        const SizedBox(height: 16),
+        Text('Content', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<ShortsContent>(
+            key: const ValueKey('shorts_content'),
+            showSelectedIcon: false,
+            segments: [
+              for (final value in ShortsContent.values)
+                ButtonSegment(value: value, label: Text(value.label)),
+            ],
+            selected: {_content},
+            onSelectionChanged: (choice) {
+              setState(() => _content = choice.single);
+              widget.onContentChanged(_content);
+            },
+          ),
         ),
         const SizedBox(height: 10),
         Row(

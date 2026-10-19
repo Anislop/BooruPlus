@@ -863,6 +863,10 @@ class AppState extends ChangeNotifier {
   Future<void> setShortsOff(Iterable<Board> boards) =>
       _saveQuietly((settings) => settings.copyWith(shortsOff: boards.toList()));
 
+  /// Saves which ratings booruShorts keeps.
+  Future<void> setShortsContent(ShortsContent content) =>
+      _saveQuietly((settings) => settings.copyWith(shortsContent: content));
+
   /// Remembers whether booruShorts plays without sound.
   Future<void> setShortsMuted(bool muted) =>
       _saveQuietly((settings) => settings.copyWith(shortsMuted: muted));
@@ -2611,7 +2615,12 @@ class ShortsFeed extends ChangeNotifier {
       }
       return raw
           .map(MediaPost.fromMap)
-          .where((post) => post.isVideo && _app._allowedOn(post, board))
+          .where(
+            (post) =>
+                post.isVideo &&
+                _app._allowedOn(post, board) &&
+                _app._settings.shortsContent.allows(_app._postRating(post)),
+          )
           .map((post) => SavedPost(board: board, post: post))
           .toList(growable: false);
     } catch (error) {
