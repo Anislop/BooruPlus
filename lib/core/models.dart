@@ -188,6 +188,27 @@ extension ThemeChoiceInfo on ThemeChoice {
 /// How often booruShorts shows something outside the viewer's interests.
 enum ShortsExploration { low, normal, high }
 
+/// Which ratings booruShorts keeps: everything, no explicit videos, or
+/// general videos only (no questionable or explicit ones).
+enum ShortsContent { all, noExplicit, safeOnly }
+
+extension ShortsContentInfo on ShortsContent {
+  String get label => switch (this) {
+    ShortsContent.all => 'All',
+    ShortsContent.noExplicit => 'No explicit',
+    ShortsContent.safeOnly => 'Safe only',
+  };
+
+  /// Whether a post with [rating] stays in booruShorts. With a filter on,
+  /// posts without a known rating (websites without ratings) are left out.
+  bool allows(Rating? rating) => switch (this) {
+    ShortsContent.all => true,
+    ShortsContent.noExplicit =>
+      rating == Rating.general || rating == Rating.questionable,
+    ShortsContent.safeOnly => rating == Rating.general,
+  };
+}
+
 /// When the viewer loads a website's smaller sample instead of the original.
 enum DataSaverMode { off, mobileData, always }
 
@@ -896,6 +917,7 @@ class AppSettings {
     this.shortsAutoAdvance = false,
     this.shortsPersonalized = true,
     this.shortsExploration = ShortsExploration.normal,
+    this.shortsContent = ShortsContent.all,
     this.shortsFollowing = const [],
     this.shortsAutoScrollSeconds = 0,
     this.shortsPictureInPicture = true,
@@ -1050,6 +1072,9 @@ class AppSettings {
   final bool shortsPersonalized;
   final ShortsExploration shortsExploration;
 
+  /// The ratings booruShorts keeps, on top of the feed's rating filter.
+  final ShortsContent shortsContent;
+
   /// Tags followed in booruShorts' Following tab (artists, characters).
   final List<String> shortsFollowing;
 
@@ -1155,6 +1180,7 @@ class AppSettings {
     shortsAutoAdvance: shortsAutoAdvance,
     shortsPersonalized: shortsPersonalized,
     shortsExploration: shortsExploration,
+    shortsContent: shortsContent,
     shortsFollowing: List.unmodifiable(
       _normalizedTags(shortsFollowing).take(50),
     ),
@@ -1220,6 +1246,7 @@ class AppSettings {
     bool? shortsAutoAdvance,
     bool? shortsPersonalized,
     ShortsExploration? shortsExploration,
+    ShortsContent? shortsContent,
     List<String>? shortsFollowing,
     int? shortsAutoScrollSeconds,
     bool? shortsPictureInPicture,
@@ -1281,6 +1308,7 @@ class AppSettings {
     shortsAutoAdvance: shortsAutoAdvance ?? this.shortsAutoAdvance,
     shortsPersonalized: shortsPersonalized ?? this.shortsPersonalized,
     shortsExploration: shortsExploration ?? this.shortsExploration,
+    shortsContent: shortsContent ?? this.shortsContent,
     shortsFollowing: shortsFollowing ?? this.shortsFollowing,
     shortsAutoScrollSeconds:
         shortsAutoScrollSeconds ?? this.shortsAutoScrollSeconds,
@@ -1352,6 +1380,7 @@ class AppSettings {
     'shortsAutoAdvance': shortsAutoAdvance,
     'shortsPersonalized': shortsPersonalized,
     'shortsExploration': shortsExploration.name,
+    'shortsContent': shortsContent.name,
     'shortsFollowing': shortsFollowing,
     'shortsAutoScrollSeconds': shortsAutoScrollSeconds,
     'shortsPictureInPicture': shortsPictureInPicture,
@@ -1440,6 +1469,9 @@ class AppSettings {
     shortsExploration:
         ShortsExploration.values.asNameMap()['${map['shortsExploration']}'] ??
         ShortsExploration.normal,
+    shortsContent:
+        ShortsContent.values.asNameMap()['${map['shortsContent']}'] ??
+        ShortsContent.all,
     shortsFollowing: (map['shortsFollowing'] as List? ?? const [])
         .map((tag) => '$tag')
         .toList(),
@@ -1638,6 +1670,7 @@ class AppSettings {
         other.shortsAutoAdvance != shortsAutoAdvance ||
         other.shortsPersonalized != shortsPersonalized ||
         other.shortsExploration != shortsExploration ||
+        other.shortsContent != shortsContent ||
         !_sameTags(other.shortsFollowing, shortsFollowing) ||
         other.shortsAutoScrollSeconds != shortsAutoScrollSeconds ||
         other.shortsPictureInPicture != shortsPictureInPicture ||
@@ -1752,6 +1785,7 @@ class AppSettings {
     shortsAutoAdvance,
     shortsPersonalized,
     shortsExploration,
+    shortsContent,
     Object.hashAll(shortsFollowing),
     shortsAutoScrollSeconds,
     shortsPictureInPicture,
