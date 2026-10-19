@@ -20,6 +20,7 @@ import 'package:booruplus/ui/update_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 import 'core_test.dart' show FakeAccounts, MemoryStore, FakeRepo;
 
@@ -38,6 +39,98 @@ class _FakeUpdates extends UpdateService {
     checks++;
     return release;
   }
+}
+
+/// Plays videos without the Android host: each player opens at once (or
+/// fails, for [failing] URLs) and can be made to fail later with [fail].
+class _FakeVideoPlatform extends VideoPlayerPlatform {
+  final List<String> created = [];
+  final Set<String> failing = {};
+  final Map<int, Duration> positions = {};
+  final Set<int> disposed = {};
+  final Map<int, StreamController<VideoEvent>> _events = {};
+
+  /// Uses this platform for the rest of the test.
+  void install() {
+    final previous = VideoPlayerPlatform.instance;
+    VideoPlayerPlatform.instance = this;
+    addTearDown(() => VideoPlayerPlatform.instance = previous);
+  }
+
+  int playerFor(String url) => created.lastIndexOf(url);
+
+  void fail(int playerId) => _events[playerId]!.addError(
+    PlatformException(code: 'VideoError', message: 'decoder reclaimed'),
+  );
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<int?> createWithOptions(VideoCreationOptions options) async {
+    final id = created.length;
+    final url = options.dataSource.uri!;
+    created.add(url);
+    // Without onCancel, cancel() returns a root-zone future that the
+    // test's fake async never completes, so dispose would stall.
+    final events = _events[id] = StreamController<VideoEvent>(
+      onCancel: () async {},
+    );
+    if (failing.contains(url)) {
+      events.addError(
+        PlatformException(code: 'VideoError', message: 'unplayable'),
+      );
+    } else {
+      events.add(
+        VideoEvent(
+          eventType: VideoEventType.initialized,
+          duration: const Duration(seconds: 30),
+          size: const Size(720, 1280),
+        ),
+      );
+    }
+    return id;
+  }
+
+  @override
+  Stream<VideoEvent> videoEventsFor(int playerId) => _events[playerId]!.stream;
+
+  @override
+  Future<void> dispose(int playerId) async {
+    disposed.add(playerId);
+    await _events[playerId]?.close();
+  }
+
+  @override
+  Future<void> seekTo(int playerId, Duration position) async =>
+      positions[playerId] = position;
+
+  @override
+  Future<Duration> getPosition(int playerId) async =>
+      positions[playerId] ?? Duration.zero;
+
+  @override
+  Future<void> setLooping(int playerId, bool looping) async {}
+
+  final List<int> plays = [];
+
+  @override
+  Future<void> play(int playerId) async => plays.add(playerId);
+
+  @override
+  Future<void> pause(int playerId) async {}
+
+  @override
+  Future<void> setVolume(int playerId, double volume) async {}
+
+  @override
+  Future<void> setPlaybackSpeed(int playerId, double speed) async {}
+
+  @override
+  Future<void> setMixWithOthers(bool mixWithOthers) async {}
+
+  @override
+  Widget buildViewWithOptions(VideoViewOptions options) => const SizedBox();
 }
 
 void main() {
@@ -1605,6 +1698,133 @@ void main() {
     expect(scaffold.backgroundColor, Colors.black);
 
     await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('viewer opened without autoplay waits for play, and reopens '
+      'a video that fails mid-stream where it was', (tester) async {
+    final videos = _FakeVideoPlatform()..install();
+    final videoPost = MediaPost.fromMap({
+      'id': 99,
+      'url': 'https://example.com/video.mp4',
+      'previewUrl': '',
+      'tags': ['animated'],
+      'isVideo': true,
+    });
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(
+          post: videoPost,
+          board: Board.danbooru,
+          state: state,
+          autoPlay: false,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(videos.created, isEmpty);
+    expect(find.byKey(const ValueKey('video_play')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('video_play')));
+    await tester.pump();
+    await tester.pump();
+    expect(videos.created, ['https://example.com/video.mp4']);
+    expect(find.byKey(const ValueKey('video_play')), findsNothing);
+
+    // Playback reaches 0:07, then the player fails (a reclaimed decoder).
+    videos.positions[0] = const Duration(seconds: 7);
+    await tester.pump(const Duration(milliseconds: 600));
+    videos.fail(0);
+    await tester.pump();
+    await tester.pump();
+    expect(videos.disposed, contains(0));
+    expect(videos.created, hasLength(2));
+    expect(videos.positions[1], const Duration(seconds: 7));
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    state.dispose();
+  });
+
+  testWidgets('booruShorts reopens a failed video where it was, and offers '
+      'Try again when it cannot open', (tester) async {
+    final videos = _FakeVideoPlatform()..install();
+    videos.failing.add('https://x/2.mp4');
+    final repo = FakeRepo([
+      [
+        for (var id = 1; id <= 3; id++)
+          {
+            'id': id,
+            'url': 'https://x/$id.mp4',
+            'previewUrl': '',
+            'tags': 'cat',
+            'rating': 'general',
+          },
+      ],
+    ]);
+    // One website, so the feed keeps the order above.
+    final store = MemoryStore()
+      ..settings = AppSettings(
+        shortsOff: [
+          for (final board in Board.values)
+            if (board != Board.danbooru) board,
+        ],
+      );
+    final state = AppState(repository: repo, store: store);
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: ShortsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    final first = videos.playerFor('https://x/1.mp4');
+    expect(first, isNot(-1));
+    expect(videos.plays, contains(first));
+
+    videos.positions[first] = const Duration(seconds: 4);
+    await tester.pump(const Duration(milliseconds: 600));
+    videos.fail(first);
+    await tester.pump();
+    await tester.pump();
+    final reopened = videos.playerFor('https://x/1.mp4');
+    expect(reopened, isNot(first));
+    expect(videos.disposed, contains(first));
+    expect(videos.positions[reopened], const Duration(seconds: 4));
+
+    // The next video failed while waiting; shown, it is tried once more,
+    // then offers Try again.
+    final before = videos.created.where((url) => url.endsWith('/2.mp4'));
+    expect(before, hasLength(1));
+    await tester.drag(
+      find.byKey(const ValueKey('shorts_pages')),
+      const Offset(0, -500),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      videos.created.where((url) => url.endsWith('/2.mp4')),
+      hasLength(2),
+    );
+    expect(find.byKey(const ValueKey('shorts_retry')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('shorts_retry')));
+    // The page's double tap holds the tap until its timeout.
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump();
+    expect(
+      videos.created.where((url) => url.endsWith('/2.mp4')),
+      hasLength(3),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
     state.dispose();
   });
 

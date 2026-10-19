@@ -248,6 +248,10 @@ class _ShortsScreenState extends State<ShortsScreen>
         return clip;
       });
     }
+    // A video that failed while it waited (often for a decoder the other
+    // players held) gets one more try once it is shown.
+    final current = _clips[_currentKey];
+    if (current != null && current.failed && !current.retried) current.retry();
     _applyPlayback();
   }
 
@@ -727,6 +731,8 @@ class _ShortsScreenState extends State<ShortsScreen>
           state: widget.state,
           savedPosts: [saved],
           initialDetails: true,
+          // Shorts already played it; it plays here only when asked.
+          autoPlay: false,
         ),
       ),
     );
@@ -1028,6 +1034,7 @@ class _ShortsScreenState extends State<ShortsScreen>
           downloading: _downloading,
           sharing: _sharing,
           onTogglePlay: _togglePlay,
+          onRetry: () => clip?.retry(),
           onReveal: () => _reveal(saved),
           onFavorite: () => _favorite(saved),
           onLike: () => _like(saved),
@@ -1302,17 +1309,41 @@ class _Clip {
   final Future<MediaPost> Function({required bool force}) streamable;
   VideoPlayerController? controller;
   bool failed = false;
+  // Whether a failed clip was tried again (when shown, or Try again).
+  bool retried = false;
   bool _disposed = false;
   bool? _muted, _loop;
+  // Where playback was, so a player that fails after opening (a dropped
+  // connection, or Android reclaiming its decoder for another player)
+  // reopens there.
+  Duration _position = Duration.zero;
+  int _recoveries = 0;
 
   Future<void> start() async {
+    if (await _openFirst() || _disposed) return;
+    failed = true;
+    onChanged();
+  }
+
+  /// Tries a clip that failed to open once more.
+  void retry() {
+    if (!failed || _disposed) return;
+    retried = true;
+    failed = false;
+    _recoveries = 0;
+    onChanged();
+    start();
+  }
+
+  /// Whether a URL opened (at [at]), or this clip was disposed meanwhile.
+  Future<bool> _openFirst({Duration at = Duration.zero}) async {
     final tried = <String>{};
     // Signed Sankaku URLs expire (403); a failed post is looked up once more.
     for (final force in saved.board.isSankakuFamily ? [false, true] : [false]) {
       final post = saved.board.isSankakuFamily
           ? await streamable(force: force)
           : saved.post;
-      if (_disposed) return;
+      if (_disposed) return true;
       final variant = post.videoVariantFor(maxQuality);
       // The chosen rendition, then the original, then the first rendition
       // (usually H.264, for originals this device cannot decode).
@@ -1323,16 +1354,14 @@ class _Clip {
       };
       for (final url in urls) {
         if (!tried.add(url)) continue;
-        if (await _open(url)) return;
+        if (await _open(url, at: at)) return true;
       }
     }
-    if (_disposed || controller != null) return;
-    failed = true;
-    onChanged();
+    return _disposed;
   }
 
   /// Whether [url] opened, or this clip was disposed meanwhile.
-  Future<bool> _open(String url) async {
+  Future<bool> _open(String url, {Duration at = Duration.zero}) async {
     if (_disposed) return true;
     final uri = Uri.tryParse(url);
     if (url.isEmpty || uri == null) return false;
@@ -1342,6 +1371,7 @@ class _Clip {
     );
     try {
       await video.initialize();
+      if (at > Duration.zero && !_disposed) await video.seekTo(at);
     } catch (_) {
       // dispose() never completes for a player whose creation failed.
       video.dispose().ignore();
@@ -1351,9 +1381,40 @@ class _Clip {
       await video.dispose();
       return true;
     }
-    controller = video;
+    // A new player starts with default sound and looping.
+    _muted = null;
+    _loop = null;
+    controller = video..addListener(_watchError);
     onChanged();
     return true;
+  }
+
+  void _watchError() {
+    final video = controller;
+    if (video == null) return;
+    final value = video.value;
+    if (!value.hasError) {
+      if (value.isInitialized) _position = value.position;
+      return;
+    }
+    _recover(video);
+  }
+
+  /// Replaces a player that failed after it opened, a few times at most.
+  Future<void> _recover(VideoPlayerController broken) async {
+    if (_disposed || !identical(controller, broken)) return;
+    broken.removeListener(_watchError);
+    controller = null;
+    broken.dispose().ignore();
+    if (_recoveries < 3) {
+      _recoveries++;
+      // The preview and spinner show while it reopens.
+      onChanged();
+      if (await _openFirst(at: _position)) return;
+    }
+    if (_disposed) return;
+    failed = true;
+    onChanged();
   }
 
   /// Applies sound and looping, skipping platform calls that change
@@ -1373,7 +1434,9 @@ class _Clip {
 
   void dispose() {
     _disposed = true;
-    controller?.dispose();
+    controller
+      ?..removeListener(_watchError)
+      ..dispose();
     controller = null;
   }
 }
@@ -1392,6 +1455,7 @@ class _ShortsPage extends StatefulWidget {
     required this.downloading,
     required this.sharing,
     required this.onTogglePlay,
+    required this.onRetry,
     required this.onReveal,
     required this.onFavorite,
     required this.onLike,
@@ -1410,7 +1474,8 @@ class _ShortsPage extends StatefulWidget {
 
   /// Picture-in-picture: the video only.
   final bool compact;
-  final VoidCallback onTogglePlay, onReveal, onFavorite, onLike, onDislike;
+  final VoidCallback onTogglePlay, onRetry, onReveal, onFavorite, onLike;
+  final VoidCallback onDislike;
   final VoidCallback onDetails, onSite, onDownload, onMore;
 
   /// Null hides the share button (Settings › No share).
@@ -1718,13 +1783,30 @@ class _ShortsPageState extends State<_ShortsPage> {
       );
     }
     if (widget.failed) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(32),
-          child: Text(
-            "This video couldn't be played on this device.",
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70),
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "This video couldn't be played on this device.",
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70),
+              ),
+              if (!widget.compact) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  key: const ValueKey('shorts_retry'),
+                  onPressed: widget.onRetry,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Try again'),
+                ),
+              ],
+            ],
           ),
         ),
       );
