@@ -55,6 +55,9 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   // Covers the content while the app is in the background, so returning
   // within the grace period or the recent-apps preview shows nothing.
   bool _covered = false;
+  // Whether the app lock hides the app (locked, or covered in the
+  // background), so launcher shortcuts wait for it to open.
+  final _lockedOut = ValueNotifier(false);
   DateTime? _backgroundSince;
   bool _secureScreen = false;
   ThemeChoice _theme = ThemeChoice.standard;
@@ -73,12 +76,21 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   void dispose() {
     widget.state.removeListener(_applySettings);
     WidgetsBinding.instance.removeObserver(this);
+    _lockedOut.dispose();
     super.dispose();
+  }
+
+  void _syncLockedOut() {
+    _lockedOut.value =
+        widget.state.initialized &&
+        widget.state.settings.appLock &&
+        (!_unlocked || _covered);
   }
 
   Future<void> _initialize() async {
     await Future.wait([widget.state.initialize(), loadSiteCatalog()]);
     if (!mounted) return;
+    _syncLockedOut();
     setState(() {});
   }
 
@@ -117,6 +129,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
       _unlocked = !settings.appLock;
       _checkForUpdate();
     }
+    _syncLockedOut();
     if (settings.secureScreen != _secureScreen) {
       _secureScreen = settings.secureScreen;
       _device.setSecureScreen(_secureScreen);
@@ -191,6 +204,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
         });
       }
     }
+    _syncLockedOut();
   }
 
   Future<void> _unlock() async {
@@ -199,15 +213,18 @@ class _BooruPlusAppState extends State<BooruPlusApp>
       final verified = await _device.authenticate();
       if (verified && mounted) setState(() => _unlocked = true);
     } on DeviceLockUnavailableException {
-      // The device's screen lock was removed after the app lock was turned
-      // on, so nothing can verify the user any more. Turn the setting off
-      // so Settings shows the app as unprotected.
+      // The device has no screen lock: it was removed after the app lock
+      // was turned on, which needed the old one, so nothing can verify the
+      // user any more. Turn the setting off so Settings shows the app as
+      // unprotected. A prompt that fails to start returns false instead and
+      // keeps the app locked.
       if (mounted) setState(() => _unlocked = true);
       await widget.state.disableAppLock();
     } catch (_) {
       // Leave the lock screen up; its button retries.
     } finally {
       _backgroundSince = null;
+      _syncLockedOut();
     }
   }
 
@@ -292,7 +309,7 @@ class _BooruPlusAppState extends State<BooruPlusApp>
                 )
               : widget.state.board == null
               ? OnboardingScreen(state: widget.state)
-              : HomeScreen(state: widget.state),
+              : HomeScreen(state: widget.state, locked: _lockedOut),
         ),
       );
     },

@@ -12,8 +12,8 @@ repositories {
 }
 
 dependencies {
-    implementation("tools.jackson.core:jackson-core:3.1.3")
-    implementation("tools.jackson.core:jackson-databind:3.1.3")
+    implementation("tools.jackson.core:jackson-core:3.1.8")
+    implementation("tools.jackson.core:jackson-databind:3.1.8")
     api("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("org.slf4j:slf4j-api:2.0.18")
 }

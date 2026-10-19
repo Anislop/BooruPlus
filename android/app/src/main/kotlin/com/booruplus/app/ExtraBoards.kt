@@ -2,10 +2,17 @@ package com.booruplus.app
 
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.asResponseBody
+import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.EOFException
 import java.io.IOException
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
@@ -22,6 +29,36 @@ import kotlin.random.Random
  * per post). Each returns the same post maps as MainActivity.mapImage.
  * MoreBoards.kt holds the clients for boards on other engines.
  */
+
+/**
+ * Fails a response once its body passes [limit] bytes (after decompression),
+ * so a provider cannot exhaust memory with an enormous or endless answer
+ * before it is parsed. Media bytes have their own bound and skip this.
+ */
+internal class ResponseLimitInterceptor(private val limit: Long) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val response = chain.proceed(chain.request())
+        val body = response.body
+        if (body.contentLength() > limit) {
+            response.close()
+            throw IOException("Response too large")
+        }
+        val source = object : ForwardingSource(body.source()) {
+            private var total = 0L
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                val count = super.read(sink, byteCount)
+                if (count > 0) {
+                    total += count
+                    if (total > limit) throw IOException("Response too large")
+                }
+                return count
+            }
+        }
+        return response.newBuilder()
+            .body(source.buffer().asResponseBody(body.contentType(), body.contentLength()))
+            .build()
+    }
+}
 
 internal fun OkHttpClient.getBody(url: HttpUrl, userAgent: String, headers: Map<String, String> = emptyMap()): String? {
     val builder = Request.Builder().url(url).header("User-Agent", userAgent)
@@ -365,17 +402,30 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
 
     private fun readIds(path: String, position: Long, count: Int): List<Long> {
         if (count <= 0) return emptyList()
+        val first = position * 4
+        val wanted = count * 4L
         val request = Request.Builder().url(url(path)).header("User-Agent", userAgent)
-            .header("Range", "bytes=${position * 4}-${(position + count) * 4 - 1}").build()
+            .header("Range", "bytes=$first-${first + wanted - 1}").build()
         val bytes = client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            response.body?.bytes() ?: ByteArray(0)
+            val source = response.body.source()
+            if (response.code == 206) {
+                // A partial answer must start where this read asked.
+                val start = response.header("Content-Range")?.substringAfter("bytes ", "")
+                    ?.substringBefore('-')?.trim()?.toLongOrNull()
+                if (start != first) throw IOException("Unexpected range")
+            } else {
+                // A server ignoring the range sends the whole file from the
+                // start: skip to the position instead of holding the file.
+                try { source.skip(first) } catch (_: EOFException) { return@use ByteArray(0) }
+            }
+            val buffer = Buffer()
+            while (buffer.size < wanted && source.read(buffer, wanted - buffer.size) != -1L) Unit
+            buffer.readByteArray()
         }
-        // A server ignoring the range sends the whole file from the start.
-        val offset = if (bytes.size > count * 4 && position > 0) (position * 4).toInt() else 0
-        val available = ((bytes.size - offset) / 4).coerceAtMost(count)
+        val available = bytes.size / 4
         return (0 until available).map { index ->
-            val at = offset + index * 4
+            val at = index * 4
             ((bytes[at].toLong() and 0xff) shl 24) or ((bytes[at + 1].toLong() and 0xff) shl 16) or
                 ((bytes[at + 2].toLong() and 0xff) shl 8) or (bytes[at + 3].toLong() and 0xff)
         }

@@ -5,6 +5,23 @@ import 'package:flutter/material.dart';
 import '../core/models.dart';
 import '../core/services.dart';
 
+/// The longest side decoded when nothing smaller is asked for: the viewer's
+/// bound, under common GPU texture limits.
+const maxDecodeSide = 4096;
+
+/// [provider] decoded to fit within [width] x [height] (each
+/// [maxDecodeSide] when not given), keeping its aspect ratio and never
+/// upscaling. Bounding both sides stops a preview with enormous or extreme
+/// dimensions from allocating a huge bitmap; [BoxFit] and blurs only change
+/// how the decoded image is drawn.
+ImageProvider boundedImage(ImageProvider provider, {int? width, int? height}) =>
+    ResizeImage(
+      provider,
+      width: width ?? maxDecodeSide,
+      height: height ?? maxDecodeSide,
+      policy: ResizeImagePolicy.fit,
+    );
+
 class MediaImage extends StatefulWidget {
   const MediaImage({
     super.key,
@@ -30,6 +47,8 @@ class MediaImage extends StatefulWidget {
 
   /// Caps the decoded size on the longest side, preserving aspect ratio.
   /// Overrides [cacheWidth] and [cacheHeight]; images are never upscaled.
+  /// Without any of the three, [maxDecodeSide] applies, and a side not
+  /// given is bounded by it too.
   final int? maxDimension;
   final String errorMessage;
   final MediaService? mediaService;
@@ -105,19 +124,11 @@ class _MediaImageState extends State<MediaImage> {
 
   ImageProvider _bounded(ImageProvider provider) {
     final max = widget.maxDimension;
-    if (max == null) {
-      return ResizeImage.resizeIfNeeded(
-        widget.cacheWidth,
-        widget.cacheHeight,
-        provider,
-      );
+    final width = widget.cacheWidth, height = widget.cacheHeight;
+    if (max == null && width != null && height != null) {
+      return ResizeImage(provider, width: width, height: height);
     }
-    return ResizeImage(
-      provider,
-      width: max,
-      height: max,
-      policy: ResizeImagePolicy.fit,
-    );
+    return boundedImage(provider, width: max ?? width, height: max ?? height);
   }
 
   Widget _error() =>

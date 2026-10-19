@@ -57,6 +57,13 @@ class AppState extends ChangeNotifier {
   // One renewal per board at a time: concurrent requests share it, so a
   // rotated refresh token is never spent twice.
   final Map<Board, Future<Credentials?>> _sessionRenewals = {};
+  // Every sign-in, sign-out, and renewal changes the session in memory at
+  // once and bumps its board's generation, then queues the stored copy's
+  // write behind the board's earlier ones. Storage therefore ends with the
+  // latest session, and a renewal or read finishing late cannot bring back
+  // one that was signed out.
+  final Map<Board, int> _sessionGenerations = {};
+  final Map<Board, Future<void>> _credentialQueue = {};
   // Sankaku's signed-in tag limit is not documented. It is learned from the
   // provider's tag-limit refusal; until then exclusions are not trimmed.
   // Only Sankaku Complex has sign-in, so the limit is not per board.
@@ -526,7 +533,7 @@ class AppState extends ChangeNotifier {
     for (final board in boards) {
       if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
         try {
-          _credentialsByBoard[board] = await _store.loadCredentials(board);
+          _credentialsByBoard[board] = await _loadCredentials(board);
         } catch (_) {
           _credentialsByBoard[board] = null;
         }
@@ -946,7 +953,8 @@ class AppState extends ChangeNotifier {
   });
 
   /// Restores an [exportBackup] file: its settings replace the current ones
-  /// (keeping this device's download folder and app lock), and its favorites
+  /// (keeping this device's download folder and app lock, and secure screen
+  /// when it is on), and its favorites
   /// and hidden posts are merged with the current ones.
   Future<BackupSummary> importBackup(String source) async {
     final Object? decoded;
@@ -974,9 +982,12 @@ class AppState extends ChangeNotifier {
     final settings = decoded['settings'];
     if (settings is Map) {
       await _enqueueSettingsUpdate(() async {
-        final next = AppSettings.fromMap(settings).copyWith(
+        final restored = AppSettings.fromMap(settings);
+        final next = restored.copyWith(
           downloadDirectory: _settings.downloadDirectory,
           appLock: _settings.appLock,
+          // A backup can turn secure screen on, never off.
+          secureScreen: _settings.secureScreen || restored.secureScreen,
         );
         await _store.saveSettings(next);
         _settings = next;
@@ -1010,9 +1021,7 @@ class AppState extends ChangeNotifier {
     for (final saved in [...newFavorites, ...newHidden]) {
       if (saved.board.supportsAuth &&
           !_credentialsByBoard.containsKey(saved.board)) {
-        _credentialsByBoard[saved.board] = await _store.loadCredentials(
-          saved.board,
-        );
+        _credentialsByBoard[saved.board] = await _loadCredentials(saved.board);
       }
     }
     _invalidate();
@@ -1075,9 +1084,7 @@ class AppState extends ChangeNotifier {
       final board = stored?.isRetired == true
           ? settings.visibleBoards.firstOrNull
           : stored;
-      final credentials = board == null
-          ? null
-          : await _store.loadCredentials(board);
+      final credentials = board == null ? null : await _loadCredentials(board);
       _settings = settings;
       _board = board;
       _noteIgnoredAiSetting(board);
@@ -1111,7 +1118,7 @@ class AppState extends ChangeNotifier {
       ]) {
         if (saved.board.supportsAuth &&
             !_credentialsByBoard.containsKey(saved.board)) {
-          _credentialsByBoard[saved.board] = await _store.loadCredentials(
+          _credentialsByBoard[saved.board] = await _loadCredentials(
             saved.board,
           );
         }
@@ -1135,8 +1142,7 @@ class AppState extends ChangeNotifier {
     _invalidate();
     final generation = _generation;
     try {
-      final loadedCredentials =
-          credentials ?? await _store.loadCredentials(value);
+      final loadedCredentials = credentials ?? await _loadCredentials(value);
       if (generation != _generation) return;
       await _store.saveBoard(value);
       if (generation != _generation) return;
@@ -1457,35 +1463,74 @@ class AppState extends ChangeNotifier {
   }
 
   Future<Credentials?> credentialsFor(Board value) async {
-    final credentials = await _store.loadCredentials(value);
+    final credentials = await _loadCredentials(value);
     _credentialsByBoard[value] = credentials;
     return credentials;
   }
 
   Future<void> saveCredentials(Board value, Credentials credentials) async {
-    await _store.saveCredentials(value, credentials);
-    _credentialsByBoard[value] = credentials;
-    if (value == _board) _credentials = credentials;
+    final stored = _setSession(value, credentials);
     notifyListeners();
+    await stored;
   }
 
   Future<void> forgetCredentials(Board value) async {
-    await _store.removeCredentials(value);
-    _credentialsByBoard.remove(value);
+    // Signed out at once, so a renewal finishing meanwhile cannot keep or
+    // store the session again.
+    final removed = _setSession(value, null);
     if (value == Board.sankaku) _sankakuSignedInTagLimit = null;
     if (value == _board) {
       _invalidate();
-      _credentials = null;
       _clearResults();
       _error = value.requiresAuth
           ? 'Authentication is required for ${value.label}.'
           : null;
     }
     notifyListeners();
-    // Optional sign-in: keep browsing anonymously.
-    if (value == _board && !value.requiresAuth) {
-      await _load(reset: true, generation: _generation);
+    try {
+      await removed;
+    } finally {
+      // Optional sign-in: keep browsing anonymously.
+      if (value == _board && !value.requiresAuth) {
+        await _load(reset: true, generation: _generation);
+      }
     }
+  }
+
+  /// Makes [credentials] [board]'s session (null signs out) in memory now,
+  /// and stores it once the board's earlier credential writes finish.
+  Future<void> _setSession(Board board, Credentials? credentials) {
+    _sessionGenerations[board] = (_sessionGenerations[board] ?? 0) + 1;
+    _credentialsByBoard[board] = credentials;
+    if (board == _board) _credentials = credentials;
+    return _queueCredentials(
+      board,
+      () => credentials == null
+          ? _store.removeCredentials(board)
+          : _store.saveCredentials(board, credentials),
+    );
+  }
+
+  /// [board]'s stored credentials, read after its pending writes. When the
+  /// session changed during the read, the current session is returned.
+  Future<Credentials?> _loadCredentials(Board board) async {
+    final generation = _sessionGenerations[board];
+    final stored = await _queueCredentials(
+      board,
+      () => _store.loadCredentials(board),
+    );
+    return generation == _sessionGenerations[board]
+        ? stored
+        : _credentialsByBoard[board];
+  }
+
+  /// Runs [operation] on [board]'s stored credentials after the earlier ones.
+  Future<T> _queueCredentials<T>(Board board, Future<T> Function() operation) {
+    final result = (_credentialQueue[board] ?? Future<void>.value()).then(
+      (_) => operation(),
+    );
+    _credentialQueue[board] = result.then<void>((_) {}, onError: (_) {});
+    return result;
   }
 
   /// Signs in to a [BoardInfo.supportsSignIn] board. Only the returned
@@ -1523,11 +1568,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _useCredentials(Board value, Credentials credentials) async {
-    await _store.saveCredentials(value, credentials);
-    _credentialsByBoard[value] = credentials;
+    await _setSession(value, credentials);
     if (value == _board) {
       _invalidate();
-      _credentials = credentials;
+      _credentials = _credentialsByBoard[value];
       _clearResults();
       notifyListeners();
       await _load(reset: true, generation: _generation);
@@ -1582,17 +1626,14 @@ class AppState extends ChangeNotifier {
     if (!identical(_credentialsByBoard[board], stale)) {
       return _credentialsByBoard[board];
     }
-    _credentialsByBoard[board] = fresh;
-    if (board == _board) _credentials = fresh;
+    final stored = _setSession(board, fresh);
     if (fresh == null) {
       if (board == Board.sankaku) _sankakuSignedInTagLimit = null;
       _notice =
           'Your ${board.label} sign-in expired. Sign in again in Settings.';
       notifyListeners();
-      await _store.removeCredentials(board);
-    } else {
-      await _store.saveCredentials(board, fresh);
     }
+    await stored;
     return fresh;
   }
 

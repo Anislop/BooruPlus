@@ -51,7 +51,7 @@ android {
         applicationId = "com.booruplus.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        // Jackson 3.1.3, required by the exact imageboard-api 3.0.0 source,
+        // Jackson 3.1.x, required by the exact imageboard-api 3.0.0 source,
         // uses MethodHandle.invoke* instructions which D8 supports from API 26.
         minSdk = maxOf(flutter.minSdkVersion, 26)
         targetSdk = flutter.targetSdkVersion

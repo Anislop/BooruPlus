@@ -31,6 +31,17 @@ class MemoryStore implements SettingsStore {
       credentials.remove(value);
 }
 
+/// Removes credentials at once but reports it only when [removeGate] opens,
+/// like a slow secure-storage delete.
+class _SlowRemoveStore extends MemoryStore {
+  final removeGate = Completer<void>();
+  @override
+  Future<void> removeCredentials(Board value) async {
+    credentials.remove(value);
+    await removeGate.future;
+  }
+}
+
 class FakeRepo implements BoardRepository {
   final List<List<Map<String, dynamic>>> pages;
   FakeRepo(this.pages);
@@ -1035,6 +1046,38 @@ void main() {
       expect(state.posts.map((value) => value.id), [1]);
     });
 
+    test('a renewal finishing during sign-out is not stored', () async {
+      final repo = _SessionRepo((_, _) => null);
+      final accounts = FakeAccounts(refreshResult: renewed)
+        ..refreshGate = Completer<void>();
+      final store = _SlowRemoveStore()
+        ..selected = Board.sankaku
+        ..credentials[Board.sankaku] = Credentials(
+          userId: 'reader',
+          apiKey: 'access-1',
+          refreshToken: 'refresh-1',
+          expiresAt: DateTime.now().subtract(const Duration(minutes: 1)),
+        );
+      final state = AppState(
+        repository: repo,
+        store: store,
+        accounts: accounts,
+      );
+      final loading = state.initialize();
+      await pumpEventQueue();
+      expect(accounts.refreshes, 1);
+      final signingOut = state.forgetCredentials(Board.sankaku);
+      await pumpEventQueue();
+      accounts.refreshGate!.complete();
+      await pumpEventQueue();
+      store.removeGate.complete();
+      await signingOut;
+      await loading;
+      expect(store.credentials, isNot(contains(Board.sankaku)));
+      expect(repo.lastCredentials, isNull);
+      expect(await state.credentialsFor(Board.sankaku), isNull);
+    });
+
     test('bridge auth, tag-limit, and rate-limit errors are typed', () async {
       TestWidgetsFlutterBinding.ensureInitialized();
       const channel = MethodChannel('booruplus/test-sankaku');
@@ -1695,6 +1738,23 @@ void main() {
       expect(state.error, isNotNull);
     },
   );
+
+  test('restoring a backup can turn secure screen on but never off', () async {
+    final plain = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore(),
+    );
+    await plain.initialize();
+    final secure = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..settings = const AppSettings(secureScreen: true),
+    );
+    await secure.initialize();
+    await secure.importBackup(plain.exportBackup());
+    expect(secure.settings.secureScreen, isTrue);
+    await plain.importBackup(secure.exportBackup());
+    expect(plain.settings.secureScreen, isTrue);
+  });
 
   group('updates', () {
     Map<String, Object?> release(

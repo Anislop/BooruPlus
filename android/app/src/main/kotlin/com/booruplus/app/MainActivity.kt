@@ -48,6 +48,8 @@ import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.URI
 import java.nio.ByteBuffer
 import java.io.ByteArrayOutputStream
@@ -70,12 +72,17 @@ class MainActivity : FlutterActivity() {
     private val currentFeed = ThreadLocal<FeedTask?>()
     // The latest feed fetch; touched only on the UI thread.
     private var feedTask: FeedTask? = null
-    private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
+    private val baseClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
         .addInterceptor(Interceptor(::trackFeedCall))
         .addInterceptor(RateLimitInterceptor())
         .followSslRedirects(false).build()
-    private val mediaClient = client.newBuilder()
+    // Provider responses are parsed whole, so their size is capped; media
+    // bytes have their own bound in readMedia.
+    private val client = baseClient.newBuilder()
+        .addInterceptor(ResponseLimitInterceptor(MAX_RESPONSE_BYTES))
+        .build()
+    private val mediaClient = baseClient.newBuilder()
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
@@ -314,7 +321,8 @@ class MainActivity : FlutterActivity() {
      * Shows the biometric prompt with the screen lock as an alternative
      * (API 29+), or the screen-lock confirmation below that. Answers true when
      * verified and false when dismissed; `UNAVAILABLE` means the device has no
-     * screen lock to verify with.
+     * screen lock to verify with. A prompt that cannot start is
+     * `AUTH_FAILED`, which never counts as verified.
      */
     private fun authenticate(call: MethodCall, result: MethodChannel.Result) {
         val keyguard = getSystemService(KeyguardManager::class.java)
@@ -342,11 +350,11 @@ class MainActivity : FlutterActivity() {
             } else {
                 @Suppress("DEPRECATION")
                 val intent = keyguard.createConfirmDeviceCredentialIntent(title, null)
-                if (intent == null) finishAuth(true) else startActivityForResult(intent, CONFIRM_CREDENTIAL)
+                if (intent == null) finishAuth(false) else startActivityForResult(intent, CONFIRM_CREDENTIAL)
             }
         } catch (_: Exception) {
             if (authResult === result) authResult = null
-            result.error("UNAVAILABLE", "Verification is not available", null)
+            result.error("AUTH_FAILED", "Verification could not start", null)
         }
     }
 
@@ -376,15 +384,12 @@ class MainActivity : FlutterActivity() {
         if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media can be shared", null); return }
         if (!validFileName(name)) { result.error("INVALID_NAME", "Invalid file name", null); return }
         background(result, mediaExecutor) {
-            val directory = File(cacheDir, SharedMediaProvider.DIRECTORY).apply { mkdirs() }
-            // Earlier shares may still be read by the receiving app for a while.
-            val stale = System.currentTimeMillis() - SHARE_CACHE_MILLIS
-            directory.listFiles()?.forEach { if (it.lastModified() < stale) it.delete() }
-            val file = File(directory, name!!)
+            val file = newSharedFile(name!!)
             try {
                 openSecureDownload(url).use { input ->
                     file.outputStream().use { output ->
                         val buffer = ByteArray(65536)
+                        val deadline = System.nanoTime() + TRANSFER_DEADLINE_NANOS
                         var total = 0L
                         while (true) {
                             if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
@@ -392,15 +397,16 @@ class MainActivity : FlutterActivity() {
                             if (count < 0) break
                             total += count
                             if (total > MAX_SHARE_BYTES) throw IOException("Too large to share")
+                            if (System.nanoTime() > deadline) throw IOException("Share timed out")
                             output.write(buffer, 0, count)
                         }
                     }
                 }
             } catch (error: Exception) {
-                file.delete()
+                file.parentFile?.deleteRecursively()
                 throw error
             }
-            val uri = SharedMediaProvider.uriFor(this, file.name)
+            val uri = SharedMediaProvider.uriFor(this, file)
             val intent = Intent(Intent.ACTION_SEND)
                 .setType(mediaMimeType(file.name))
                 .putExtra(Intent.EXTRA_STREAM, uri)
@@ -412,6 +418,24 @@ class MainActivity : FlutterActivity() {
             }
             null
         }
+    }
+
+    /**
+     * A new file named [name] in its own unguessable folder of the share
+     * cache, so every share and update gets a content URI of its own: an app
+     * granted an earlier file cannot read a later one of the same name, and
+     * nothing overwrites a file a receiving app may still be reading. Folders
+     * untouched for an hour are pruned first.
+     */
+    private fun newSharedFile(name: String): File {
+        val directory = File(cacheDir, SharedMediaProvider.DIRECTORY).apply { mkdirs() }
+        val stale = System.currentTimeMillis() - SHARE_CACHE_MILLIS
+        directory.listFiles()?.forEach { entry ->
+            if (entry.walkBottomUp().all { it.lastModified() < stale }) entry.deleteRecursively()
+        }
+        val folder = File(directory, SharedMediaProvider.newToken())
+        if (!folder.mkdirs()) throw IOException("Cannot create share folder")
+        return File(folder, name)
     }
 
     /** Asks where to save [content] (a backup), then writes it there. */
@@ -1223,17 +1247,23 @@ class MainActivity : FlutterActivity() {
                 val connection = openSecureConnection(url!!)
                 val length = connection.contentLengthLong.takeIf { it > 0 }
                 downloadStream(connection).use { input ->
+                    if (length != null && length > MAX_DOWNLOAD_BYTES) throw IOException("Download too large")
                     uri = createTarget(name, directory)
                     (contentResolver.openOutputStream(uri!!, "w") ?: throw IOException("Cannot open target")).use { output ->
                         val buffer = ByteArray(65536)
+                        // A host that keeps sending can neither fill the
+                        // storage nor hold a media thread for good.
+                        val deadline = System.nanoTime() + TRANSFER_DEADLINE_NANOS
                         var received = 0L
                         var reported = -1L
                         while (true) {
                             if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
                             val count = input.read(buffer)
                             if (count < 0) break
-                            output.write(buffer, 0, count)
                             received += count
+                            if (received > MAX_DOWNLOAD_BYTES) throw IOException("Download too large")
+                            if (System.nanoTime() > deadline) throw IOException("Download timed out")
+                            output.write(buffer, 0, count)
                             // At most one report per percent (or per 512 KB when the size is unknown).
                             val step = if (length != null) received * 100 / length else received / (512L * 1024L)
                             if (progressId != null && step != reported) {
@@ -1296,8 +1326,9 @@ class MainActivity : FlutterActivity() {
         }
         val progressId = call.argument<Number>("id")?.toLong()
         background(result, mediaExecutor) {
-            val directory = File(cacheDir, SharedMediaProvider.DIRECTORY).apply { mkdirs() }
-            val file = File(directory, UPDATE_FILE)
+            // Its own folder: no share or other update can replace the file
+            // between the checks below and the installer reading it.
+            val file = newSharedFile(UPDATE_FILE)
             try {
                 val connection = openSecureConnection(url!!, allowHost = { isUpdateHost(it) })
                 val length = connection.contentLengthLong.takeIf { it > 0 }
@@ -1324,15 +1355,18 @@ class MainActivity : FlutterActivity() {
                 }
                 checkUpdate(file)
             } catch (error: Exception) {
-                file.delete()
+                file.parentFile?.deleteRecursively()
                 throw error
             }
             val intent = Intent(Intent.ACTION_VIEW)
-                .setDataAndType(SharedMediaProvider.uriFor(this, file.name), APK_MIME_TYPE)
+                .setDataAndType(SharedMediaProvider.uriFor(this, file), APK_MIME_TYPE)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             val opened = FutureTask { try { startActivity(intent); true } catch (_: Exception) { false } }
             runOnUiThread(opened)
-            if (!opened.get()) throw UpdateRejectedException("UPDATE_INVALID", "No package installer")
+            if (!opened.get()) {
+                file.parentFile?.deleteRecursively()
+                throw UpdateRejectedException("UPDATE_INVALID", "No package installer")
+            }
             null
         }
     }
@@ -1386,8 +1420,9 @@ class MainActivity : FlutterActivity() {
     } catch (error: Exception) { connection.disconnect(); throw error }
 
     /**
-     * Follows up to six HTTPS-only redirects, each to a host [allowHost]
-     * accepts; returns a connected 2xx response.
+     * Follows up to six HTTPS-only redirects, each to a public host
+     * ([isPublicHost]) that [allowHost] accepts; returns a connected 2xx
+     * response.
      */
     private fun openSecureConnection(
         value: String,
@@ -1398,7 +1433,7 @@ class MainActivity : FlutterActivity() {
         var current = URI(value)
         repeat(6) {
             if (!secureHttps(current.toString())) throw IOException("Insecure URL")
-            if (!allowHost(current.host)) throw IOException("Unexpected host")
+            if (!allowHost(current.host) || !isPublicHost(current.host)) throw IOException("Unexpected host")
             val connection = current.toURL().openConnection() as HttpURLConnection
             try {
                 connection.instanceFollowRedirects = false
@@ -1475,6 +1510,11 @@ class MainActivity : FlutterActivity() {
         private const val SHORTCUT_BOARD = "com.booruplus.app.SHORTCUT_BOARD"
         private const val SHORTCUT_TAGS = "com.booruplus.app.SHORTCUT_TAGS"
         private const val MAX_SHARE_BYTES = 200L * 1024L * 1024L
+        // Provider API responses (JSON/XML) are far smaller; media is apart.
+        private const val MAX_RESPONSE_BYTES = 16L * 1024L * 1024L
+        private const val MAX_DOWNLOAD_BYTES = 2L * 1024L * 1024L * 1024L
+        // A whole download or share, however steadily the host sends.
+        private const val TRANSFER_DEADLINE_NANOS = 60L * 60L * 1_000_000_000L
         private const val MAX_IMPORT_BYTES = 20L * 1024L * 1024L
         private const val SHARE_CACHE_MILLIS = 60L * 60L * 1000L
         private const val MAX_WINDOW_REQUESTS = 32
@@ -1510,6 +1550,42 @@ internal fun mediaMimeType(name: String) = when (name.substringAfterLast('.', ""
     "webm" -> "video/webm"
     "apk" -> "application/vnd.android.package-archive"
     else -> "application/octet-stream"
+}
+
+/**
+ * Whether [host] names only public internet addresses. Downloads, shares,
+ * and size checks follow URLs from provider posts and restored backups, so
+ * they never reach this device, its local network, or other private ranges.
+ */
+internal fun isPublicHost(host: String?): Boolean {
+    val name = host?.removePrefix("[")?.removeSuffix("]")?.trimEnd('.')?.lowercase()
+    if (name.isNullOrEmpty() || name == "localhost" || name.endsWith(".localhost")) return false
+    val addresses = try { InetAddress.getAllByName(name) } catch (_: Exception) { return false }
+    return addresses.isNotEmpty() && addresses.all(::isPublicAddress)
+}
+
+private fun isPublicAddress(address: InetAddress): Boolean {
+    if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress ||
+        address.isSiteLocalAddress || address.isMulticastAddress) return false
+    val bytes = address.address
+    if (address is Inet6Address) {
+        // An IPv4 address carried in IPv6 (::a.b.c.d) is judged as IPv4.
+        if (bytes.take(12).all { it == 0.toByte() }) {
+            return isPublicAddress(InetAddress.getByAddress(bytes.copyOfRange(12, 16)))
+        }
+        // Unique local addresses, fc00::/7.
+        return (bytes[0].toInt() and 0xfe) != 0xfc
+    }
+    val first = bytes[0].toInt() and 0xff
+    val second = bytes[1].toInt() and 0xff
+    return when {
+        first == 0 -> false
+        first == 100 && second in 64..127 -> false // Carrier-grade NAT
+        first == 192 && second == 0 && bytes[2].toInt() == 0 -> false
+        first == 198 && second in 18..19 -> false
+        first >= 240 -> false
+        else -> true
+    }
 }
 
 /** A downloaded update that must not be installed; [code] is sent to Dart. */
