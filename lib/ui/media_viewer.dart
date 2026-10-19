@@ -52,6 +52,7 @@ class MediaViewer extends StatefulWidget {
     this.initialIndex = 0,
     this.initialDetails = false,
     this.allSites = false,
+    this.autoPlay = true,
   });
   final MediaPost post;
   final Board board;
@@ -65,6 +66,10 @@ class MediaViewer extends StatefulWidget {
 
   /// Opened from Search all sites, which searches a chosen tag itself.
   final bool allSites;
+
+  /// Whether the first post's video starts by itself. Off, it waits for
+  /// the play button (opened from booruShorts, which already played it).
+  final bool autoPlay;
   @override
   State<MediaViewer> createState() => _MediaViewerState();
 }
@@ -94,6 +99,17 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   bool _zoomed = false;
   int _videoGeneration = 0;
   int _streamQuality = 0;
+  // The rendition streamed in place of an original this device could not
+  // play, if any.
+  VideoVariant? _streamFallback;
+  // Where the video was, so a player that fails after opening (a dropped
+  // connection, or Android reclaiming its decoder for another player)
+  // reopens there, a few times per page.
+  Duration _videoPosition = Duration.zero;
+  bool _videoPlaying = false;
+  int _videoRecoveries = 0;
+  // The first video waits for the play button (MediaViewer.autoPlay).
+  late bool _holdVideo = !widget.autoPlay;
   bool _revealed = false;
   // Slideshow: advances after the interval, or when a video ends.
   bool _slideshow = false;
@@ -317,12 +333,16 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     final video = _video;
     _video = null;
     video?.removeListener(_watchVideoEnd);
+    video?.removeListener(_watchVideoError);
     video?.dispose();
   }
 
   void _handlePageChanged(int index) {
     if (index == _index) return;
     _disposeVideo();
+    _holdVideo = false;
+    _videoPosition = Duration.zero;
+    _videoRecoveries = 0;
     setState(() {
       _index = index;
       _revealed = false;
@@ -344,13 +364,55 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   void _ensureVideo() {
     final post = _post;
     if (!post.isVideo || _video != null || _videoError != null) return;
-    if (_shouldBlur(post) && !_revealed) return;
+    if (_holdVideo || (_shouldBlur(post) && !_revealed)) return;
     _initializeVideo();
+  }
+
+  void _playHeldVideo() {
+    setState(() => _holdVideo = false);
+    _ensureVideo();
+  }
+
+  /// Opens the current video again after it failed.
+  void _retryVideo() {
+    _disposeVideo();
+    _videoRecoveries = 0;
+    setState(() {
+      _videoError = null;
+      _holdVideo = false;
+    });
+    _ensureVideo();
+    _scheduleSlide();
+  }
+
+  void _watchVideoError() {
+    final video = _video;
+    if (video == null) return;
+    final value = video.value;
+    if (!value.hasError) {
+      if (value.isInitialized) {
+        _videoPosition = value.position;
+        _videoPlaying = value.isPlaying;
+      }
+      return;
+    }
+    // Past the limit, the player's own error message stays.
+    if (_videoRecoveries >= 3) return;
+    _videoRecoveries++;
+    final fallback = _streamFallback;
+    _disposeVideo();
+    setState(() {});
+    _initializeVideo(
+      startAt: _videoPosition,
+      autoPlay: _videoPlaying,
+      fallback: fallback,
+    );
   }
 
   Future<void> _selectQuality(int quality) async {
     _quality = quality;
     widget.state.setVideoQuality(quality);
+    if (_holdVideo) return;
     final target = _post.videoVariantFor(quality)?.quality ?? 0;
     if (target == _streamQuality && _video != null) return;
     final position = _video?.value.position ?? Duration.zero;
@@ -392,6 +454,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     );
     _video = video;
     _streamQuality = variant?.quality ?? 0;
+    _streamFallback = fallback;
     bool stale() =>
         !mounted || generation != _videoGeneration || !identical(_video, video);
     try {
@@ -423,8 +486,8 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
           ),
         ),
         playbackSpeeds: const [.25, .5, .75, 1, 1.25, 1.5, 2],
-        errorBuilder: (_, _) => const Center(
-          child: Text('This video could not be played. Try reopening it.'),
+        errorBuilder: (_, _) => _videoFailure(
+          'This video could not be played. Check your connection and try again.',
         ),
       );
       if (stale()) {
@@ -433,7 +496,9 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         return;
       }
       _player = player;
-      video.addListener(_watchVideoEnd);
+      video
+        ..addListener(_watchVideoEnd)
+        ..addListener(_watchVideoError);
       await video.setVolume(_muted ? 0 : 1);
       if (stale()) {
         player.dispose();
@@ -1888,27 +1953,31 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     }
     if (!active) return _videoPoster(post, board);
     final error = _videoError;
-    if (error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(error, textAlign: TextAlign.center),
-        ),
-      );
-    }
+    if (error != null) return _videoFailure(error);
     final player = _player;
     if (player == null) {
       return Stack(
         fit: StackFit.expand,
         children: [
           _videoPoster(post, board),
-          const Align(
-            alignment: Alignment.bottomCenter,
-            child: LinearProgressIndicator(
-              key: ValueKey('video_progress'),
-              minHeight: 4,
+          if (_holdVideo)
+            Center(
+              child: IconButton.filled(
+                key: const ValueKey('video_play'),
+                tooltip: 'Play',
+                iconSize: 40,
+                onPressed: _playHeldVideo,
+                icon: const Icon(Icons.play_arrow_rounded),
+              ),
+            )
+          else
+            const Align(
+              alignment: Alignment.bottomCenter,
+              child: LinearProgressIndicator(
+                key: ValueKey('video_progress'),
+                minHeight: 4,
+              ),
             ),
-          ),
         ],
       );
     }
@@ -1917,6 +1986,25 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       child: _undimmedPlayer(context, Chewie(controller: player)),
     );
   }
+
+  Widget _videoFailure(String message) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(message, textAlign: TextAlign.center),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            key: const ValueKey('video_retry'),
+            onPressed: _retryVideo,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Try again'),
+          ),
+        ],
+      ),
+    ),
+  );
 
   // Chewie lays a black scrim over the video whenever its controls show,
   // except on iOS. Reporting iOS to the player subtree drops that scrim;
