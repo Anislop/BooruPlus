@@ -109,6 +109,10 @@ extension BoardInfo on Board {
   /// Boards made of AI-generated media, where the no-AI setting is ignored.
   bool get isAiBoard => this == Board.aibooru;
 
+  /// Whether the website suggests tags while typing. Konachan and Yande.re
+  /// return no suggestions.
+  bool get suggestsTags => this != Board.konachan && this != Board.yandere;
+
   /// Boards the app no longer offers. Their code and saved data stay, but
   /// they are left out of the website lists, searches, and booruShorts.
   bool get isRetired => this == Board.aibooru;
