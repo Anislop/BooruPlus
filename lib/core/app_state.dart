@@ -490,7 +490,7 @@ class AppState extends ChangeNotifier {
       );
       count = raw
           .map(MediaPost.fromMap)
-          .where((post) => post.id > mark && _allowedOn(post, board))
+          .where((post) => post.id > mark && _allowedOn(post, board, query))
           .length;
     } catch (_) {
       count = null;
@@ -606,7 +606,7 @@ class AppState extends ChangeNotifier {
     );
     return raw
         .map(MediaPost.fromMap)
-        .where((post) => _allowedOn(post, board))
+        .where((post) => _allowedOn(post, board, tags))
         .toList(growable: false);
   }
 
@@ -1903,11 +1903,17 @@ class AppState extends ChangeNotifier {
   String _aiTagFor(Board? board) =>
       board?.isSankakuFamily == true ? 'ai-created' : 'ai_generated';
 
-  bool _allowed(MediaPost post) => _allowedOn(post, _board);
+  bool _allowed(MediaPost post) => _allowedOn(post, _board, _tags);
 
   /// The local no-AI, blocked-tag, uploader, rating, and hidden-post checks
-  /// for [post] on [board].
-  bool _allowedOn(MediaPost post, Board? board) {
+  /// for [post] on [board], plus the exclusions (`-tag`) in [query], which
+  /// some websites skip or name differently.
+  bool _allowedOn(
+    MediaPost post,
+    Board? board, [
+    List<String> query = const [],
+  ]) {
+    if (excludedByQuery(post.tags, query)) return false;
     final aiTag = _aiTagFor(board);
     if (_excludesAiOn(board) &&
         post.tags.any((tag) => _normalize(tag) == aiTag)) {
@@ -1922,6 +1928,39 @@ class AppState extends ChangeNotifier {
     return (board?.hasRatings == false || _ratingAllowed(post)) &&
         !isHidden(post, board: board);
   }
+
+  static final _tagSeparators = RegExp(r'[\s_-]+');
+  static final _tagQualifier = RegExp(r'^(.+?)_\([^()]*\)$');
+
+  /// Whether [postTags] include a tag that [query] excludes (`-tag`).
+  /// Websites name tags differently, so names match ignoring case and
+  /// whether words are joined by spaces, hyphens, or underscores, and
+  /// ignoring a trailing `_(qualifier)` on either side: `-hu_tao` also
+  /// excludes `hu_tao_(genshin_impact)`, and the reverse. Wildcard
+  /// exclusions are left to the website.
+  @visibleForTesting
+  static bool excludedByQuery(Iterable<String> postTags, List<String> query) {
+    final excluded = {
+      for (final tag in query)
+        if (tag.startsWith('-') && !tag.contains('*'))
+          _looseTag(tag.substring(1)),
+    }..remove('');
+    if (excluded.isEmpty) return false;
+    final tags = postTags.map(_looseTag).toSet();
+    final unqualified = tags.map(_unqualified).toSet();
+    return excluded.any(
+      (tag) =>
+          tags.contains(tag) ||
+          unqualified.contains(tag) ||
+          tags.contains(_unqualified(tag)),
+    );
+  }
+
+  static String _looseTag(String tag) =>
+      tag.trim().toLowerCase().replaceAll(_tagSeparators, '_');
+
+  static String _unqualified(String tag) =>
+      _tagQualifier.firstMatch(tag)?.group(1) ?? tag;
 
   Rating? _postRating(MediaPost post) => RatingInfo.parse(post.rating);
   bool _ratingAllowed(MediaPost post) {
@@ -2262,7 +2301,7 @@ class MultiSiteSearch extends ChangeNotifier {
       }
       return raw
           .map(MediaPost.fromMap)
-          .where((post) => _app._allowedOn(post, board))
+          .where((post) => _app._allowedOn(post, board, _tags))
           .map((post) => SavedPost(board: board, post: post))
           .where((saved) => _seen.add(saved.identity))
           .toList(growable: false);
@@ -2659,7 +2698,7 @@ class ShortsFeed extends ChangeNotifier {
           .where(
             (post) =>
                 post.isVideo &&
-                _app._allowedOn(post, board) &&
+                _app._allowedOn(post, board, query) &&
                 _app._settings.shortsContent.allows(_app._postRating(post)),
           )
           .map((post) => SavedPost(board: board, post: post))
