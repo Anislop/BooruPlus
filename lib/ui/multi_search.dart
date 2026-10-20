@@ -88,6 +88,23 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     }
   }
 
+  /// The website that suggests tags while typing: the current one when it
+  /// is switched on, otherwise the first switched-on one with suggestions.
+  Board? get _suggestingBoard {
+    final chosen = _available.where(_chosen.contains).toList();
+    final current = widget.state.board;
+    if (current != null && current.suggestsTags && chosen.contains(current)) {
+      return current;
+    }
+    return chosen.where((board) => board.suggestsTags).firstOrNull;
+  }
+
+  Future<List<TagSuggestion>> _autocomplete(String query) async {
+    final board = _suggestingBoard;
+    if (board == null) return const [];
+    return widget.state.autocomplete(query, from: board);
+  }
+
   /// Opens the viewer; a tag chosen there is searched here.
   Future<void> _open(List<SavedPost> results, int index) async {
     final displayed = [
@@ -121,12 +138,20 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 160),
+              constraints: const BoxConstraints(maxHeight: 180),
               child: SingleChildScrollView(
                 child: TagInput(
                   tags: _tags,
                   onChanged: (tags) => setState(() => _tags = tags),
                   onSubmit: _run,
+                  autocomplete: _autocomplete,
+                  postCount: (tag) => switch (_suggestingBoard) {
+                    final board? => widget.state.postCountFor(
+                      tag,
+                      board: board,
+                    ),
+                    null => null,
+                  },
                   hint: 'Tags to search on every website',
                 ),
               ),

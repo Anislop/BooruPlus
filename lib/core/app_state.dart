@@ -167,9 +167,10 @@ class AppState extends ChangeNotifier {
   /// When the rate-limited feed can be retried, while its error shows.
   DateTime? get retryAt => _error == null ? null : _retryAt;
 
-  /// The post count autocomplete last reported for [tag] on this website.
-  int? postCountFor(String tag) {
-    final board = _board;
+  /// The post count autocomplete last reported for [tag] on [board], or on
+  /// this website.
+  int? postCountFor(String tag, {Board? board}) {
+    board ??= _board;
     if (board == null) return null;
     return _postCounts[board]?[_normalize(tag)];
   }
@@ -1035,13 +1036,14 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  Future<List<TagSuggestion>> autocomplete(String query) async {
+  /// Tag suggestions from [from], or from the current website.
+  Future<List<TagSuggestion>> autocomplete(String query, {Board? from}) async {
     final generation = ++_autocompleteGeneration;
     final value = query.trim();
-    final board = _board;
+    final board = from ?? _board;
     if (value.length < 2 ||
         board == null ||
-        (board.requiresAuth && _credentials == null)) {
+        (board.requiresAuth && _credentialsByBoard[board] == null)) {
       return const [];
     }
     try {

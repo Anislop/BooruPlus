@@ -24,6 +24,25 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
 
 import 'core_test.dart' show FakeAccounts, MemoryStore, FakeRepo;
 
+/// Suggests `frieren` for any query and records which website was asked.
+class _SuggestingRepo extends FakeRepo {
+  _SuggestingRepo() : super(const [[]]);
+  final List<Board> boards = [];
+
+  @override
+  Future<List<Map<String, dynamic>>> autocomplete({
+    required Board board,
+    required String query,
+    required int limit,
+    Credentials? credentials,
+  }) async {
+    boards.add(board);
+    return const [
+      {'name': 'frieren', 'category': 'character', 'postCount': 1234},
+    ];
+  }
+}
+
 /// Finds [release] without the network or the Android host.
 class _FakeUpdates extends UpdateService {
   _FakeUpdates(this.release);
@@ -1598,6 +1617,44 @@ void main() {
     expect(find.byType(MediaViewer), findsNothing);
     expect(find.widgetWithText(InputChip, 'red_sky'), findsOneWidget);
     expect(find.widgetWithText(InputChip, 'blue_sky'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('search on all sites suggests tags from a switched-on website', (
+    tester,
+  ) async {
+    final repo = _SuggestingRepo();
+    final state = AppState(
+      repository: repo,
+      // Konachan has no suggestions, so the next switched-on website helps.
+      store: MemoryStore()
+        ..selected = Board.konachan
+        ..settings = const AppSettings(multiSearchOff: [Board.safebooru]),
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MultiSearchScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'fri');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+    final expected = state.settings.visibleBoards.firstWhere(
+      (board) => board != Board.safebooru && board.suggestsTags,
+    );
+    expect(repo.boards, [expected]);
+    expect(find.text('frieren'), findsOneWidget);
+
+    await tester.tap(find.text('frieren'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(InputChip, 'frieren  1.2k'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 5));
