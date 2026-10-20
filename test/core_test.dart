@@ -1551,6 +1551,51 @@ void main() {
     expect(repo.queries.last.take(4), ['-1girl', '~cat', '~dog', 'solo']);
   });
 
+  test('excluded tags match loosely across website naming', () {
+    bool excluded(List<String> tags, List<String> query) =>
+        AppState.excludedByQuery(tags, query);
+    expect(excluded(['Long Hair'], ['-long_hair']), isTrue);
+    expect(excluded(['ai-created'], ['-ai_created']), isTrue);
+    expect(excluded(['hu_tao_(genshin_impact)'], ['-hu_tao']), isTrue);
+    expect(excluded(['hu_tao'], ['-hu_tao_(genshin_impact)']), isTrue);
+    expect(excluded(['hu_tao'], ['hu_tao']), isFalse);
+    expect(
+      excluded(['hu_tao_(cosplay)'], ['-hu_tao_(genshin_impact)']),
+      isFalse,
+    );
+    expect(excluded(['long_hair_ornament'], ['-long_hair']), isFalse);
+    expect(excluded(['cat_ears'], ['-cat*', '-', '-rating:e']), isFalse);
+  });
+
+  test(
+    'excluded tags are enforced locally when a website skips them',
+    () async {
+      final repo = FakeRepo([
+        [
+          post(1, tags: ['cat']),
+          post(2, tags: ['cat', 'Dog Girl']),
+          post(3, tags: ['cat', 'saber_(fate)']),
+        ],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      await state.updateSettings(const AppSettings(excludeAi: false));
+      await state.search(['cat', '-dog_girl', '-saber']);
+      expect(state.posts.map((p) => p.id), [1]);
+
+      final search = state.multiSiteSearch();
+      addTearDown(search.dispose);
+      await search.search(
+        ['cat', '-dog_girl', '-saber'],
+        [Board.safebooru, Board.e621],
+      );
+      expect(search.results.map((saved) => saved.post.id), [1, 1]);
+    },
+  );
+
   test('Gelbooru-syntax boards group either-or tags', () {
     expect(
       AppState.providerSyntax(Board.gelbooru, [
