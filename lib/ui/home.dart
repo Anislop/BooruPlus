@@ -2605,18 +2605,7 @@ class _QuickActionDialogState extends State<_QuickActionDialog>
   Future<void> _startVideo(String url) async {
     final video = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      httpHeaders: switch (widget.board) {
-        Board.gelbooru => const {
-          'Referer': 'https://gelbooru.com/',
-          'User-Agent': 'BooruPlus/1.0',
-        },
-        // Nozomi's media hosts answer 404 without the site as Referer.
-        Board.nozomi => const {
-          'Referer': 'https://nozomi.la/',
-          'User-Agent': 'BooruPlus/1.0',
-        },
-        _ => const {},
-      },
+      httpHeaders: videoHeaders(widget.board),
     );
     _video = video;
     bool stale() => !mounted || _closing || !identical(_video, video);

@@ -144,6 +144,18 @@ const _defaults = <Board, BoardAppearance>{
     accent: Color(0xFFB79CE8),
     surface: Color(0xFF2A2238),
   ),
+  Board.realbooru: BoardAppearance(
+    name: 'Realbooru',
+    icon: Icons.photo_library_outlined,
+    accent: Color(0xFFE08A7E),
+    surface: Color(0xFF381E1B),
+  ),
+  Board.derpibooru: BoardAppearance(
+    name: 'Derpibooru',
+    icon: Icons.pets_outlined,
+    accent: Color(0xFF7FA8D9),
+    surface: Color(0xFF1A2636),
+  ),
 };
 
 final boardAppearances = <Board, BoardAppearance>{..._defaults};

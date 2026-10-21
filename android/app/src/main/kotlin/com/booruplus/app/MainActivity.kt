@@ -108,6 +108,8 @@ class MainActivity : FlutterActivity() {
         "eshuushuu" to lazy { EShuushuuApi(client, USER_AGENT) },
         "mikubooru" to hybooruClient,
         "nanbooru" to lazy { ShimmieApi(client, USER_AGENT) },
+        "derpibooru" to lazy { DerpibooruApi(client, USER_AGENT) },
+        "realbooru" to lazy { RealbooruApi(client, USER_AGENT) },
     )
     private val nozomiClient = lazy { NozomiApi(client, USER_AGENT) }
     private val nozomi by nozomiClient
@@ -1059,6 +1061,12 @@ class MainActivity : FlutterActivity() {
             background(result, mediaExecutor) { readMedia(value, NozomiApi::isMediaHost, NozomiApi.REFERER) }
             return
         }
+        // Realbooru media is fetched with the site as Referer, as other clients send it.
+        if (call.argument<String>("board") == "realbooru" && parsed != null &&
+            parsed.scheme == "https" && RealbooruApi.isMediaHost(parsed.host)) {
+            background(result, mediaExecutor) { readMedia(value, RealbooruApi::isMediaHost, RealbooruApi.REFERER) }
+            return
+        }
         if (parsed == null || !isGelbooruHost(parsed.host) || parsed.scheme != "https" ||
             parsed.queryParameter("api_key").isNullOrBlank() || parsed.queryParameter("user_id").isNullOrBlank()) {
             result.error("INVALID_URL", "Unsupported media URL", null)
@@ -1443,6 +1451,7 @@ class MainActivity : FlutterActivity() {
                 connection.setRequestProperty("User-Agent", USER_AGENT)
                 if (isGelbooruHost(current.host)) connection.setRequestProperty("Referer", GELBOORU_REFERER)
                 if (NozomiApi.isMediaHost(current.host)) connection.setRequestProperty("Referer", NozomiApi.REFERER)
+                if (RealbooruApi.isMediaHost(current.host)) connection.setRequestProperty("Referer", RealbooruApi.REFERER)
                 configure(connection)
                 val code = connection.responseCode
                 if (code in 300..399) {
@@ -1535,7 +1544,7 @@ class MainActivity : FlutterActivity() {
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         // GitHub release downloads redirect to its asset storage.
         private fun isUpdateHost(host: String): Boolean = host == "github.com" || host.endsWith(".githubusercontent.com")
-        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST)
+        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST, "realbooru" to RealbooruApi.HOST, "derpibooru" to DerpibooruApi.HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }

@@ -86,6 +86,10 @@ class AppState extends ChangeNotifier {
   final Map<String, DateTime> _refreshAttempts = {};
   final Map<String, SavedPost> _refreshQueue = {};
   bool _refreshScheduled = false;
+  // Realbooru lists thumbnails only. Posts read from their pages are kept
+  // by identity; each in-flight read is shared.
+  final Map<String, MediaPost> _resolvedMedia = {};
+  final Map<String, Future<bool>> _resolving = {};
   List<DownloadRecord> _downloadRecords = const [];
   Set<String> _downloadedIds = const {};
   // Post counts from autocomplete, per website, for the search chips.
@@ -177,6 +181,19 @@ class AppState extends ChangeNotifier {
 
   SavedPost displayReady(SavedPost post) {
     final authorized = post.authorized(_credentialsByBoard[post.board]);
+    if (_needsMedia(authorized)) {
+      final read = _resolvedMedia[authorized.identity];
+      if (read == null) return authorized;
+      return SavedPost(
+        board: authorized.board,
+        post: read.previewUrl.isEmpty
+            ? read.withUrls(
+                url: read.url,
+                previewUrl: authorized.post.previewUrl,
+              )
+            : read,
+      );
+    }
     if (!authorized.board.isSankakuFamily || !authorized.post.hasId) {
       return authorized;
     }
@@ -198,11 +215,65 @@ class AppState extends ChangeNotifier {
       displayReady(_saved(post, board)).post;
 
   /// [post] with media URLs that are still valid for display. Only boards
-  /// with expiring media URLs are rewritten; other posts pass through.
+  /// with expiring media URLs or thumbnail-only listings are rewritten;
+  /// other posts pass through.
   MediaPost displayPost(MediaPost post, {required Board board}) =>
-      board.isSankakuFamily
+      board.isSankakuFamily || board.listsThumbnailsOnly
       ? displayReady(SavedPost(board: board, post: post)).post
       : post;
+
+  /// Whether [saved] still has only its listing's thumbnail as media.
+  static bool _needsMedia(SavedPost saved) =>
+      saved.board.listsThumbnailsOnly &&
+      saved.post.hasId &&
+      saved.post.url == saved.post.previewUrl;
+
+  /// Reads [post]'s file, size, and typed tags from its page on boards
+  /// that list thumbnails only (Realbooru); [displayReady] then returns
+  /// them. Completes with whether anything new arrived. Failures are not
+  /// remembered, so the next call tries again.
+  Future<bool> resolveMedia(MediaPost post, {required Board board}) {
+    final saved = SavedPost(board: board, post: post);
+    final key = saved.identity;
+    if (!_needsMedia(saved) || _resolvedMedia.containsKey(key)) {
+      return Future.value(false);
+    }
+    final pending = _resolving[key];
+    if (pending != null) return pending;
+    final read = _readMedia(post, board, key);
+    _resolving[key] = read;
+    unawaited(read.whenComplete(() => _resolving.remove(key)));
+    return read;
+  }
+
+  Future<bool> _readMedia(MediaPost post, Board board, String key) async {
+    try {
+      final raw = await _repository.fetch(
+        board: board,
+        tags: ['id:${post.displayId}'],
+        limit: 1,
+        page: 0,
+        random: false,
+      );
+      for (final read in raw.map(MediaPost.fromMap)) {
+        if (SavedPost(board: board, post: read).identity != key ||
+            read.url.isEmpty ||
+            read.url == read.previewUrl) {
+          continue;
+        }
+        _resolvedMedia.remove(key);
+        _resolvedMedia[key] = read;
+        while (_resolvedMedia.length > 500) {
+          _resolvedMedia.remove(_resolvedMedia.keys.first);
+        }
+        notifyListeners();
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> toggleFavorite(MediaPost post, {Board? board}) async {
     if (isFavorite(post, board: board)) {
@@ -330,9 +401,14 @@ class AppState extends ChangeNotifier {
     Board? board,
     DownloadProgress? onProgress,
   }) async {
-    final display = displayReady(_saved(post, board));
+    final target = _saved(post, board);
+    await resolveMedia(post, board: target.board);
+    final display = displayReady(target);
     final url = display.post.url;
-    if (url.isEmpty) throw StateError('Missing media URL');
+    // A thumbnail-only listing must not be saved as the original.
+    if (url.isEmpty || _needsMedia(display)) {
+      throw StateError('Missing media URL');
+    }
     final location = await _downloads.download(
       url: url,
       name: mediaFileName(
@@ -375,9 +451,13 @@ class AppState extends ChangeNotifier {
 
   /// The size in bytes of [post]'s original media (what [downloadPost]
   /// saves), or null when unknown.
-  Future<int?> mediaSize(MediaPost post, {Board? board}) {
-    final url = displayReady(_saved(post, board)).post.url;
-    return url.isEmpty ? Future.value() : _downloads.mediaSize(url);
+  Future<int?> mediaSize(MediaPost post, {Board? board}) async {
+    final target = _saved(post, board);
+    await resolveMedia(post, board: target.board);
+    final display = displayReady(target);
+    final url = display.post.url;
+    if (url.isEmpty || _needsMedia(display)) return null;
+    return _downloads.mediaSize(url);
   }
 
   /// Downloads [posts] one at a time. Stops early when the download folder

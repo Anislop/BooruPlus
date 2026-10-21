@@ -264,6 +264,8 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | E-Shuushuu | — | — | All-ages anime art; no ratings |
 | Mikubooru | — | — | Hatsune Miku and VOCALOID art; no ratings |
 | Nanbooru | — | ✅ | Emmy the Robot and Nandroid art; no ratings |
+| Realbooru | — | — | Photos of real people; read from its pages, no tag suggestions |
+| Derpibooru | — | ✅ | My Little Pony art |
 
 </div>
 
