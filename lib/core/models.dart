@@ -20,6 +20,8 @@ enum Board {
   eshuushuu,
   mikubooru,
   nanbooru,
+  realbooru,
+  derpibooru,
 }
 
 /// Websites the app offers, in enum order: every board except retired ones.
@@ -48,6 +50,8 @@ extension BoardInfo on Board {
     Board.eshuushuu => 'E-Shuushuu',
     Board.mikubooru => 'Mikubooru',
     Board.nanbooru => 'Nanbooru',
+    Board.realbooru => 'Realbooru',
+    Board.derpibooru => 'Derpibooru',
   };
 
   String get host => switch (this) {
@@ -72,6 +76,8 @@ extension BoardInfo on Board {
     // Mikubooru (Hybooru) and Nanbooru (Shimmie) live on these hosts.
     Board.mikubooru => 'booru.funmaker.moe',
     Board.nanbooru => 'emmytherobot.art',
+    Board.realbooru => 'realbooru.com',
+    Board.derpibooru => 'derpibooru.org',
   };
 
   bool get requiresAuth => this == Board.rule34 || this == Board.gelbooru;
@@ -83,7 +89,13 @@ extension BoardInfo on Board {
       this == Board.rule34 ||
       this == Board.tbib ||
       this == Board.xbooru ||
-      this == Board.mspabooru;
+      this == Board.mspabooru ||
+      this == Board.realbooru;
+
+  /// Boards whose listings carry only thumbnails (Realbooru, read from HTML
+  /// because its API is off). A listed post's `url` is its thumbnail until
+  /// [AppState.resolveMedia] reads the file from the post's page.
+  bool get listsThumbnailsOnly => this == Board.realbooru;
 
   /// Whether posts carry a rating. Nozomi, E-Shuushuu, Mikubooru, and
   /// Nanbooru do not rate posts, so rating filters do not apply there.
@@ -109,9 +121,12 @@ extension BoardInfo on Board {
   /// Boards made of AI-generated media, where the no-AI setting is ignored.
   bool get isAiBoard => this == Board.aibooru;
 
-  /// Whether the website suggests tags while typing. Konachan and Yande.re
-  /// return no suggestions.
-  bool get suggestsTags => this != Board.konachan && this != Board.yandere;
+  /// Whether the website suggests tags while typing. Konachan, Yande.re,
+  /// and Realbooru return no suggestions.
+  bool get suggestsTags =>
+      this != Board.konachan &&
+      this != Board.yandere &&
+      this != Board.realbooru;
 
   /// Boards the app no longer offers. Their code and saved data stay, but
   /// they are left out of the website lists, searches, and booruShorts.
@@ -144,6 +159,11 @@ extension BoardInfo on Board {
     Board.nozomi ||
     Board.xbooru ||
     Board.nanbooru => const ['video'],
+    // Philomena's MIME type field; native code passes field searches as is.
+    Board.derpibooru => const ['mime_type:video/*'],
+    // Listings carry thumbnails only, so a video is not known to be one
+    // until its page is read.
+    Board.realbooru => null,
     // Sakugabooru's clips are tagged `animated`.
     Board.sakugabooru => const ['animated'],
     Board.safebooru ||
@@ -805,6 +825,8 @@ const _defaultBoardOrder = [
   Board.eshuushuu,
   Board.mikubooru,
   Board.nanbooru,
+  Board.realbooru,
+  Board.derpibooru,
 ];
 
 /// [bytes] as KB, MB, or GB.

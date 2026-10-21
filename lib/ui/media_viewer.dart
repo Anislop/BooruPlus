@@ -152,6 +152,28 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       });
     }
     _ensureVideo();
+    _resolveMedia(_index);
+  }
+
+  /// Realbooru lists thumbnails only: asks for the file of the post at
+  /// [index] and the next one (which the pager builds ahead), and shows it
+  /// once it arrives.
+  void _resolveMedia(int index) {
+    for (final target in [index, index + 1]) {
+      if (target >= _pageCount) continue;
+      final board = _boardAt(target);
+      if (!board.listsThumbnailsOnly) continue;
+      widget.state.resolveMedia(_postAt(target), board: board).then((changed) {
+        if (!mounted || !changed) return;
+        setState(() {});
+        if (target != _index) return;
+        // While paging, the scroll end starts the video instead.
+        if (!_pages.hasClients || !_pages.position.isScrollingNotifier.value) {
+          _ensureVideo();
+        }
+        _scheduleSlide();
+      });
+    }
   }
 
   /// Volume keys page between posts when that setting is on. Handled keys
@@ -352,6 +374,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     });
     widget.state.recordBrowsedTags(_post.tags);
     _scheduleSlide();
+    _resolveMedia(index);
   }
 
   // Video starts once paging settles so fast swipes past videos do not
@@ -2104,6 +2127,10 @@ Map<String, String> videoHeaders(Board board) => switch (board) {
     'Referer': 'https://nozomi.la/',
     'User-Agent': 'BooruPlus/1.0',
   },
+  Board.realbooru => const {
+    'Referer': 'https://realbooru.com/',
+    'User-Agent': 'BooruPlus/1.0',
+  },
   _ => const {},
 };
 
@@ -2141,6 +2168,7 @@ String postBrowserUrl(Board board, MediaPost post) {
   return switch (board) {
     Board.danbooru || Board.aibooru => 'https://${board.host}/posts/${post.id}',
     Board.nozomi => 'https://${board.host}/post/${post.id}.html',
+    Board.derpibooru => 'https://${board.host}/images/${post.id}',
     Board.e621 || Board.e926 => 'https://${board.host}/posts/${post.id}',
     Board.sankaku ||
     Board.idolcomplex => 'https://${board.host}/posts/${post.displayId}',

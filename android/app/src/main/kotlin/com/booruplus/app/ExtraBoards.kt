@@ -25,9 +25,11 @@ import kotlin.random.Random
  * Small JSON clients for boards the vendored library does not model:
  * Gelbooru 0.2 DAPI boards (TBIB, XBooru, MSPABooru), AIBooru (a Danbooru
  * fork whose absolute CDN URLs the library's Danbooru entity rewrites onto
- * danbooru.donmai.us), and Nozomi (binary post-ID indexes plus one JSON file
- * per post). Each returns the same post maps as MainActivity.mapImage.
- * MoreBoards.kt holds the clients for boards on other engines.
+ * danbooru.donmai.us), Nozomi (binary post-ID indexes plus one JSON file
+ * per post), Derpibooru (Philomena's JSON API), and Realbooru (HTML pages;
+ * its API is switched off). Each returns the same post maps as
+ * MainActivity.mapImage. MoreBoards.kt holds the clients for boards on
+ * other engines.
  */
 
 /**
@@ -512,5 +514,427 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
         /** `<c>/<ba>/<value>` from a post ID or media hash, as the site builds paths. */
         fun hashPath(value: String): String =
             if (value.length < 3) value else "${value.last()}/${value.substring(value.length - 3, value.length - 1)}/$value"
+    }
+}
+
+/** [value] as an absolute HTTPS URL against [base]; protocol-relative and plain HTTP links are upgraded. */
+private fun upgradedHttpsUrl(base: String, value: String?): String? {
+    val text = value?.trim()?.takeIf { it.isNotEmpty() && it != "null" } ?: return null
+    val upgraded = if (text.startsWith("http://", ignoreCase = true)) "https://" + text.substring(7) else text
+    val url = try { java.net.URI(base).resolve(upgraded.replace(" ", "%20")) } catch (_: IllegalArgumentException) { return null }
+    return url.takeIf { it.scheme == "https" && !it.host.isNullOrBlank() && it.userInfo == null }?.toString()
+}
+
+/** A JSON string field, or "" when it is missing or null (optString returns "null" for JSON null). */
+private fun JSONObject.text(name: String): String = if (isNull(name)) "" else optString(name).trim()
+
+/**
+ * Derpibooru (derpibooru.org): Philomena's JSON API. Tag names hold spaces,
+ * so the app's underscored tags are turned back into names and joined with
+ * commas; field searches (`score.gte:100`, `created_at:>=2024-01-01`) keep
+ * their underscores. Searches use the Everything filter so the app's own
+ * rating and blocked-tag filters apply instead of the site's default
+ * filter. Ratings are tags (`safe`, `suggestive`, `questionable`,
+ * `explicit`); `rating:` tags from the app are rewritten to them. Ordering
+ * is the `sf`/`sd` parameters, mapped from `order:` tags; discovery uses a
+ * seeded `random:` order so its pages stay consistent. At most 50 posts
+ * per page. Hashes are SHA-512, so `md5:` lookups find nothing.
+ */
+internal class DerpibooruApi(private val client: OkHttpClient, private val userAgent: String) : BoardClient {
+    override fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
+        if (cancelled()) throw IOException("Cancelled")
+        if (tags.any { it.startsWith("md5:", ignoreCase = true) }) return emptyList()
+        val (field, direction) = sort(tags, random, seed)
+        val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegments("api/v1/json/search/images")
+            .addQueryParameter("q", query(tags).ifEmpty { "*" })
+            .addQueryParameter("filter_id", EVERYTHING_FILTER)
+            .addQueryParameter("per_page", limit.coerceIn(1, MAX_PER_PAGE).toString())
+            .addQueryParameter("page", (page + 1).toString())
+            .addQueryParameter("sf", field).addQueryParameter("sd", direction)
+            .build()
+        val body = client.getBody(url, userAgent)?.trim().orEmpty()
+        if (!body.startsWith("{")) return emptyList()
+        val images = JSONObject(body).optJSONArray("images") ?: return emptyList()
+        return (0 until images.length()).mapNotNull { images.optJSONObject(it)?.let(::mapPost) }
+    }
+
+    internal fun mapPost(image: JSONObject): Map<String, Any?>? {
+        val id = image.optLong("id").takeIf { it > 0 } ?: return null
+        // Removed and merged images keep only their IDs.
+        if (image.optBoolean("hidden_from_users")) return null
+        val urls = image.optJSONObject("representations") ?: return null
+        val full = upgradedHttpsUrl(SITE, urls.text("full")) ?: return null
+        val mime = image.text("mime_type").lowercase()
+        val video = mime.startsWith("video/")
+        val thumb = upgradedHttpsUrl(SITE, urls.text("thumb"))
+        val large = upgradedHttpsUrl(SITE, urls.text("large"))
+        // Video thumbnails are short WebM clips; Philomena renders a GIF of
+        // each beside them. A video too small for thumbnails has none.
+        val preview = when {
+            !video -> thumb ?: full
+            thumb != null && thumb.substringAfterLast('/').startsWith("thumb.") -> thumb.substringBeforeLast('/') + "/thumb.gif"
+            else -> ""
+        }
+        val url = when {
+            // WebM uploads have an H.264 copy, which more devices decode in hardware.
+            video && full.endsWith(".webm") -> full.removeSuffix(".webm") + ".mp4"
+            // Flutter cannot draw SVG; the large rendition is a PNG.
+            mime == "image/svg+xml" -> large ?: full
+            else -> full
+        }
+        val tags = image.optJSONArray("tags")?.let { array ->
+            (0 until array.length()).map { array.optString(it).trim().replace(' ', '_') }.filter { it.isNotEmpty() }
+        } ?: emptyList()
+        return mapOf(
+            "id" to id.toString(),
+            "url" to url, "previewUrl" to preview,
+            "tags" to tags,
+            "tagDetails" to tags.map { mapOf("name" to it, "category" to category(it)) },
+            "postUrl" to "https://$HOST/images/$id",
+            "rating" to rating(tags),
+            "uploader" to image.text("uploader"),
+            "source" to image.text("source_url"),
+            "width" to image.optInt("width"), "height" to image.optInt("height"),
+            "score" to image.optInt("score"), "description" to image.text("description"),
+            "videoVariants" to emptyList<Map<String, Any?>>(),
+            "md5" to "",
+            "parentId" to null,
+            "hasChildren" to false,
+            "sampleUrl" to (large?.takeIf { !video && it != url && it != preview } ?: ""),
+            "pools" to emptyList<String>(),
+        )
+    }
+
+    override fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> {
+        val term = query.trim().removePrefix("-").replace('_', ' ')
+        if (term.isEmpty() || term.contains(',')) return emptyList()
+        val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegments("api/v1/json/search/tags")
+            .addQueryParameter("q", term.replace(SPECIAL, "\\\\$1") + "*")
+            .addQueryParameter("per_page", MAX_PER_PAGE.toString())
+            .build()
+        val body = client.getBody(url, userAgent)?.trim().orEmpty()
+        if (!body.startsWith("{")) return emptyList()
+        val tags = JSONObject(body).optJSONArray("tags") ?: return emptyList()
+        return (0 until tags.length()).mapNotNull { tags.optJSONObject(it) }
+            // Aliases redirect to another tag, which is listed on its own.
+            .filter { it.text("aliased_tag").isEmpty() && it.text("name").isNotEmpty() }
+            .sortedByDescending { it.optInt("images") }
+            .take(limit)
+            .map { tag ->
+                val name = tag.text("name").replace(' ', '_')
+                val category = when (tag.text("category")) {
+                    "origin" -> "artist"
+                    "character", "oc" -> "character"
+                    "species" -> "species"
+                    "content-official", "content-fanmade" -> "copyright"
+                    "rating", "spoiler", "error" -> "meta"
+                    else -> "general"
+                }
+                mapOf("name" to name, "category" to category, "postCount" to tag.optInt("images").takeIf { it > 0 })
+            }
+    }
+
+    companion object {
+        const val HOST = "derpibooru.org"
+        private const val SITE = "https://$HOST/"
+        // Derpibooru's system "Everything" filter (the site's default hides explicit images).
+        private const val EVERYTHING_FILTER = "56027"
+        private const val MAX_PER_PAGE = 50
+        private val SPECIAL = Regex("""([\\*?"()])""")
+        private val ORDER = Regex("^(order|sort):.+", RegexOption.IGNORE_CASE)
+        private val FIELD = Regex("""^([a-z_]+)(\.(?:gte|gt|lte|lt))?:(.*)$""", RegexOption.IGNORE_CASE)
+        // Philomena's image search fields (Images.Query); other `name:` tokens are namespaced tags.
+        private val FIELDS = setOf(
+            "id", "width", "height", "score", "upvotes", "downvotes", "hides", "faves", "pixels", "size",
+            "orig_size", "comment_count", "source_count", "tag_count", "body_type_tag_count",
+            "error_tag_count", "character_tag_count", "content_fanmade_tag_count",
+            "content_official_tag_count", "oc_tag_count", "origin_tag_count", "rating_tag_count",
+            "species_tag_count", "spoiler_tag_count", "uploader_id", "faved_by_id", "duplicate_id",
+            "aspect_ratio", "wilson_score", "duration", "created_at", "updated_at", "first_seen_at",
+            "faved_by", "orig_sha512_hash", "sha512_hash", "uploader", "source_url", "original_format",
+            "mime_type", "file_name", "animated", "processed", "thumbnails_generated", "description",
+            "gallery_id", "my",
+        )
+        private val SORT_FIELDS = setOf(
+            "id", "updated_at", "first_seen_at", "aspect_ratio", "faves", "downvotes", "upvotes", "width",
+            "height", "score", "comment_count", "tag_count", "wilson_score", "pixels", "size", "duration", "hides",
+        )
+        private val RATING_TERMS = mapOf(
+            "safe" to "safe", "s" to "safe", "general" to "safe", "g" to "safe",
+            "questionable" to "(suggestive || questionable)", "q" to "(suggestive || questionable)",
+            "explicit" to "explicit", "e" to "explicit",
+        )
+        private val ARTIST_NAMESPACES = setOf("artist", "editor", "colorist", "photographer", "prompter")
+        private val COPYRIGHT_NAMESPACES = setOf("comic", "series", "art_pack", "fanfic")
+        private val CONTENT_RATINGS = setOf("safe", "suggestive", "questionable", "explicit", "semi-grimdark", "grimdark", "grotesque")
+
+        /** The Philomena search for the app's [tags], without ordering tags. */
+        internal fun query(tags: List<String>): String =
+            tags.filterNot { ORDER.matches(it) }.mapNotNull(::term).joinToString(",")
+
+        private fun term(tag: String): String? {
+            val negated = tag.startsWith("-")
+            val body = tag.removePrefix("-").trim().ifEmpty { return null }
+            val value = if (body.startsWith("rating:", ignoreCase = true)) {
+                RATING_TERMS[body.substringAfter(':').lowercase()] ?: return null
+            } else {
+                field(body) ?: body.replace('_', ' ')
+            }
+            return if (negated) "-$value" else value
+        }
+
+        /** A field search with Danbooru-style comparisons (`:>=`) as Philomena's (`.gte:`); null for a tag. */
+        private fun field(body: String): String? {
+            val match = FIELD.matchEntire(body) ?: return null
+            val name = match.groupValues[1].lowercase()
+            if (name !in FIELDS) return null
+            if (match.groupValues[2].isNotEmpty()) return "$name${match.groupValues[2].lowercase()}:${match.groupValues[3]}"
+            val value = match.groupValues[3]
+            return when {
+                value.startsWith(">=") -> "$name.gte:${value.substring(2)}"
+                value.startsWith("<=") -> "$name.lte:${value.substring(2)}"
+                value.startsWith(">") -> "$name.gt:${value.substring(1)}"
+                value.startsWith("<") -> "$name.lt:${value.substring(1)}"
+                else -> "$name:$value"
+            }
+        }
+
+        /** The `sf`/`sd` pair for the last `order:` tag; newest first by default. */
+        internal fun sort(tags: List<String>, random: Boolean, seed: Int): Pair<String, String> {
+            val seeded = "random:${seed.toLong() and 0xffffffffL}"
+            val order = tags.lastOrNull { ORDER.matches(it) }?.substringAfter(':')?.lowercase()
+                ?: return (if (random) seeded else "id") to "desc"
+            val direction = if (order.endsWith("_asc") || order.endsWith(":asc")) "asc" else "desc"
+            val field = order.removeSuffix("_asc").removeSuffix("_desc").removeSuffix(":asc").removeSuffix(":desc")
+            return when (field) {
+                "random" -> seeded
+                "favcount", "favorites", "fav" -> "faves"
+                "mpixels", "quality" -> "pixels"
+                "popular", "popularity" -> "wilson_score"
+                // Upload dates sort as first_seen_at (created_at is not a sort field).
+                "created_at", "date" -> "first_seen_at"
+                in SORT_FIELDS -> field
+                else -> "id"
+            } to direction
+        }
+
+        private fun rating(tags: List<String>): String = when {
+            "explicit" in tags -> "explicit"
+            "questionable" in tags || "suggestive" in tags -> "questionable"
+            "safe" in tags -> "safe"
+            else -> "Unknown"
+        }
+
+        /** A tag's kind from its namespace; image results do not include tag categories. */
+        private fun category(tag: String): String {
+            if (tag in CONTENT_RATINGS) return "meta"
+            val namespace = tag.substringBefore(':', "")
+            return when {
+                namespace in ARTIST_NAMESPACES -> "artist"
+                namespace == "oc" -> "character"
+                namespace in COPYRIGHT_NAMESPACES -> "copyright"
+                namespace == "spoiler" || namespace == "generator" -> "meta"
+                else -> "general"
+            }
+        }
+    }
+}
+
+/**
+ * Realbooru (realbooru.com): a Gelbooru 0.2 site whose API is switched off
+ * (its DAPI answers `success="false"`), so posts are read from its HTML
+ * pages, as LoliSnatcher and Boorusama do. List pages hold 42 thumbnails
+ * with their tags (and sometimes `score:`/`rating:`) in the image title.
+ * A post's file URL, size, and typed tags appear only on its own page, which
+ * `id:` lookups read; Dart asks for that when the viewer opens a post, so
+ * listed posts carry their thumbnail as `url` until then. Media hosts are
+ * sent the site as Referer.
+ */
+internal class RealbooruApi(private val client: OkHttpClient, private val userAgent: String) : BoardClient {
+    // List pages hold a fixed PAGE_SIZE posts; [limit] does not apply.
+    override fun fetch(tags: List<String>, page: Int, limit: Int, random: Boolean, seed: Int, cancelled: () -> Boolean): List<Map<String, Any?>> {
+        if (cancelled()) throw IOException("Cancelled")
+        val ids = tags.firstNotNullOfOrNull { ID_LOOKUP.matchEntire(it.trim()) }?.groupValues?.get(1)
+        if (ids != null) {
+            return ids.split(',').mapNotNull { it.toLongOrNull()?.takeIf { id -> id > 0 } }.distinct().take(MAX_LOOKUPS).mapNotNull { id ->
+                if (cancelled()) throw IOException("Cancelled")
+                client.getBody(postUrl(id).toHttpUrl(), userAgent)?.let { parsePost(id, it) }
+            }
+        }
+        val offset = discoveryOffset(random, tags, seed)
+        val posts = list(tags, page + offset)
+        val result = if (posts.isEmpty() && offset > 0) list(tags, page) else posts
+        return if (random) result.shuffled(Random(seed xor page)) else result
+    }
+
+    private fun list(tags: List<String>, page: Int): List<Map<String, Any?>> {
+        val url = HttpUrl.Builder().scheme("https").host(HOST).addPathSegment("index.php")
+            .addQueryParameter("page", "post").addQueryParameter("s", "list")
+            .addQueryParameter("tags", tags.joinToString(" ").ifBlank { "all" })
+            .addQueryParameter("pid", (page * PAGE_SIZE).toString())
+            .build()
+        return parseList(client.getBody(url, userAgent).orEmpty())
+    }
+
+    // Its pages offer no tag lookup to read without the API.
+    override fun autocomplete(query: String, limit: Int): List<Map<String, Any?>> = emptyList()
+
+    companion object {
+        const val HOST = "realbooru.com"
+        const val REFERER = "https://realbooru.com/"
+        const val PAGE_SIZE = 42
+        private const val MAX_LOOKUPS = 40
+        private val ID_LOOKUP = Regex("""^id:(\d{1,12}(?:,\d{1,12})*)$""", RegexOption.IGNORE_CASE)
+        private val THUMB = Regex("""<a\b[^>]*\bid\s*=\s*["']p(\d{1,12})["'][^>]*>(?:(?!</a>)[\s\S]){0,600}?(<img\b[^>]*>)""", RegexOption.IGNORE_CASE)
+        private val HASH = Regex("""([0-9a-f]{32})\.[a-z0-9]{2,5}(?:\?.*)?$""", RegexOption.IGNORE_CASE)
+        private val IMAGE_PATH = Regex("""/images/([0-9a-f]{2})/([0-9a-f]{2})/([0-9a-f]{32})\.""", RegexOption.IGNORE_CASE)
+        private val VIDEO_PLAYER = Regex("""<video\b[^>]*\bid\s*=\s*["']gelcomVideoPlayer["'][^>]*>[\s\S]*?</video>""", RegexOption.IGNORE_CASE)
+        private val VIDEO = Regex("""<video\b[^>]*>[\s\S]*?</video>""", RegexOption.IGNORE_CASE)
+        private val VIDEO_TAG = Regex("""<video\b[^>]*>""", RegexOption.IGNORE_CASE)
+        private val SOURCE = Regex("""<source\b[^>]*>""", RegexOption.IGNORE_CASE)
+        private val MAIN_IMAGE = Regex("""<img\b[^>]*\bid\s*=\s*["']image["'][^>]*>""", RegexOption.IGNORE_CASE)
+        private val IMAGE = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
+        private val CONTAINER = Regex("""class\s*=\s*["'][^"']*\bimageContainer\b""", RegexOption.IGNORE_CASE)
+        private val TAG_LIST = Regex("""\bid\s*=\s*["']tagLink["']""", RegexOption.IGNORE_CASE)
+        private val TAG_ELEMENT = Regex("""<(li|a)\b([^>]*)>""", RegexOption.IGNORE_CASE)
+        private val LINK_TEXT = Regex("""<a\b[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+        private val TAGS_FIELD = Regex("""<textarea\b[^>]*\bname\s*=\s*["']tags["'][^>]*>([\s\S]*?)</textarea>""", RegexOption.IGNORE_CASE)
+        private val SOURCE_FIELD = Regex("""<input\b[^>]*\bname\s*=\s*["']source["'][^>]*>""", RegexOption.IGNORE_CASE)
+        private val UPLOADER = Regex("""<a\b[^>]*href\s*=\s*["'][^"']*page=account&(?:amp;)?s=profile&(?:amp;)?id=\d+[^"']*["'][^>]*>([^<]+)</a>""", RegexOption.IGNORE_CASE)
+        private val RATING = Regex("""Rating:\s*(?:<[^>]*>\s*)*(safe|general|sensitive|questionable|explicit)""", RegexOption.IGNORE_CASE)
+        private val MARKUP = Regex("<[^>]*>")
+        private val ENTITY = Regex("""&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);""", RegexOption.IGNORE_CASE)
+        // Element classes on the post page's tag list, by app tag category.
+        private val TAG_CLASSES = listOf(
+            setOf("tag-type-artist", "model") to "artist",
+            setOf("tag-type-copyright", "copyright") to "copyright",
+            setOf("tag-type-character", "character") to "character",
+            setOf("tag-type-metadata", "tag-type-meta", "metadata") to "meta",
+            setOf("tag-type-general", "general") to "general",
+        )
+
+        fun isMediaHost(host: String): Boolean = host == HOST || host.endsWith(".$HOST")
+
+        fun postUrl(id: Long) = "https://$HOST/index.php?page=post&s=view&id=$id"
+
+        private val ATTRIBUTES = ConcurrentHashMap<String, Regex>()
+
+        private fun attr(element: String, name: String): String? =
+            ATTRIBUTES.getOrPut(name) {
+                Regex("""(?<![\w-])$name\s*=\s*(["'])(.*?)\1""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            }.find(element)?.groupValues?.get(2)?.let(::decode)?.trim()?.takeIf { it.isNotEmpty() }
+
+        private fun decode(value: String): String = ENTITY.replace(value) { match ->
+            val entity = match.groupValues[1].lowercase()
+            when {
+                entity.startsWith("#x") -> entity.substring(2).toIntOrNull(16)?.let { String(Character.toChars(it)) }
+                entity.startsWith("#") -> entity.substring(1).toIntOrNull()?.let { String(Character.toChars(it)) }
+                else -> mapOf("amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\"", "apos" to "'", "nbsp" to " ")[entity]
+            } ?: match.value
+        }
+
+        private fun text(html: String): String = decode(MARKUP.replace(html, " ")).replace(Regex("\\s+"), " ").trim()
+
+        /** Thumbnails from a list page, in page order. */
+        internal fun parseList(html: String): List<Map<String, Any?>> {
+            val seen = HashSet<Long>()
+            return THUMB.findAll(html).mapNotNull { match ->
+                val id = match.groupValues[1].toLongOrNull()?.takeIf { it > 0 && seen.add(it) } ?: return@mapNotNull null
+                val image = match.groupValues[2]
+                // Lazily loaded thumbnails keep the real address in data-src.
+                val thumb = upgradedHttpsUrl(REFERER, attr(image, "data-src") ?: attr(image, "src")) ?: return@mapNotNull null
+                var rating: String? = null
+                var score = 0
+                val title = attr(image, "title") ?: attr(image, "alt") ?: ""
+                // Titles are either space-separated tags or comma-separated names with spaces.
+                val words = if (title.contains(", ")) title.split(", ").map { it.trim().replace(' ', '_') } else title.split(Regex("\\s+"))
+                val tags = words.filter { word ->
+                    when {
+                        word.startsWith("rating:", ignoreCase = true) -> { rating = word.substringAfter(':'); false }
+                        word.startsWith("score:", ignoreCase = true) -> { score = word.substringAfter(':').toIntOrNull() ?: 0; false }
+                        else -> word.isNotBlank()
+                    }
+                }.distinct()
+                mapOf(
+                    "id" to id.toString(),
+                    // The file is only named on the post's page; see the class comment.
+                    "url" to thumb, "previewUrl" to thumb,
+                    "tags" to tags,
+                    "tagDetails" to tags.map { mapOf("name" to it, "category" to "general") },
+                    "postUrl" to postUrl(id),
+                    // Realbooru is an adult site; untitled ratings count as explicit for filtering.
+                    "rating" to (rating ?: "explicit"),
+                    "uploader" to "", "source" to "",
+                    "width" to 0, "height" to 0,
+                    "score" to score, "description" to "",
+                    "videoVariants" to emptyList<Map<String, Any?>>(),
+                    "md5" to (HASH.find(thumb)?.groupValues?.get(1)?.lowercase() ?: ""),
+                    "parentId" to null,
+                    "hasChildren" to false,
+                    "sampleUrl" to "",
+                    "pools" to emptyList<String>(),
+                )
+            }.toList()
+        }
+
+        /** A post from its page, or null when the page names no media. */
+        internal fun parsePost(id: Long, html: String): Map<String, Any?>? {
+            val container = CONTAINER.find(html)?.range?.first
+            val region = if (container != null) html.substring(container, minOf(html.length, container + 6000)) else html
+            val video = VIDEO_PLAYER.find(html)?.value ?: VIDEO.find(region)?.value
+            val element: String
+            val file: String?
+            if (video != null) {
+                element = VIDEO_TAG.find(video)?.value ?: ""
+                file = attr(element, "src") ?: SOURCE.find(video)?.value?.let { attr(it, "src") }
+            } else {
+                element = MAIN_IMAGE.find(html)?.value ?: IMAGE.find(region)?.value?.takeIf { container != null } ?: ""
+                file = attr(element, "src")
+            }
+            val url = upgradedHttpsUrl(REFERER, file) ?: return null
+            val path = IMAGE_PATH.find(url)?.groupValues
+            val preview = path?.let { "https://$HOST/thumbnails/${it[1]}/${it[2]}/thumbnail_${it[3]}.jpg" }
+                ?: upgradedHttpsUrl(REFERER, attr(element, "poster")) ?: ""
+            val details = LinkedHashMap<String, String>()
+            TAG_LIST.find(html)?.range?.first?.let { start ->
+                val list = html.substring(start, minOf(html.length, start + 60000))
+                TAG_ELEMENT.findAll(list).forEach { match ->
+                    val classes = attr(match.value, "class")?.split(Regex("\\s+"))?.toSet() ?: return@forEach
+                    val category = TAG_CLASSES.firstOrNull { (names, _) -> classes.any(names::contains) }?.second ?: return@forEach
+                    val rest = list.substring(match.range.last + 1)
+                    val name = if (match.groupValues[1].equals("a", ignoreCase = true)) {
+                        text(rest.substringBefore("</a>"))
+                    } else {
+                        // Gelbooru lists "? tag count": the "?" link opens the wiki.
+                        LINK_TEXT.findAll(rest.substringBefore("</li>")).map { text(it.groupValues[1]) }
+                            .firstOrNull { it.isNotEmpty() && it != "?" && it != "+" && it != "-" }.orEmpty()
+                    }.replace(' ', '_')
+                    if (name.isNotEmpty() && name != "?") details.putIfAbsent(name, category)
+                }
+            }
+            TAGS_FIELD.find(html)?.groupValues?.get(1)?.let(::decode)?.split(Regex("\\s+"))
+                ?.filter { it.isNotBlank() }?.forEach { details.putIfAbsent(it, "general") }
+            val score = Regex("""\bid\s*=\s*["']psc$id["'][^>]*>\s*(-?\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            return mapOf(
+                "id" to id.toString(),
+                "url" to url, "previewUrl" to preview,
+                "tags" to details.keys.toList(),
+                "tagDetails" to details.map { mapOf("name" to it.key, "category" to it.value) },
+                "postUrl" to postUrl(id),
+                "rating" to (RATING.find(html)?.groupValues?.get(1)?.lowercase() ?: "explicit"),
+                "uploader" to (UPLOADER.find(html)?.groupValues?.get(1)?.let(::text) ?: ""),
+                "source" to (SOURCE_FIELD.find(html)?.value?.let { attr(it, "value") } ?: ""),
+                "width" to (attr(element, "width")?.toIntOrNull() ?: 0),
+                "height" to (attr(element, "height")?.toIntOrNull() ?: 0),
+                "score" to score, "description" to "",
+                "isVideo" to (video != null),
+                "videoVariants" to emptyList<Map<String, Any?>>(),
+                "md5" to (HASH.find(url)?.groupValues?.get(1)?.lowercase() ?: ""),
+                "parentId" to null,
+                "hasChildren" to false,
+                "sampleUrl" to "",
+                "pools" to emptyList<String>(),
+            )
+        }
     }
 }

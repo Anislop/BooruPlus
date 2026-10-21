@@ -108,6 +108,50 @@ class _RefreshRepo extends FakeRepo {
   }
 }
 
+/// Records download and size requests instead of calling the platform.
+class _RecordingDownloads extends DownloadService {
+  final List<String> urls = [];
+  @override
+  Future<String> download({
+    required String url,
+    required String name,
+    String? directory,
+    DownloadProgress? onProgress,
+  }) async {
+    urls.add(url);
+    return 'content://saved';
+  }
+
+  @override
+  Future<int?> mediaSize(String url) async {
+    urls.add(url);
+    return 1;
+  }
+}
+
+/// Answers every fetch through [answer], by the request's tags.
+class _ScriptedRepo extends FakeRepo {
+  _ScriptedRepo(this.answer) : super(const [[]]);
+  final Future<List<Map<String, dynamic>>> Function(List<String> tags) answer;
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) {
+    calls++;
+    queries.add(tags);
+    return page == 0
+        ? answer(tags.isEmpty ? const [''] : tags)
+        : Future.value(const []);
+  }
+}
+
 /// Records the credentials of every request; [fail] can reject a request.
 class _SessionRepo extends FakeRepo {
   _SessionRepo(this.fail, [super.pages = const [[]]]);
@@ -1253,6 +1297,93 @@ void main() {
         stale,
       );
       expect(repo.refreshQueries, hasLength(lookups + 1));
+    },
+  );
+
+  test('Realbooru posts read their file from the post page once', () async {
+    const thumb = 'https://realbooru.com/thumbnails/ab/cd/thumbnail_x.jpg';
+    const file = 'https://video.realbooru.com/images/ab/cd/x.mp4';
+    final lookups = <List<String>>[];
+    final lookup = Completer<void>();
+    final repo = _ScriptedRepo((tags) async {
+      if (!tags.first.startsWith('id:')) {
+        return [
+          {
+            'id': '7',
+            'url': thumb,
+            'previewUrl': thumb,
+            'tags': ['a'],
+          },
+        ];
+      }
+      lookups.add(tags);
+      await lookup.future;
+      return [
+        {
+          'id': '7',
+          'url': file,
+          'previewUrl': '',
+          'tags': ['a', 'b'],
+        },
+      ];
+    });
+    final downloads = _RecordingDownloads();
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.realbooru,
+      downloads: downloads,
+    );
+    await state.initialize();
+    final listed = state.posts.single;
+    // The listing's thumbnail stands in until the page is read.
+    expect(state.displayPost(listed, board: Board.realbooru).url, thumb);
+    expect(listed.isVideo, isFalse);
+
+    final first = state.resolveMedia(listed, board: Board.realbooru);
+    final second = state.resolveMedia(listed, board: Board.realbooru);
+    lookup.complete();
+    expect(await first, isTrue);
+    expect(await second, isTrue);
+    expect(lookups, [
+      ['id:7'],
+    ]);
+    final shown = state.displayPost(listed, board: Board.realbooru);
+    expect(shown.url, file);
+    expect(shown.isVideo, isTrue);
+    // The page gave no preview, so the listing's thumbnail is kept.
+    expect(shown.previewUrl, thumb);
+    expect(await state.resolveMedia(listed, board: Board.realbooru), isFalse);
+
+    await state.downloadPost(listed, board: Board.realbooru);
+    expect(downloads.urls, [file]);
+    expect(lookups, hasLength(1));
+  });
+
+  test(
+    'a Realbooru post whose page cannot be read is not downloaded',
+    () async {
+      const thumb = 'https://realbooru.com/thumbnails/ab/cd/thumbnail_x.jpg';
+      final repo = _ScriptedRepo((tags) async {
+        if (tags.first.startsWith('id:')) throw Exception('offline');
+        return [
+          {'id': '7', 'url': thumb, 'previewUrl': thumb},
+        ];
+      });
+      final downloads = _RecordingDownloads();
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.realbooru,
+        downloads: downloads,
+      );
+      await state.initialize();
+      final listed = state.posts.single;
+      expect(await state.resolveMedia(listed, board: Board.realbooru), isFalse);
+      await expectLater(
+        state.downloadPost(listed, board: Board.realbooru),
+        throwsStateError,
+      );
+      expect(await state.mediaSize(listed, board: Board.realbooru), isNull);
+      expect(downloads.urls, isEmpty);
     },
   );
 

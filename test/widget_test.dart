@@ -1462,6 +1462,43 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('viewer reads Realbooru files for the open and next post', (
+    tester,
+  ) async {
+    final repo = _PageRepo();
+    final state = AppState(
+      repository: repo,
+      store: MemoryStore()..selected = Board.realbooru,
+    );
+    await state.initialize();
+    MediaPost listed(int id) => MediaPost.fromMap({
+      ...post(id),
+      'url': 'https://x/$id.jpg',
+      'previewUrl': 'https://x/$id.jpg',
+    });
+    final posts = [listed(7), listed(8), listed(9)];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(
+          post: posts.first,
+          board: Board.realbooru,
+          state: state,
+          posts: posts,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(repo.lookups, [
+      ['id:7'],
+      ['id:8'],
+    ]);
+    expect(networkImageUrls(tester), contains('https://x/7-full.jpg'));
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('viewer shows download progress and the original size once '
       'details open', (tester) async {
     const channel = MethodChannel('booruplus/test-viewer-download');
@@ -2337,3 +2374,33 @@ Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
   'previewUrl': '',
   'tags': tags,
 };
+
+/// Answers `id:` lookups with a full-size file for that post.
+class _PageRepo extends FakeRepo {
+  _PageRepo() : super(const [[]]);
+  final List<List<String>> lookups = [];
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) async {
+    final id = tags.isEmpty
+        ? null
+        : RegExp(r'^id:(\d+)$').firstMatch(tags.first);
+    if (id == null) return const [];
+    lookups.add(tags);
+    return [
+      {
+        'id': id[1],
+        'url': 'https://x/${id[1]}-full.jpg',
+        'previewUrl': 'https://x/${id[1]}.jpg',
+      },
+    ];
+  }
+}

@@ -18,6 +18,8 @@
     "mspabooru": { "name": "MSPABooru", "accent": "#7DD36F", "surface": "#1C3119", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=mspabooru.com" },
     "eshuushuu": { "name": "E-Shuushuu", "accent": "#8FB4E6", "surface": "#1D2838", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=e-shuushuu.net" },
     "mikubooru": { "name": "Mikubooru", "accent": "#5CCFD0", "surface": "#163233", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=booru.funmaker.moe" },
-    "nanbooru": { "name": "Nanbooru", "accent": "#B79CE8", "surface": "#2A2238", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=emmytherobot.art" }
+    "nanbooru": { "name": "Nanbooru", "accent": "#B79CE8", "surface": "#2A2238", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=emmytherobot.art" },
+    "realbooru": { "name": "Realbooru", "accent": "#E08A7E", "surface": "#381E1B", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=realbooru.com" },
+    "derpibooru": { "name": "Derpibooru", "accent": "#7FA8D9", "surface": "#1A2636", "logoUrl": "https://www.google.com/s2/favicons?sz=128&domain=derpibooru.org" }
   }
 }
