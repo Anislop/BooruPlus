@@ -480,6 +480,149 @@ void main() {
     },
   );
 
+  test('Danbooru sensitive is its own rating, searched with its letters', () {
+    expect(RatingInfo.parse('sensitive'), Rating.sensitive);
+    expect(RatingInfo.parse('SENSITIVE'), Rating.sensitive);
+    expect(RatingInfo.parse('se'), Rating.sensitive);
+    // The bridge reports Danbooru's `s` as sensitive; elsewhere `s` is safe.
+    expect(RatingInfo.parse('s'), Rating.general);
+    expect(RatingInfo.parse('SAFE'), Rating.general);
+
+    expect(Board.danbooru.ratingQuery(Rating.general), 'g');
+    expect(Board.danbooru.ratingQuery(Rating.sensitive), 's');
+    expect(Board.aibooru.ratingQuery(Rating.explicit), 'e');
+    expect(Board.konachan.ratingQuery(Rating.general), 's');
+    expect(Board.sankaku.ratingQuery(Rating.questionable), 'q');
+    expect(Board.e621.ratingQuery(Rating.general), 'safe');
+    for (final board in [Board.konachan, Board.e621, Board.sankaku]) {
+      expect(board.ratingQuery(Rating.sensitive), isNull);
+    }
+  });
+
+  test('settings saved before sensitive existed migrate their ratings', () {
+    List<Rating> migrated(List<String> names, {int? version}) =>
+        AppSettings.fromMap({
+          'selectedRatings': names,
+          'ratingsVersion': ?version,
+        }).selectedRatings;
+
+    // Every rating stays every rating, so nothing new is filtered out.
+    expect(migrated(['general', 'questionable', 'explicit']), Rating.values);
+    expect(migrated(['general', 'questionable']), [
+      Rating.general,
+      Rating.sensitive,
+      Rating.questionable,
+    ]);
+    // General only now means general alone.
+    expect(migrated(['general']), [Rating.general]);
+    expect(migrated(['questionable', 'explicit']), [
+      Rating.questionable,
+      Rating.explicit,
+    ]);
+    // Saved with sensitive known: a list without it was chosen that way.
+    expect(migrated(['general', 'questionable', 'explicit'], version: 2), [
+      Rating.general,
+      Rating.questionable,
+      Rating.explicit,
+    ]);
+    expect(AppSettings.fromMap({'columns': 3}).selectedRatings, Rating.values);
+
+    final safeMode = AppSettings.fromMap({
+      'safeMode': true,
+      'selectedRatings': ['general'],
+      'safeModeRatings': ['general', 'questionable', 'explicit'],
+    });
+    expect(safeMode.selectedRatings, [Rating.general]);
+    expect(safeMode.safeModeRatings, Rating.values);
+
+    const current = AppSettings(selectedRatings: [Rating.sensitive]);
+    expect(current.toMap(), containsPair('ratingsVersion', 2));
+    final restored = AppSettings.decode(current.encode());
+    expect(restored.selectedRatings, [Rating.sensitive]);
+    expect(restored, current);
+  });
+
+  test('Danbooru posts saved as safe before the fix read as sensitive', () {
+    Map<String, dynamic> saved(Board board, String rating) => {
+      'board': board.name,
+      'post': {...post(7), 'rating': rating},
+    };
+    expect(
+      SavedPost.fromMap(saved(Board.danbooru, 'safe')).post.rating,
+      'sensitive',
+    );
+    expect(
+      SavedPost.fromMap(saved(Board.aibooru, 's')).post.rating,
+      'sensitive',
+    );
+    expect(
+      DownloadRecord.fromMap(saved(Board.danbooru, 'safe')).saved.post.rating,
+      'sensitive',
+    );
+    expect(
+      SavedPost.fromMap(saved(Board.danbooru, 'general')).post.rating,
+      'general',
+    );
+    // `s` is safe on Moebooru.
+    expect(
+      SavedPost.fromMap(saved(Board.konachan, 'safe')).post.rating,
+      'safe',
+    );
+    // Identity does not depend on the rating, so favorites still match.
+    expect(
+      SavedPost.fromMap(saved(Board.danbooru, 'safe')).identity,
+      SavedPost.fromMap(saved(Board.danbooru, 'sensitive')).identity,
+    );
+  });
+
+  test(
+    'Danbooru General searches rating:g and drops sensitive posts',
+    () async {
+      final general = post(201)..['rating'] = 'general';
+      final sensitive = post(202)..['rating'] = 'sensitive';
+      final questionable = post(203)..['rating'] = 'questionable';
+      final repo = FakeRepo([
+        [general, sensitive, questionable],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()
+          ..selected = Board.danbooru
+          ..settings = const AppSettings(selectedRatings: [Rating.general]),
+      );
+      await state.initialize();
+      // `rating:safe` is Danbooru's sensitive, not general.
+      expect(repo.queries.last, contains('rating:g'));
+      expect(repo.queries.last, isNot(contains('rating:safe')));
+      expect(state.posts.map((value) => value.id), [201]);
+
+      await state.setRatingFilters({Rating.general, Rating.sensitive});
+      expect(
+        repo.queries.last.where((tag) => tag.startsWith('rating:')),
+        isEmpty,
+      );
+      expect(state.posts.map((value) => value.id), [201, 202]);
+
+      await state.setRatingFilters({Rating.sensitive});
+      expect(repo.queries.last, contains('rating:s'));
+      expect(state.posts.map((value) => value.id), [202]);
+
+      // Konachan has no sensitive level, so General and Sensitive is General.
+      await state.chooseBoard(Board.konachan);
+      await state.setRatingFilters({Rating.general, Rating.sensitive});
+      expect(repo.queries.last, contains('rating:s'));
+      await state.setRatingFilters({
+        Rating.general,
+        Rating.questionable,
+        Rating.explicit,
+      });
+      expect(
+        repo.queries.last.where((tag) => tag.startsWith('rating:')),
+        isEmpty,
+      );
+    },
+  );
+
   test(
     'typed tags preserve categories while raw tags fall back to general',
     () {
@@ -2804,6 +2947,7 @@ https://danbooru.donmai.us/posts?tags=cat
           _video(1),
           _video(2, rating: 'q'),
           _video(3, rating: 'explicit'),
+          _video(5, rating: 'sensitive'),
         ],
         (Board.nozomi, null): [_video(4, rating: '')],
       });
@@ -2827,11 +2971,17 @@ https://danbooru.donmai.us/posts?tags=cat
 
       expect(
         await shown(ShortsContent.all),
-        unorderedEquals(['danbooru:1', 'danbooru:2', 'danbooru:3', 'nozomi:4']),
+        unorderedEquals([
+          'danbooru:1',
+          'danbooru:2',
+          'danbooru:3',
+          'danbooru:5',
+          'nozomi:4',
+        ]),
       );
       expect(
         await shown(ShortsContent.noExplicit),
-        unorderedEquals(['danbooru:1', 'danbooru:2']),
+        unorderedEquals(['danbooru:1', 'danbooru:2', 'danbooru:5']),
       );
       expect(await shown(ShortsContent.safeOnly), ['danbooru:1']);
     });

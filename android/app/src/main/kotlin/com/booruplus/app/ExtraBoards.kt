@@ -76,6 +76,18 @@ internal fun OkHttpClient.getBody(url: HttpUrl, userAgent: String, headers: Map<
 internal fun splitTags(value: String?): List<String> =
     value?.trim()?.split(Regex("\\s+"))?.filter { it.isNotEmpty() } ?: emptyList()
 
+/**
+ * A rating on Danbooru's scale (g/s/q/e, or the long names) as the name Dart
+ * reads. `s` is *sensitive* there, not safe as on Moebooru, e621, and Sankaku.
+ */
+internal fun danbooruRating(value: String?): String = when (value?.trim()?.lowercase()) {
+    "g", "general" -> "general"
+    "s", "sensitive" -> "sensitive"
+    "q", "questionable" -> "questionable"
+    "e", "explicit" -> "explicit"
+    else -> "Unknown"
+}
+
 /** A page offset for unfiltered discovery, so each random session starts somewhere new. */
 internal fun discoveryOffset(random: Boolean, tags: List<String>, seed: Int): Int =
     if (random && tags.isEmpty()) Random(seed).nextInt(21) else 0
@@ -244,7 +256,7 @@ internal class AiBooruApi(private val client: OkHttpClient, private val userAgen
             "tags" to tags,
             "tagDetails" to details.map { mapOf("name" to it.key, "category" to it.value) },
             "postUrl" to "https://$HOST/posts/$id",
-            "rating" to post.optString("rating", "Unknown"),
+            "rating" to danbooruRating(post.optString("rating")),
             "uploader" to "",
             "source" to post.optString("source"),
             "width" to post.optInt("image_width"), "height" to post.optInt("image_height"),

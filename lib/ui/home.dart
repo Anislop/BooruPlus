@@ -1067,38 +1067,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setSheetState) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const ListTile(
-                leading: Icon(Icons.filter_alt_outlined),
-                title: Text('Ratings'),
-                subtitle: Text('Choose which ratings appear in the feed'),
-              ),
-              for (final rating in Rating.values)
-                CheckboxListTile(
-                  title: Text(rating.label),
-                  value: selected.contains(rating),
-                  onChanged: (value) => setSheetState(() {
-                    if (value == true) {
-                      selected.add(rating);
-                    } else {
-                      selected.remove(rating);
-                    }
-                  }),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const ListTile(
+                  leading: Icon(Icons.filter_alt_outlined),
+                  title: Text('Ratings'),
+                  subtitle: Text('Choose which ratings appear in the feed'),
                 ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    onPressed: () => Navigator.pop(context, selected),
-                    child: const Text('Apply'),
+                for (final rating in Rating.values)
+                  CheckboxListTile(
+                    title: Text(rating.label),
+                    subtitle: rating == Rating.sensitive
+                        ? const Text('Used by Danbooru and Gelbooru')
+                        : null,
+                    value: selected.contains(rating),
+                    onChanged: (value) => setSheetState(() {
+                      if (value == true) {
+                        selected.add(rating);
+                      } else {
+                        selected.remove(rating);
+                      }
+                    }),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FilledButton(
+                      onPressed: () => Navigator.pop(context, selected),
+                      child: const Text('Apply'),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
-            ],
+                const SizedBox(height: 8),
+              ],
+            ),
           ),
         ),
       ),
@@ -2802,6 +2807,7 @@ Color _ratingColor(String rating) {
   if (normalized.contains('questionable') || normalized == 'q') {
     return Colors.orangeAccent;
   }
+  if (normalized.contains('sensitive')) return Colors.yellowAccent.shade700;
   return Colors.grey;
 }
 
