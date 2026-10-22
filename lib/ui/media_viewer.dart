@@ -10,6 +10,7 @@ import 'package:video_player/video_player.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'downloads.dart';
 import 'home.dart';
 import 'media_image.dart';
 import 'multi_search.dart';
@@ -79,9 +80,6 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
   ChewieController? _player;
   late final PageController _pages;
   String? _videoError;
-  bool _downloading = false;
-  // Fraction saved of the download in progress; null until the size is known.
-  double? _downloadProgress;
   bool _sharing = false;
   bool _details = false;
 
@@ -587,52 +585,74 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  /// Queues the post in the Download Manager and reports how it ended.
   Future<void> _download() async {
-    setState(() {
-      _downloading = true;
-      _downloadProgress = null;
-    });
+    final state = widget.state;
     final messenger = ScaffoldMessenger.of(context);
-    try {
-      await widget.state.downloadPost(
-        _post,
-        board: _currentBoard,
-        onProgress: (received, total) {
-          if (!mounted || total == null) return;
-          setState(
-            () => _downloadProgress = (received / total).clamp(0.0, 1.0),
-          );
-        },
-      );
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            widget.state.settings.autoFavoriteOnDownload
-                ? 'Media saved to your download folder and favorited.'
-                : 'Media saved to your download folder.',
-          ),
-        ),
-      );
-    } on PlatformException catch (e) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            e.code == 'DIRECTORY_ACCESS'
-                ? 'Folder access expired. Choose your download folder again in Settings.'
-                : 'Download failed. Check your connection, folder access, and free space.',
-          ),
-        ),
-      );
-    } catch (_) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Download unavailable. Please try again.'),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _downloading = false);
+    final task = state.downloads.add(
+      SavedPost(board: _currentBoard, post: _post),
+    );
+    final message = switch (await task.settled) {
+      DownloadResult.saved =>
+        state.settings.autoFavoriteOnDownload
+            ? 'Media saved to your download folder and favorited.'
+            : 'Media saved to your download folder.',
+      DownloadResult.folderLost =>
+        'Folder access expired. Choose your download folder again in Settings.',
+      DownloadResult.failed => 'Download failed. Check your connection, folder access, and free space.',
+      DownloadResult.removed => null,
+    };
+    if (message != null) {
+      messenger.showSnackBar(SnackBar(content: Text(message)));
     }
   }
+
+  /// The download button: the queued download's progress ring while it
+  /// waits or runs (tapping opens the Download Manager), resume for a
+  /// paused or failed one.
+  Widget _downloadButton(MediaPost post, Board board) => ListenableBuilder(
+    listenable: widget.state.downloads,
+    builder: (context, _) {
+      final state = widget.state;
+      final task = state.downloads.taskFor(post, board: board);
+      if (task != null && task.active) {
+        return IconButton(
+          tooltip: task.status == DownloadStatus.waiting
+              ? 'Waiting to download · open downloads'
+              : 'Downloading · open downloads',
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(
+              builder: (_) => DownloadsScreen(state: state),
+            ),
+          ),
+          icon: _DownloadProgress(value: task.fraction),
+        );
+      }
+      if (task != null) {
+        final failed = task.status == DownloadStatus.failed;
+        return IconButton(
+          tooltip: failed
+              ? 'Download failed · retry'
+              : 'Download paused · resume',
+          onPressed: () => state.downloads.resume(task),
+          icon: Icon(
+            failed ? Icons.error_outline_rounded : Icons.pause_circle_outline,
+          ),
+        );
+      }
+      final downloaded = state.isDownloaded(post, board: board);
+      return IconButton(
+        tooltip: downloaded
+            ? 'Downloaded · download again'
+            : 'Download original media',
+        onPressed: _download,
+        icon: Icon(
+          downloaded ? Icons.download_done_rounded : Icons.download_outlined,
+        ),
+      );
+    },
+  );
 
   Future<void> _openSource() async {
     final uri = Uri.tryParse(_post.source);
@@ -720,6 +740,92 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
         await _copy(post.source, 'Source copied.');
       case 'copy_tags':
         await _copy(post.tags.join(' '), 'Tags copied.');
+      case 'set_as':
+        await _imageAction(
+          (url, name) => _device.setAs(url: url, name: name),
+          preparing: 'Opening…',
+          failure: 'No app can use this image.',
+        );
+      case 'copy_image':
+        await _imageAction(
+          (url, name) => _device.copyImage(url: url, name: name),
+          preparing: 'Copying image…',
+          done: 'Image copied.',
+          failure: 'Unable to copy this image. Check your connection.',
+        );
+      case 'save_frame':
+        await _saveFrame();
+    }
+  }
+
+  /// Runs [action] with the current image's URL and file name, showing
+  /// [preparing] while the image downloads.
+  Future<void> _imageAction(
+    Future<void> Function(String url, String name) action, {
+    required String preparing,
+    required String failure,
+    String? done,
+  }) async {
+    final post = _post;
+    final url = mediaUrlOf(post);
+    if (url.isEmpty || _sharing) return;
+    setState(() => _sharing = true);
+    _notify(preparing);
+    try {
+      await action(
+        url,
+        mediaFileName(
+          _currentBoard,
+          post,
+          url,
+          template: widget.state.settings.filenameTemplate,
+        ),
+      );
+      if (done != null) {
+        _notify(done);
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      }
+    } catch (_) {
+      _notify(failure);
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  /// Saves the paused or playing video's current frame as a JPEG to the
+  /// download folder.
+  Future<void> _saveFrame() async {
+    final video = _video;
+    if (video == null || !video.value.isInitialized || _sharing) return;
+    final post = _post;
+    final position = video.value.position;
+    final base = mediaFileName(
+      _currentBoard,
+      post,
+      video.dataSource,
+      template: widget.state.settings.filenameTemplate,
+    ).replaceFirst(RegExp(r'\.[^.]*$'), '');
+    setState(() => _sharing = true);
+    _notify('Saving frame…');
+    try {
+      await _device.saveFrame(
+        url: video.dataSource,
+        name: '${base}_${position.inMilliseconds}ms.jpg',
+        position: position,
+        directory: widget.state.settings.downloadDirectory,
+      );
+      _notify('Frame saved to your download folder.');
+    } on PlatformException catch (error) {
+      _notify(
+        error.code == 'DIRECTORY_ACCESS' || error.code == 'DIRECTORY_REQUIRED'
+            ? 'Choose your download folder again in Settings.'
+            : 'Unable to save this frame.',
+      );
+    } catch (_) {
+      _notify('Unable to save this frame.');
+    } finally {
+      if (mounted) setState(() => _sharing = false);
     }
   }
 
@@ -774,6 +880,35 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
             child: ListTile(
               leading: Icon(Icons.sell_outlined),
               title: Text('Copy tags'),
+            ),
+          ),
+        if (!post.isVideo && mediaUrlOf(post).isNotEmpty) ...[
+          PopupMenuItem(
+            value: 'copy_image',
+            enabled: !_sharing,
+            child: const ListTile(
+              leading: Icon(Icons.image_outlined),
+              title: Text('Copy image'),
+            ),
+          ),
+          if (share)
+            PopupMenuItem(
+              value: 'set_as',
+              enabled: !_sharing,
+              child: const ListTile(
+                leading: Icon(Icons.wallpaper_rounded),
+                title: Text('Set as…'),
+                subtitle: Text('Wallpaper, contact photo'),
+              ),
+            ),
+        ],
+        if (post.isVideo && (_video?.value.isInitialized ?? false))
+          PopupMenuItem(
+            value: 'save_frame',
+            enabled: !_sharing,
+            child: const ListTile(
+              leading: Icon(Icons.photo_camera_outlined),
+              title: Text('Save this frame'),
             ),
           ),
       ],
@@ -1220,28 +1355,7 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                               if (post.isVideo && post.videoVariants.isNotEmpty)
                                 _qualityMenu(post),
                               _moreMenu(post, browserUrl),
-                              IconButton(
-                                tooltip:
-                                    widget.state.isDownloaded(
-                                      post,
-                                      board: board,
-                                    )
-                                    ? 'Downloaded · download again'
-                                    : 'Download original media',
-                                onPressed: _downloading ? null : _download,
-                                icon: _downloading
-                                    ? _DownloadProgress(
-                                        value: _downloadProgress,
-                                      )
-                                    : Icon(
-                                        widget.state.isDownloaded(
-                                              post,
-                                              board: board,
-                                            )
-                                            ? Icons.download_done_rounded
-                                            : Icons.download_outlined,
-                                      ),
-                              ),
+                              _downloadButton(post, board),
                               IconButton(
                                 tooltip: _details
                                     ? 'Hide details'

@@ -1,9 +1,11 @@
 package com.booruplus.app
 
+import android.Manifest
 import android.app.Activity
 import android.app.KeyguardManager
 import android.app.PictureInPictureParams
 import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -16,6 +18,7 @@ import android.graphics.ImageDecoder
 import android.graphics.drawable.Icon
 import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
+import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
@@ -67,6 +70,13 @@ class MainActivity : FlutterActivity() {
     // hold every thread and stall a newly selected board's first page.
     private val executor = Executors.newFixedThreadPool(4)
     private val mediaExecutor = Executors.newFixedThreadPool(4)
+    // Downloads have their own threads, so a queue of large files never
+    // holds back thumbnails; Dart runs at most this many at once.
+    private val downloadExecutor = Executors.newFixedThreadPool(4)
+    // Downloads Dart asked to pause, by progress id; each keeps its partial
+    // file. Only ids of running downloads are accepted.
+    private val pausedDownloads = ConcurrentHashMap.newKeySet<Long>()
+    private val activeDownloads = ConcurrentHashMap.newKeySet<Long>()
     // The feed fetch running on this thread, if any. Set only while a feed
     // task runs, so other requests on the same client are never cancelled.
     private val currentFeed = ThreadLocal<FeedTask?>()
@@ -180,7 +190,7 @@ class MainActivity : FlutterActivity() {
             }
             return null
         }
-        val kind =intent?.getStringExtra(SHORTCUT_KIND)?.takeIf { it == "favorites" || it == "search" } ?: return null
+        val kind = intent?.getStringExtra(SHORTCUT_KIND)?.takeIf { it == "favorites" || it == "search" || it == "downloads" } ?: return null
         return buildMap {
             put("kind", kind)
             intent.getStringExtra(SHORTCUT_BOARD)?.let { put("board", it) }
@@ -195,6 +205,17 @@ class MainActivity : FlutterActivity() {
             "fetchMedia" -> fetchMedia(call, result)
             "pickDownloadDirectory" -> pickDirectory(result)
             "download" -> download(call, result)
+            "pauseDownload" -> {
+                // Only a download still running; a late pause must not linger.
+                call.argument<Number>("id")?.toLong()?.takeIf(activeDownloads::contains)?.let(pausedDownloads::add)
+                result.success(null)
+            }
+            "discardDownload" -> discardDownload(call, result)
+            "setDownloadsActive" -> setDownloadsActive(call, result)
+            "moveToBack" -> result.success(moveTaskToBack(true))
+            "setAs" -> setAs(call, result)
+            "copyImage" -> copyImage(call, result)
+            "saveFrame" -> saveFrame(call, result)
             "mediaSize" -> mediaSize(call, result)
             "setKeepScreenOn" -> setKeepScreenOn(call, result)
             "signIn" -> signIn(call, result)
@@ -397,28 +418,7 @@ class MainActivity : FlutterActivity() {
         if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media can be shared", null); return }
         if (!validFileName(name)) { result.error("INVALID_NAME", "Invalid file name", null); return }
         background(result, mediaExecutor) {
-            val file = newSharedFile(name!!)
-            try {
-                openSecureDownload(url).use { input ->
-                    file.outputStream().use { output ->
-                        val buffer = ByteArray(65536)
-                        val deadline = System.nanoTime() + TRANSFER_DEADLINE_NANOS
-                        var total = 0L
-                        while (true) {
-                            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            total += count
-                            if (total > MAX_SHARE_BYTES) throw IOException("Too large to share")
-                            if (System.nanoTime() > deadline) throw IOException("Share timed out")
-                            output.write(buffer, 0, count)
-                        }
-                    }
-                }
-            } catch (error: Exception) {
-                file.parentFile?.deleteRecursively()
-                throw error
-            }
+            val file = saveShared(url!!, name!!)
             val uri = SharedMediaProvider.uriFor(this, file)
             val intent = Intent(Intent.ACTION_SEND)
                 .setType(mediaMimeType(file.name))
@@ -430,6 +430,142 @@ class MainActivity : FlutterActivity() {
                 try { startActivity(Intent.createChooser(intent, null)) } catch (_: Exception) { }
             }
             null
+        }
+    }
+
+    /** Downloads [url] into a new share-cache file named [name] ([newSharedFile]). */
+    private fun saveShared(url: String, name: String): File {
+        val file = newSharedFile(name)
+        try {
+            openSecureDownload(url).use { input ->
+                file.outputStream().use { output ->
+                    val buffer = ByteArray(65536)
+                    val deadline = System.nanoTime() + TRANSFER_DEADLINE_NANOS
+                    var total = 0L
+                    while (true) {
+                        if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > MAX_SHARE_BYTES) throw IOException("Too large to share")
+                        if (System.nanoTime() > deadline) throw IOException("Share timed out")
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            file.parentFile?.deleteRecursively()
+            throw error
+        }
+        return file
+    }
+
+    /**
+     * Opens Android's "Set as" chooser (wallpaper, contact photo, and so on)
+     * with the image at `url`, saved to the share cache first.
+     */
+    private fun setAs(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url")
+        val name = call.argument<String>("name")?.trim()
+        if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media can be used", null); return }
+        if (!validFileName(name)) { result.error("INVALID_NAME", "Invalid file name", null); return }
+        background(result, mediaExecutor) {
+            val file = saveShared(url!!, name!!)
+            val uri = SharedMediaProvider.uriFor(this, file)
+            val intent = Intent(Intent.ACTION_ATTACH_DATA)
+                .setDataAndType(uri, mediaMimeType(file.name))
+                .putExtra("mimeType", mediaMimeType(file.name))
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val opened = FutureTask {
+                try { startActivity(Intent.createChooser(intent, null)); true } catch (_: Exception) { false }
+            }
+            runOnUiThread(opened)
+            if (!opened.get()) {
+                file.parentFile?.deleteRecursively()
+                throw IOException("No app can use this image")
+            }
+            null
+        }
+    }
+
+    /** Puts the image at `url` on the clipboard, served from the share cache. */
+    private fun copyImage(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url")
+        val name = call.argument<String>("name")?.trim()
+        if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS media can be copied", null); return }
+        if (!validFileName(name)) { result.error("INVALID_NAME", "Invalid file name", null); return }
+        background(result, mediaExecutor) {
+            val file = saveShared(url!!, name!!)
+            val uri = SharedMediaProvider.uriFor(this, file)
+            val clip = ClipData.newUri(contentResolver, file.name, uri)
+            val copied = FutureTask {
+                try {
+                    getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip) != null
+                } catch (_: Exception) { false }
+            }
+            runOnUiThread(copied)
+            if (!copied.get()) throw IOException("Clipboard unavailable")
+            null
+        }
+    }
+
+    /**
+     * Saves the video frame at `positionMs` of the video at `url` as a JPEG
+     * named `name` to the download folder, like [download]. Redirects are
+     * followed first through [openSecureConnection] (HTTPS, public hosts),
+     * and the retriever reads the final URL; it gets [FRAME_TIMEOUT_SECONDS]
+     * on a thread of its own, so a stalled video holds up no other media work.
+     */
+    private fun saveFrame(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url")
+        val name = call.argument<String>("name")?.trim()
+        val directory = call.argument<String>("directory")
+        val position = (call.argument<Number>("positionMs")?.toLong() ?: 0L).coerceAtLeast(0L)
+        if (!secureHttps(url)) { result.error("INVALID_URL", "Only HTTPS videos are allowed", null); return }
+        if (!validFileName(name) || !name!!.endsWith(".jpg")) { result.error("INVALID_NAME", "Invalid file name", null); return }
+        if (Build.VERSION.SDK_INT < 29 && directory == null) { result.error("DIRECTORY_REQUIRED", "Choose a download folder in Settings", null); return }
+        background(result, mediaExecutor) {
+            val probe = openSecureConnection(url!!) { it.setRequestProperty("Range", "bytes=0-0") }
+            val final = try { probe.url.toString() } finally { probe.disconnect() }
+            val host = URI(final).host
+            val headers = HashMap<String, String>().apply {
+                put("User-Agent", USER_AGENT)
+                when {
+                    isGelbooruHost(host) -> put("Referer", GELBOORU_REFERER)
+                    NozomiApi.isMediaHost(host) -> put("Referer", NozomiApi.REFERER)
+                    RealbooruApi.isMediaHost(host) -> put("Referer", RealbooruApi.REFERER)
+                }
+            }
+            val retriever = MediaMetadataRetriever()
+            val grab = FutureTask {
+                try {
+                    retriever.setDataSource(final, headers)
+                    retriever.getFrameAtTime(position * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
+                } finally { try { retriever.release() } catch (_: Exception) { } }
+            }
+            Thread(grab, "booruplus-frame").apply { isDaemon = true }.start()
+            val frame = try {
+                grab.get(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS) ?: throw IOException("No frame at this position")
+            } catch (_: java.util.concurrent.TimeoutException) {
+                grab.cancel(true)
+                throw IOException("Frame timed out")
+            } catch (error: java.util.concurrent.ExecutionException) {
+                throw IOException("Cannot read the video", error.cause)
+            }
+            var uri: Uri? = null
+            try {
+                uri = createTarget(name, directory)
+                (contentResolver.openOutputStream(uri, "w") ?: throw IOException("Cannot open target")).use { output ->
+                    if (!frame.compress(Bitmap.CompressFormat.JPEG, 95, output)) throw IOException("Cannot encode frame")
+                }
+                if (directory == null && Build.VERSION.SDK_INT >= 29) {
+                    contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+                }
+                uri.toString()
+            } catch (error: Exception) {
+                uri?.let { deleteTarget(it, directory) }
+                throw error
+            } finally { frame.recycle() }
         }
     }
 
@@ -462,7 +598,8 @@ class MainActivity : FlutterActivity() {
         try {
             startActivityForResult(
                 Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                    .setType("application/json").putExtra(Intent.EXTRA_TITLE, name),
+                    .setType(if (call.argument<String>("mimeType") == "text/plain") "text/plain" else "application/json")
+                    .putExtra(Intent.EXTRA_TITLE, name),
                 EXPORT
             )
         } catch (_: Exception) {
@@ -633,10 +770,12 @@ class MainActivity : FlutterActivity() {
                     is SankakuAuthException -> if (error.expired) "AUTH_EXPIRED" else "AUTH_REJECTED"
                     is SankakuTagLimitException -> "TAG_LIMIT"
                     is UpdateRejectedException -> error.code
+                    is DownloadPausedException -> "PAUSED"
                     else -> if (rateLimit(error) != null) "RATE_LIMITED" else "REQUEST_FAILED"
                 }
                 // Only the provider's numeric tag limit or retry delay is passed on as details.
                 val details = (error as? SankakuTagLimitException)?.limit?.let { mapOf("limit" to it) }
+                    ?: (error as? DownloadPausedException)?.let { mapOf("uri" to it.uri) }
                     ?: rateLimit(error)?.retryAfterSeconds?.let { mapOf("retryAfter" to it) }
                 // Never expose exception messages: upstream errors may contain authenticated URLs or tokens.
                 runOnUiThread { if (pending.remove(result)) result.error(code, "Request failed. Check the connection, credentials, or folder access.", details) }
@@ -1248,6 +1387,12 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Saves the media at `url` as `name` in `directory` (or Download/BooruPlus).
+     * With `resume`, the partial file a paused download left (see
+     * [DownloadPausedException]) is continued with a range request when the
+     * host allows it, and rewritten from the start otherwise.
+     */
     private fun download(call: MethodCall, result: MethodChannel.Result) {
         val url = call.argument<String>("url")
         val name = call.argument<String>("name")?.trim()
@@ -1257,30 +1402,46 @@ class MainActivity : FlutterActivity() {
             result.error("INVALID_NAME", "Invalid download name", null); return
         }
         if (Build.VERSION.SDK_INT < 29 && directory == null) { result.error("DIRECTORY_REQUIRED", "Choose a download folder in Settings", null); return }
-        // Dart passes an id when it wants progress reports for this download.
+        val resume = call.argument<String>("resume")?.let(Uri::parse)?.takeIf { ownsPartial(it, directory) }
+        // The size the partial file's download reported; a range is only
+        // appended when the host reports the same size again.
+        val resumeTotal = call.argument<Number>("resumeTotal")?.toLong()?.takeIf { it > 0 }
+        // Dart passes an id when it wants progress reports or may pause this download.
         val progressId = call.argument<Number>("id")?.toLong()
-        background(result, mediaExecutor) {
+        progressId?.let(activeDownloads::add)
+        background(result, downloadExecutor) {
             var uri: Uri? = null
+            fun pauseRequested() = progressId != null && pausedDownloads.remove(progressId)
             try {
+                if (pauseRequested()) throw DownloadPausedException()
+                val existing = resume?.let(::partialSize)
                 // Open the network first; an HTTP failure must not leave a target stream open.
-                val connection = openSecureConnection(url!!)
-                val length = connection.contentLengthLong.takeIf { it > 0 }
+                val ranged = if (existing != null && existing > 0 && resumeTotal != null && existing < resumeTotal) {
+                    openRange(url!!, existing, resumeTotal)
+                } else null
+                val connection = ranged ?: openSecureConnection(url!!)
+                val offset = if (ranged != null) existing!! else 0L
+                val length = if (ranged != null) contentRangeTotal(ranged) else connection.contentLengthLong.takeIf { it > 0 }
                 downloadStream(connection).use { input ->
-                    if (length != null && length > MAX_DOWNLOAD_BYTES) throw IOException("Download too large")
-                    uri = createTarget(name, directory)
-                    (contentResolver.openOutputStream(uri!!, "w") ?: throw IOException("Cannot open target")).use { output ->
+                    if (length != null && length > MAX_DOWNLOAD_BYTES) throw DownloadRefusedException("Download too large")
+                    uri = if (existing != null) resume else createTarget(name, directory)
+                    if (progressId != null) reportTarget(progressId, uri!!)
+                    // "wa" appends to the partial file; "wt" rewrites one the host would not continue.
+                    val mode = when { ranged != null -> "wa"; existing != null -> "wt"; else -> "w" }
+                    (contentResolver.openOutputStream(uri!!, mode) ?: throw IOException("Cannot open target")).use { output ->
                         val buffer = ByteArray(65536)
                         // A host that keeps sending can neither fill the
-                        // storage nor hold a media thread for good.
+                        // storage nor hold a download thread for good.
                         val deadline = System.nanoTime() + TRANSFER_DEADLINE_NANOS
-                        var received = 0L
+                        var received = offset
                         var reported = -1L
                         while (true) {
-                            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+                            // Closing the app keeps the partial file too, so Dart can resume it later.
+                            if (pauseRequested() || closing || Thread.currentThread().isInterrupted) throw DownloadPausedException()
                             val count = input.read(buffer)
                             if (count < 0) break
                             received += count
-                            if (received > MAX_DOWNLOAD_BYTES) throw IOException("Download too large")
+                            if (received > MAX_DOWNLOAD_BYTES) throw DownloadRefusedException("Download too large")
                             if (System.nanoTime() > deadline) throw IOException("Download timed out")
                             output.write(buffer, 0, count)
                             // At most one report per percent (or per 512 KB when the size is unknown).
@@ -1296,13 +1457,109 @@ class MainActivity : FlutterActivity() {
                     contentResolver.update(uri!!, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
                 }
                 uri.toString()
+            } catch (_: DownloadPausedException) {
+                throw DownloadPausedException(uri?.toString() ?: resume?.toString())
             } catch (error: Exception) {
-                uri?.let { try {
-                    if (directory != null) DocumentsContract.deleteDocument(contentResolver, it) else contentResolver.delete(it, null, null)
-                } catch (_: Exception) { } }
+                // A dropped connection or timeout keeps the partial file, which
+                // Dart's retry continues (or discards when the download is
+                // removed); a refused or unwritable download deletes it.
+                if (error !is IOException || error is DownloadRefusedException) uri?.let { deleteTarget(it, directory) }
                 throw error
+            } finally {
+                progressId?.let {
+                    activeDownloads.remove(it)
+                    pausedDownloads.remove(it)
+                }
             }
         }
+    }
+
+    /**
+     * The rest of `url` from byte [offset], or null when the host answers
+     * with anything other than exactly that range of a [total]-byte file.
+     */
+    private fun openRange(url: String, offset: Long, total: Long): HttpURLConnection? {
+        val connection = try {
+            openSecureConnection(url) { it.setRequestProperty("Range", "bytes=$offset-") }
+        } catch (_: IOException) { return null }
+        val start = connection.getHeaderField("Content-Range")?.removePrefix("bytes ")?.substringBefore('-')?.trim()?.toLongOrNull()
+        // A different size means a different file: start over rather than append.
+        if (connection.responseCode == 206 && start == offset && contentRangeTotal(connection) == total) return connection
+        connection.disconnect()
+        return null
+    }
+
+    private fun contentRangeTotal(connection: HttpURLConnection): Long? =
+        connection.getHeaderField("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()?.takeIf { it > 0 }
+
+    /** The size of a partial download, or null when it is gone. */
+    private fun partialSize(uri: Uri): Long? = try {
+        contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize.takeIf { size -> size >= 0 } }
+    } catch (_: Exception) { null }
+
+    /**
+     * Whether [uri] can be a file this app's downloads wrote: a MediaStore
+     * download without a folder, or a document inside the chosen folder.
+     */
+    private fun ownsPartial(uri: Uri, directory: String?): Boolean = try {
+        when {
+            uri.scheme != "content" -> false
+            directory == null -> uri.authority == MediaStore.AUTHORITY
+            else -> {
+                val tree = Uri.parse(directory)
+                uri.authority == tree.authority && DocumentsContract.isTreeUri(uri) &&
+                    DocumentsContract.getTreeDocumentId(uri) == DocumentsContract.getTreeDocumentId(tree)
+            }
+        }
+    } catch (_: Exception) { false }
+
+    private fun deleteTarget(uri: Uri, directory: String?) {
+        try {
+            if (directory != null) DocumentsContract.deleteDocument(contentResolver, uri) else contentResolver.delete(uri, null, null)
+        } catch (_: Exception) { }
+    }
+
+    /** Deletes the partial file of a paused download that was removed. */
+    private fun discardDownload(call: MethodCall, result: MethodChannel.Result) {
+        val uri = call.argument<String>("uri")?.let(Uri::parse)
+        val directory = call.argument<String>("directory")
+        if (uri == null || !ownsPartial(uri, directory)) { result.success(false); return }
+        background(result, downloadExecutor) { deleteTarget(uri, directory); true }
+    }
+
+    /** Where a download is being written, sent once before its first bytes. */
+    private fun reportTarget(id: Long, uri: Uri) {
+        runOnUiThread {
+            if (!closing) downloadChannel?.invokeMethod("target", mapOf("id" to id, "uri" to uri.toString()))
+        }
+    }
+
+    /**
+     * Keeps downloads running while the app is in the background with a
+     * foreground service and its notification; see [DownloadKeepAliveService].
+     */
+    private fun setDownloadsActive(call: MethodCall, result: MethodChannel.Result) {
+        if (call.argument<Boolean>("active") == true) {
+            askForNotifications()
+            DownloadKeepAliveService.update(
+                this,
+                call.argument<String>("text") ?: "",
+                call.argument<Number>("percent")?.toInt() ?: -1,
+            )
+        } else {
+            DownloadKeepAliveService.stop(this)
+        }
+        result.success(null)
+    }
+
+    /** Asks once (Android 13+) to show the download notification. */
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = getSharedPreferences(NATIVE_PREFERENCES, MODE_PRIVATE)
+        if (preferences.getBoolean(NOTIFICATIONS_ASKED, false)) return
+        preferences.edit().putBoolean(NOTIFICATIONS_ASKED, true).apply()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATIONS)
     }
 
     private fun reportProgress(id: Long, received: Long, total: Long?) {
@@ -1518,6 +1775,10 @@ class MainActivity : FlutterActivity() {
         if (hybooruClient.isInitialized()) hybooruClient.value.close()
         executor.shutdownNow()
         mediaExecutor.shutdownNow()
+        downloadExecutor.shutdownNow()
+        // Dart's queue goes with the activity; interrupted downloads keep
+        // their partial files and resume when the app opens again.
+        DownloadKeepAliveService.stop(this)
         super.onDestroy()
     }
 
@@ -1526,7 +1787,10 @@ class MainActivity : FlutterActivity() {
         private const val EXPORT = 4102
         private const val IMPORT = 4103
         private const val CONFIRM_CREDENTIAL = 4104
-        private const val SHORTCUT_KIND = "com.booruplus.app.SHORTCUT_KIND"
+        private const val NOTIFICATIONS = 4105
+        private const val NATIVE_PREFERENCES = "booruplus.native"
+        private const val NOTIFICATIONS_ASKED = "notificationsAsked"
+        internal const val SHORTCUT_KIND = "com.booruplus.app.SHORTCUT_KIND"
         private const val SHORTCUT_BOARD = "com.booruplus.app.SHORTCUT_BOARD"
         private const val SHORTCUT_TAGS = "com.booruplus.app.SHORTCUT_TAGS"
         internal const val LINK_TEXT = "com.booruplus.app.LINK_TEXT"
@@ -1538,6 +1802,7 @@ class MainActivity : FlutterActivity() {
         private const val MAX_DOWNLOAD_BYTES = 2L * 1024L * 1024L * 1024L
         // A whole download or share, however steadily the host sends.
         private const val TRANSFER_DEADLINE_NANOS = 60L * 60L * 1_000_000_000L
+        private const val FRAME_TIMEOUT_SECONDS = 60L
         private const val MAX_IMPORT_BYTES = 20L * 1024L * 1024L
         private const val SHARE_CACHE_MILLIS = 60L * 60L * 1000L
         private const val MAX_WINDOW_REQUESTS = 32
@@ -1610,6 +1875,15 @@ private fun isPublicAddress(address: InetAddress): Boolean {
         else -> true
     }
 }
+
+/**
+ * A download stopped by Dart's pause (or the app closing). Its partial file
+ * at [uri] is kept and sent to Dart as the `PAUSED` error's details.
+ */
+internal class DownloadPausedException(val uri: String? = null) : IOException("Paused")
+
+/** A download that must not be kept or retried as it is, such as one too large. */
+internal class DownloadRefusedException(message: String) : IOException(message)
 
 /** A downloaded update that must not be installed; [code] is sent to Dart. */
 internal class UpdateRejectedException(val code: String, message: String) : IOException(message)

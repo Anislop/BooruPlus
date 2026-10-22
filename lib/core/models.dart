@@ -801,6 +801,59 @@ class DownloadRecord {
   );
 }
 
+/// A download in the queue that has not finished, kept so the queue
+/// survives restarts. One that was running when the app closed is waiting
+/// again; [partial] is the file it had started, which the next attempt
+/// continues.
+class PendingDownload {
+  const PendingDownload({
+    required this.saved,
+    required this.addedAt,
+    this.paused = false,
+    this.failed = false,
+    this.partial = '',
+    this.partialDirectory,
+    this.total,
+  });
+
+  /// The post, without credentials.
+  final SavedPost saved;
+  final DateTime addedAt;
+  final bool paused, failed;
+
+  /// The content URI of the partly written file, or empty; the download
+  /// folder it was written to (null: Download/BooruPlus); and the size the
+  /// website reported for it, which a resumed download must match.
+  final String partial;
+  final String? partialDirectory;
+  final int? total;
+
+  Map<String, dynamic> toMap() => {
+    ...saved.sanitized().toMap(),
+    'addedAt': addedAt.millisecondsSinceEpoch,
+    if (paused) 'paused': true,
+    if (failed) 'failed': true,
+    if (partial.isNotEmpty) 'partial': partial,
+    if (partial.isNotEmpty && partialDirectory != null)
+      'partialDirectory': partialDirectory,
+    if (partial.isNotEmpty && total != null) 'total': total,
+  };
+
+  factory PendingDownload.fromMap(Map<dynamic, dynamic> map) => PendingDownload(
+    saved: SavedPost.fromMap(map).sanitized(),
+    addedAt: DateTime.fromMillisecondsSinceEpoch(
+      map['addedAt'] is num ? (map['addedAt'] as num).toInt() : 0,
+    ),
+    paused: map['paused'] == true,
+    failed: map['failed'] == true,
+    partial: map['partial'] is String ? map['partial'] as String : '',
+    partialDirectory: map['partialDirectory'] is String
+        ? map['partialDirectory'] as String
+        : null,
+    total: map['total'] is num ? (map['total'] as num).toInt() : null,
+  );
+}
+
 /// The default [AppSettings.filenameTemplate].
 const defaultFilenameTemplate = '{site}_{id}';
 
@@ -948,6 +1001,13 @@ class AppSettings {
     this.shortsAutoScrollSeconds = 0,
     this.shortsPictureInPicture = true,
     this.checkUpdates = true,
+    this.downloadConcurrency = 2,
+    this.safeMode = false,
+    this.safeModeRatings = const [],
+    this.safeModeBlurExplicit = false,
+    this.safeModeBlurQuestionable = false,
+    this.pinnedSearches = const [],
+    this.resumeFeed = true,
   });
   final int columns, rows, batchSize;
 
@@ -1117,6 +1177,25 @@ class AppSettings {
   /// install it.
   final bool checkUpdates;
 
+  /// How many queued downloads run at the same time.
+  final int downloadConcurrency;
+  static const maxDownloadConcurrency = 4;
+
+  /// Safe mode, switched from the drawer: only safe ratings, with blurring
+  /// on. Switching it off restores [safeModeRatings] and the two blur
+  /// settings saved when it was switched on.
+  final bool safeMode;
+  final List<Rating> safeModeRatings;
+  final bool safeModeBlurExplicit, safeModeBlurQuestionable;
+
+  /// Recent searches pinned to the top of the history; pinned ones are
+  /// kept when older searches drop off.
+  final List<List<String>> pinnedSearches;
+
+  /// The feed reopens each website where it was left (posts, page, scroll
+  /// position) after the app restarts.
+  final bool resumeFeed;
+
   /// The [savedSearchMarks] key for [query] on [board].
   static String savedSearchKey(Board board, List<String> query) =>
       '${board.name}|${_normalizedTags(query).join(' ')}';
@@ -1216,6 +1295,15 @@ class AppSettings {
         : 0,
     shortsPictureInPicture: shortsPictureInPicture,
     checkUpdates: checkUpdates,
+    downloadConcurrency: downloadConcurrency.clamp(1, maxDownloadConcurrency),
+    safeMode: safeMode,
+    safeModeRatings: safeMode
+        ? _normalizedRatings(safeModeRatings)
+        : const <Rating>[],
+    safeModeBlurExplicit: safeMode && safeModeBlurExplicit,
+    safeModeBlurQuestionable: safeMode && safeModeBlurQuestionable,
+    pinnedSearches: _normalizedQueries(pinnedSearches, limit: 20),
+    resumeFeed: resumeFeed,
   );
 
   AppSettings copyWith({
@@ -1277,6 +1365,13 @@ class AppSettings {
     int? shortsAutoScrollSeconds,
     bool? shortsPictureInPicture,
     bool? checkUpdates,
+    int? downloadConcurrency,
+    bool? safeMode,
+    List<Rating>? safeModeRatings,
+    bool? safeModeBlurExplicit,
+    bool? safeModeBlurQuestionable,
+    List<List<String>>? pinnedSearches,
+    bool? resumeFeed,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -1341,6 +1436,14 @@ class AppSettings {
     shortsPictureInPicture:
         shortsPictureInPicture ?? this.shortsPictureInPicture,
     checkUpdates: checkUpdates ?? this.checkUpdates,
+    downloadConcurrency: downloadConcurrency ?? this.downloadConcurrency,
+    safeMode: safeMode ?? this.safeMode,
+    safeModeRatings: safeModeRatings ?? this.safeModeRatings,
+    safeModeBlurExplicit: safeModeBlurExplicit ?? this.safeModeBlurExplicit,
+    safeModeBlurQuestionable:
+        safeModeBlurQuestionable ?? this.safeModeBlurQuestionable,
+    pinnedSearches: pinnedSearches ?? this.pinnedSearches,
+    resumeFeed: resumeFeed ?? this.resumeFeed,
   ).normalized();
   static const _unset = Object();
 
@@ -1411,6 +1514,13 @@ class AppSettings {
     'shortsAutoScrollSeconds': shortsAutoScrollSeconds,
     'shortsPictureInPicture': shortsPictureInPicture,
     'checkUpdates': checkUpdates,
+    'downloadConcurrency': downloadConcurrency,
+    'safeMode': safeMode,
+    'safeModeRatings': safeModeRatings.map((rating) => rating.name).toList(),
+    'safeModeBlurExplicit': safeModeBlurExplicit,
+    'safeModeBlurQuestionable': safeModeBlurQuestionable,
+    'pinnedSearches': pinnedSearches,
+    'resumeFeed': resumeFeed,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -1504,6 +1614,15 @@ class AppSettings {
     shortsAutoScrollSeconds: _asInt(map['shortsAutoScrollSeconds'], 0),
     shortsPictureInPicture: _asBool(map['shortsPictureInPicture'], true),
     checkUpdates: _asBool(map['checkUpdates'], true),
+    downloadConcurrency: _asInt(map['downloadConcurrency'], 2),
+    safeMode: _asBool(map['safeMode'], false),
+    safeModeRatings: map['safeModeRatings'] is List
+        ? _ratingsFromMap(map['safeModeRatings'])
+        : const [],
+    safeModeBlurExplicit: _asBool(map['safeModeBlurExplicit'], false),
+    safeModeBlurQuestionable: _asBool(map['safeModeBlurQuestionable'], false),
+    pinnedSearches: _queriesFromMap(map['pinnedSearches']),
+    resumeFeed: _asBool(map['resumeFeed'], true),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -1701,6 +1820,13 @@ class AppSettings {
         other.shortsAutoScrollSeconds != shortsAutoScrollSeconds ||
         other.shortsPictureInPicture != shortsPictureInPicture ||
         other.checkUpdates != checkUpdates ||
+        other.downloadConcurrency != downloadConcurrency ||
+        other.safeMode != safeMode ||
+        !_sameRatings(other.safeModeRatings, safeModeRatings) ||
+        other.safeModeBlurExplicit != safeModeBlurExplicit ||
+        other.safeModeBlurQuestionable != safeModeBlurQuestionable ||
+        !_sameQueries(other.pinnedSearches, pinnedSearches) ||
+        other.resumeFeed != resumeFeed ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -1816,6 +1942,13 @@ class AppSettings {
     shortsAutoScrollSeconds,
     shortsPictureInPicture,
     checkUpdates,
+    downloadConcurrency,
+    safeMode,
+    Object.hashAll(safeModeRatings),
+    safeModeBlurExplicit,
+    safeModeBlurQuestionable,
+    Object.hashAll(pinnedSearches.map(Object.hashAll)),
+    resumeFeed,
     Object.hashAll(
       boardHiddenUploaders.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),

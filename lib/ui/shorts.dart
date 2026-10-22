@@ -62,7 +62,6 @@ class _ShortsScreenState extends State<ShortsScreen>
   // Pushed screens (full details) pause playback while they are open.
   int _suspended = 0;
   bool _metered = false;
-  bool _downloading = false;
   bool _sharing = false;
   VideoPlayerController? _watched;
   bool _advancing = false;
@@ -669,29 +668,37 @@ class _ShortsScreenState extends State<ShortsScreen>
     return 'Because you like ${reasons.map((tag) => '#${_display(tag)}').join(', ')}.';
   }
 
+  /// Queues the video in the Download Manager.
   Future<void> _download(SavedPost saved) async {
-    if (_downloading) return;
-    setState(() => _downloading = true);
-    try {
-      await widget.state.downloadPost(saved.post, board: saved.board);
-      _feed.feedback(saved, ShortsSignal.download);
-      _notify(
-        _settings.autoFavoriteOnDownload
-            ? 'Video saved to your download folder and favorited.'
-            : 'Video saved to your download folder.',
-      );
-    } on PlatformException catch (e) {
-      _notify(
-        e.code == 'DIRECTORY_ACCESS'
-            ? 'Folder access expired. Choose your download folder again in Settings.'
-            : 'Download failed. Check your connection, folder access, and free space.',
-      );
-    } catch (_) {
-      _notify('Download unavailable. Please try again.');
-    } finally {
-      if (mounted) setState(() => _downloading = false);
+    if (_downloadingClip(saved)) return;
+    final task = widget.state.downloads.add(saved);
+    setState(() {});
+    final result = await task.settled;
+    if (mounted) setState(() {});
+    switch (result) {
+      case DownloadResult.saved:
+        _feed.feedback(saved, ShortsSignal.download);
+        _notify(
+          _settings.autoFavoriteOnDownload
+              ? 'Video saved to your download folder and favorited.'
+              : 'Video saved to your download folder.',
+        );
+      case DownloadResult.folderLost:
+        _notify(
+          'Folder access expired. Choose your download folder again in Settings.',
+        );
+      case DownloadResult.failed:
+        _notify(
+          'Download failed. Check your connection, folder access, and free space.',
+        );
+      case DownloadResult.removed:
+        break;
     }
   }
+
+  bool _downloadingClip(SavedPost saved) =>
+      widget.state.downloads.taskFor(saved.post, board: saved.board)?.active ??
+      false;
 
   Future<void> _share(SavedPost saved) async {
     final url = mediaUrlOf(saved.post);
@@ -1031,7 +1038,7 @@ class _ShortsScreenState extends State<ShortsScreen>
           favorite: widget.state.isFavorite(saved.post, board: saved.board),
           liked: _liked.contains(saved.identity),
           compact: _pip,
-          downloading: _downloading,
+          downloading: _downloadingClip(saved),
           sharing: _sharing,
           onTogglePlay: _togglePlay,
           onRetry: () => clip?.retry(),

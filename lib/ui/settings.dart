@@ -5,6 +5,7 @@ import '../core/models.dart';
 import '../core/services.dart';
 import '../core/updates.dart';
 import 'blocked_tags.dart';
+import 'media_viewer.dart' show postBrowserUrl;
 import 'onboarding.dart';
 import 'saved_posts.dart';
 import 'shorts_library.dart';
@@ -32,6 +33,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _busy = false;
   bool _picking = false;
   bool _backingUp = false;
+  // "12/40" while post links are being imported.
+  String? _importProgress;
   bool _verifying = false;
   String? _error;
   late final _filenameTemplate = TextEditingController(
@@ -102,11 +105,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (release == null) {
         _notify('BooruPlus is up to date.');
       } else {
-        await showUpdateDialog(
-          context,
-          updates: _updates,
-          release: release,
-        );
+        await showUpdateDialog(context, updates: _updates, release: release);
       }
     } catch (_) {
       _notify('Could not check for updates. Please try again.');
@@ -320,6 +319,76 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _notify('Could not save the backup. Please try again.');
     } finally {
       if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  /// Saves the favorites as a text file of post links, one per line, for
+  /// other apps or a browser.
+  Future<void> _exportFavoriteLinks() async {
+    final links = [
+      for (final saved in widget.state.favoritePosts)
+        if (postBrowserUrl(saved.board, saved.post) case final link
+            when link.isNotEmpty)
+          link,
+    ];
+    if (links.isEmpty) {
+      _notify('No favorites with a post link to export.');
+      return;
+    }
+    setState(() => _backingUp = true);
+    try {
+      final now = DateTime.now();
+      String two(int value) => value.toString().padLeft(2, '0');
+      final saved = await _device.exportFile(
+        name:
+            'booruplus-favorites-${now.year}-${two(now.month)}-${two(now.day)}.txt',
+        content: '${links.join('\n')}\n',
+        text: true,
+      );
+      if (saved) {
+        _notify(
+          'Exported ${links.length} link${links.length == 1 ? '' : 's'}.',
+        );
+      }
+    } catch (_) {
+      _notify('Could not save the list. Please try again.');
+    } finally {
+      if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  /// Favorites the posts linked in a text file the user picks.
+  Future<void> _importPostLinks() async {
+    setState(() => _backingUp = true);
+    try {
+      final content = await _device.importFile();
+      if (content == null || !mounted) return;
+      _notify('Looking up posts…');
+      final summary = await widget.state.importPostLinks(
+        content,
+        onProgress: (done, total) {
+          if (mounted) setState(() => _importProgress = '$done/$total');
+        },
+      );
+      if (summary.links == 0) {
+        _notify('No post links from supported websites in this file.');
+        return;
+      }
+      final parts = [
+        'Added ${summary.added} favorite${summary.added == 1 ? '' : 's'}',
+        if (summary.existing > 0) '${summary.existing} already saved',
+        if (summary.failed > 0) '${summary.failed} not found',
+      ];
+      _notify('${parts.join(', ')}.');
+    } catch (_) {
+      _notify('Could not read the file. Please try again.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _backingUp = false;
+          _importProgress = null;
+        });
+      }
     }
   }
 
@@ -739,8 +808,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.palette_outlined,
                         title: 'Theme',
                         subtitle: switch (_settings.theme) {
-                          ThemeChoice.standard =>
-                            'Dark mode.',
+                          ThemeChoice.standard => 'Dark mode.',
                           ThemeChoice.white => 'Light mode.',
                           ThemeChoice.amoled => 'Super Dark mode!',
                         },
@@ -1690,6 +1758,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         subtitle: "Don't record recent searches or searched and browsed tags. Also in the menu.",
                       ),
                       _switchCard(
+                        value: _settings.resumeFeed,
+                        onChanged: (value) => setState(
+                          () =>
+                              _settings = _settings.copyWith(resumeFeed: value),
+                        ),
+                        icon: Icons.restore_rounded,
+                        title: 'Resume where you left off',
+                        subtitle: 'Reopen each website at the posts and scroll position you left. Not saved in incognito.',
+                      ),
+                      _switchCard(
                         value: _settings.noShare,
                         onChanged: (value) => setState(
                           () => _settings = _settings.copyWith(noShare: value),
@@ -1709,7 +1787,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included.',
+                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links, and any text file of post links, such as a list from another app, can be imported as favorites.',
                               style: TextStyle(
                                 color: ink(.54),
                                 fontSize: 12,
@@ -1740,6 +1818,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     size: 17,
                                   ),
                                   label: const Text('Restore backup'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: _backingUp || _busy
+                                      ? null
+                                      : _exportFavoriteLinks,
+                                  icon: const Icon(
+                                    Icons.link_rounded,
+                                    size: 17,
+                                  ),
+                                  label: const Text(
+                                    'Export favorites as links',
+                                  ),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: _backingUp || _busy
+                                      ? null
+                                      : _importPostLinks,
+                                  icon: const Icon(
+                                    Icons.playlist_add_rounded,
+                                    size: 17,
+                                  ),
+                                  label: Text(
+                                    _importProgress == null
+                                        ? 'Import post links'
+                                        : 'Importing $_importProgress',
+                                  ),
                                 ),
                               ],
                             ),

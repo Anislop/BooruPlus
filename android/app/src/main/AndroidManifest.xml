@@ -6,6 +6,11 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Updates: hands a downloaded release APK to the package installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Downloads: a foreground service and its progress notification keep
+         them running while the app is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="BooruPlus"
         android:name="${applicationName}"
@@ -112,6 +117,11 @@
             android:authorities="${applicationId}.shared"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <!-- Holds the process in the foreground while downloads run. -->
+        <service
+            android:name=".DownloadKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
