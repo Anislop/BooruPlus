@@ -5,6 +5,7 @@ import 'package:booruplus/core/models.dart';
 import 'package:booruplus/core/services.dart';
 import 'package:booruplus/core/updates.dart';
 import 'package:booruplus/main.dart';
+import 'package:booruplus/ui/downloads.dart';
 import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
@@ -1357,6 +1358,52 @@ void main() {
     },
   );
 
+  testWidgets('the feed explains hidden posts, and the menu turns on safe '
+      'mode', (tester) async {
+    final state = AppState(
+      repository: FakeRepo([
+        [
+          post(1, tags: ['cat']),
+          post(2, tags: ['dog']),
+        ],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await state.search(['cat', '-dog']);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text(' · 1 hidden'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('feed_hidden_note')));
+    await tester.pumpAndSettle();
+    expect(find.text('1 posts hidden'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('filtered_excluded')),
+        matching: find.text('Excluded by the search'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tapAt(const Offset(20, 20));
+    await tester.pumpAndSettle();
+
+    await tester.dragFrom(const Offset(300, 300), const Offset(300, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('drawer_safe_mode')));
+    await tester.pumpAndSettle();
+    expect(state.settings.safeMode, isTrue);
+    expect(state.settings.selectedRatings, [Rating.general]);
+    expect(find.byIcon(Icons.shield_rounded), findsWidgets);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('swiping anywhere on home screen opens drawer', (tester) async {
     final state = AppState(
       repository: FakeRepo(const [[]]),
@@ -1496,6 +1543,95 @@ void main() {
     ]);
     expect(networkImageUrls(tester), contains('https://x/7-full.jpg'));
     await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
+  testWidgets('the Download Manager pauses and resumes downloads, and its '
+      'sections collapse', (tester) async {
+    const channel = MethodChannel('booruplus/test-download-manager');
+    const progress = MethodChannel('booruplus/test-download-manager-progress');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    var running = Completer<String>();
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method != 'download') return null;
+      final url = (call.arguments as Map)['url'] as String;
+      if (url.endsWith('/2.jpg')) return 'content://saved/2';
+      return running.future;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.safebooru,
+      downloads: DownloadService(channel: channel, progressChannel: progress),
+    );
+    await state.initialize();
+    SavedPost saved(int id) => SavedPost(
+      board: Board.safebooru,
+      post: MediaPost.fromMap({...post(id), 'url': 'https://x/$id.jpg'}),
+    );
+    await state.downloadPost(saved(2).post, board: Board.safebooru);
+    final task = state.downloads.add(saved(1));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: DownloadsScreen(state: state),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('IN PROGRESS · 1'), findsOneWidget);
+    expect(find.text('COMPLETED · 1'), findsOneWidget);
+    expect(find.text('1 downloading'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Pause'));
+    await tester.pump();
+    final download = calls.lastWhere((call) => call.method == 'download');
+    final pause = calls.lastWhere((call) => call.method == 'pauseDownload');
+    expect((pause.arguments as Map)['id'], (download.arguments as Map)['id']);
+    running.completeError(
+      PlatformException(code: 'PAUSED', details: {'uri': 'content://part/1'}),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(task.status, DownloadStatus.paused);
+    expect(find.text('1 paused'), findsOneWidget);
+
+    running = Completer<String>();
+    await tester.tap(find.byTooltip('Resume'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      (calls.lastWhere((call) => call.method == 'download').arguments
+          as Map)['resume'],
+      'content://part/1',
+    );
+    expect(find.byTooltip('Pause'), findsOneWidget);
+
+    // Each section folds away under its header.
+    await tester.tap(find.byKey(const ValueKey('downloads_completed_header')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byTooltip('Remove from history'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('downloads_active_header')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byTooltip('Pause'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('downloads_active_header')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byTooltip('Pause'), findsOneWidget);
+
+    running.complete('content://saved/1');
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('COMPLETED · 2'), findsOneWidget);
+    expect(find.textContaining('IN PROGRESS'), findsNothing);
+    expect(
+      calls.where((call) => call.method == 'setDownloadsActive').last.arguments,
+      containsPair('active', false),
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
     state.dispose();
   });
 
@@ -1903,19 +2039,13 @@ void main() {
       const Offset(0, -500),
     );
     await tester.pumpAndSettle();
-    expect(
-      videos.created.where((url) => url.endsWith('/2.mp4')),
-      hasLength(2),
-    );
+    expect(videos.created.where((url) => url.endsWith('/2.mp4')), hasLength(2));
     expect(find.byKey(const ValueKey('shorts_retry')), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('shorts_retry')));
     // The page's double tap holds the tap until its timeout.
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump();
-    expect(
-      videos.created.where((url) => url.endsWith('/2.mp4')),
-      hasLength(3),
-    );
+    expect(videos.created.where((url) => url.endsWith('/2.mp4')), hasLength(3));
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump();

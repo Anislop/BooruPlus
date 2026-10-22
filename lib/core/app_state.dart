@@ -12,6 +12,8 @@ import 'shorts_profile.dart';
 
 export 'shorts_profile.dart';
 
+part 'download_queue.dart';
+
 class AppState extends ChangeNotifier {
   AppState({
     BoardRepository? repository,
@@ -101,6 +103,29 @@ class AppState extends ChangeNotifier {
   final Map<String, (DateTime, int?)> _newPostCounts = {};
 
   AppSettings get settings => _settings;
+
+  /// Posts the local filters left out of the current feed, by reason, for
+  /// the feed's "hidden by your filters" note.
+  Map<FilterReason, int> get filteredCounts => _filtered;
+  Map<FilterReason, int> _filtered = const {};
+
+  /// A recent problem reaching [board] (within the last 30 minutes), for
+  /// the website list's status badges. Cleared by its next successful load.
+  BoardIssue? boardIssue(Board board) {
+    final (issue, at) = _boardIssues[board] ?? (null, null);
+    if (issue == null || at == null) return null;
+    if (DateTime.now().difference(at) > const Duration(minutes: 30)) {
+      _boardIssues.remove(board);
+      return null;
+    }
+    return issue;
+  }
+
+  final Map<Board, (BoardIssue, DateTime)> _boardIssues = {};
+
+  /// The Download Manager's queue of downloads waiting, running, paused,
+  /// or failed.
+  late final DownloadQueue downloads = DownloadQueue._(this);
   Board? get board => _board;
   // _posts is always replaced, never mutated in place, so a view is a
   // stable snapshot without copying the whole feed on every access.
@@ -396,10 +421,13 @@ class AppState extends ChangeNotifier {
   /// Saves [post]'s original media with the file name template, records it
   /// in the download history, and favorites it when that setting is on.
   /// Returns the saved file's location; platform errors are rethrown.
+  /// Use [downloads] to queue posts; this saves one now, which [control]
+  /// can pause ([DownloadPausedException]).
   Future<String> downloadPost(
     MediaPost post, {
     Board? board,
     DownloadProgress? onProgress,
+    DownloadControl? control,
   }) async {
     final target = _saved(post, board);
     await resolveMedia(post, board: target.board);
@@ -419,6 +447,7 @@ class AppState extends ChangeNotifier {
       ),
       directory: _settings.downloadDirectory,
       onProgress: onProgress,
+      control: control,
     );
     final record = DownloadRecord(
       saved: display.sanitized(),
@@ -460,37 +489,6 @@ class AppState extends ChangeNotifier {
     return _downloads.mediaSize(url);
   }
 
-  /// Downloads [posts] one at a time. Stops early when the download folder
-  /// needs to be chosen again.
-  Future<DownloadSummary> downloadPosts(
-    List<SavedPost> posts, {
-    void Function(int index, int total)? onProgress,
-  }) async {
-    var saved = 0, failed = 0;
-    var folderLost = false;
-    for (var i = 0; i < posts.length; i++) {
-      onProgress?.call(i, posts.length);
-      try {
-        await downloadPost(posts[i].post, board: posts[i].board);
-        saved++;
-      } on PlatformException catch (error) {
-        failed++;
-        if (error.code == 'DIRECTORY_ACCESS' ||
-            error.code == 'DIRECTORY_REQUIRED') {
-          folderLost = true;
-          break;
-        }
-      } catch (_) {
-        failed++;
-      }
-    }
-    return DownloadSummary(
-      saved: saved,
-      failed: failed,
-      folderLost: folderLost,
-    );
-  }
-
   /// Removes entries from the download history; the files stay.
   Future<void> removeDownloadRecords(Iterable<DownloadRecord> records) async {
     final remove = {for (final record in records) record.saved.identity};
@@ -502,6 +500,143 @@ class AppState extends ChangeNotifier {
     );
     await _postStore.saveDownloads(_downloadRecords);
     notifyListeners();
+  }
+
+  // Feeds saved for the next launch, by website name (see persistFeed).
+  Map<String, dynamic> _resumeFeeds = const {};
+  // Websites whose saved feed this session already reopened or skipped;
+  // later visits load fresh posts as before.
+  final Set<Board> _resumeChecked = {};
+  double? _restoredOffset;
+  static const _resumePostLimit = 300;
+  static const _resumeBoardLimit = 3;
+  static const _resumeMaxAge = Duration(days: 7);
+
+  /// The scroll position of a feed reopened from an earlier session, once.
+  double? takeRestoredOffset() {
+    final offset = _restoredOffset;
+    _restoredOffset = null;
+    return offset;
+  }
+
+  /// Saves the visible feed and its scroll [offset] so the next launch
+  /// reopens it ("Resume where you left off"). Nothing is saved in
+  /// incognito or for Sankaku's expiring media links; the saved posts carry
+  /// no credentials. Only the most recent feeds of a few websites are kept.
+  Future<void> persistFeed({double offset = 0}) async {
+    final board = _board;
+    if (!_initialized ||
+        board == null ||
+        !_settings.resumeFeed ||
+        _settings.incognito ||
+        board.isSankakuFamily ||
+        _posts.isEmpty) {
+      return;
+    }
+    final posts = _posts.take(_resumePostLimit).toList(growable: false);
+    // A trimmed feed continues from an earlier page; posts loaded twice
+    // are skipped.
+    final page = posts.length == _posts.length
+        ? _page
+        : (_page * posts.length / _posts.length).floor();
+    final feeds = Map<String, dynamic>.from(_resumeFeeds)
+      ..remove(board.name)
+      ..[board.name] = {
+        'tags': _tags,
+        'page': page,
+        'hasMore': _hasMore || posts.length < _posts.length,
+        'seed': ?_randomSeed,
+        'offset': posts.length == _posts.length ? offset : 0.0,
+        'savedAt': DateTime.now().millisecondsSinceEpoch,
+        'posts': [
+          for (final post in posts)
+            SavedPost(board: board, post: post).sanitized().post.toMap(),
+        ],
+      };
+    // Insertion order is oldest first.
+    while (feeds.length > _resumeBoardLimit) {
+      feeds.remove(feeds.keys.first);
+    }
+    _resumeFeeds = feeds;
+    await _writeFeeds(feeds);
+  }
+
+  // Saved-feed writes, in the order they were made.
+  Future<void> _feedWrites = Future<void>.value();
+
+  Future<void> _writeFeeds(Map<String, dynamic> feeds) =>
+      _feedWrites = _feedWrites.then(
+        (_) => _postStore.saveFeeds(feeds).catchError((Object _) {
+          // Resuming is a convenience; the feed loads fresh instead.
+        }),
+      );
+
+  Future<void> _forgetSavedFeeds() async {
+    if (_resumeFeeds.isEmpty) return;
+    _resumeFeeds = const {};
+    await _writeFeeds(const {});
+  }
+
+  /// Shows [board]'s feed saved by an earlier session, once per session;
+  /// with [browseOnly], only a feed that was not a search. Returns false
+  /// when there is none to show.
+  bool _resumeSavedFeed(Board board, {bool browseOnly = false}) {
+    if (!_resumeChecked.add(board) ||
+        !_settings.resumeFeed ||
+        _settings.incognito ||
+        board.isSankakuFamily) {
+      return false;
+    }
+    final saved = _resumeFeeds[board.name];
+    if (saved is! Map) return false;
+    if (browseOnly && (saved['tags'] as List?)?.isNotEmpty != false) {
+      return false;
+    }
+    // Signed out since: the feed shows the sign-in error instead.
+    if (board.requiresAuth && _credentialsByBoard[board] == null) return false;
+    try {
+      final savedAt = DateTime.fromMillisecondsSinceEpoch(
+        (saved['savedAt'] as num).toInt(),
+      );
+      if (DateTime.now().difference(savedAt) > _resumeMaxAge) return false;
+      final credentials = _credentialsByBoard[board];
+      final posts = [
+        for (final map in saved['posts'] as List)
+          SavedPost(
+            board: board,
+            post: MediaPost.fromMap(map as Map),
+          ).authorized(credentials).post,
+      ];
+      final tags = List<String>.unmodifiable([
+        for (final tag in saved['tags'] as List) '$tag',
+      ]);
+      // Filters may have changed since it was saved; what they hide now is
+      // counted like on a fresh load.
+      final visible = <MediaPost>[];
+      final filtered = <FilterReason, int>{};
+      for (final post in posts) {
+        final reason = _filterReason(post, board, tags);
+        if (reason == null) {
+          visible.add(post);
+        } else {
+          filtered[reason] = (filtered[reason] ?? 0) + 1;
+        }
+      }
+      if (visible.isEmpty) return false;
+      _tags = tags;
+      _posts = visible;
+      _filtered = Map.unmodifiable(filtered);
+      _page = (saved['page'] as num).toInt();
+      _hasMore = saved['hasMore'] != false;
+      _randomSeed = (saved['seed'] as num?)?.toInt();
+      final offset = (saved['offset'] as num?)?.toDouble() ?? 0;
+      _restoredOffset = offset > 0 ? offset : null;
+      _error = null;
+      _retryAt = null;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// The visible feed's state, so going back to it can restore its posts
@@ -673,6 +808,7 @@ class AppState extends ChangeNotifier {
     Board board,
     List<String> tags, {
     int limit = 40,
+    bool filter = true,
   }) async {
     final raw = await _withSession(
       board,
@@ -687,8 +823,104 @@ class AppState extends ChangeNotifier {
     );
     return raw
         .map(MediaPost.fromMap)
-        .where((post) => _allowedOn(post, board, tags))
+        .where((post) => !filter || _allowedOn(post, board, tags))
         .toList(growable: false);
+  }
+
+  static final _linkPattern = RegExp(r'https?://[^\s<>"]+');
+  static const _importLinkLimit = 500;
+
+  /// Adds the posts linked in [text] to favorites: one link per line, or
+  /// links anywhere in a file such as another app's export. Each post is
+  /// looked up on its website (ignoring the local filters, like favorites
+  /// restored from a backup); at most 500 links are read. [onProgress]
+  /// reports looked-up links.
+  Future<LinkImportSummary> importPostLinks(
+    String text, {
+    void Function(int done, int total)? onProgress,
+  }) async {
+    final links = <String, PostLink>{};
+    for (final match in _linkPattern.allMatches(text)) {
+      final link = PostLink.parse(match[0]!);
+      final id = link?.postId;
+      if (link == null || id == null) continue;
+      links.putIfAbsent('${link.board.name}:$id', () => link);
+      if (links.length >= _importLinkLimit) break;
+    }
+    final found = <SavedPost>[];
+    final seen = <String>{};
+    var added = 0, existing = 0, failed = 0, done = 0;
+    for (final link in links.values) {
+      final board = link.board;
+      if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
+        _credentialsByBoard[board] = await _loadCredentials(board);
+      }
+      Future<MediaPost?> lookUp() async {
+        final id = link.postId!;
+        final posts = await _lookup(board, ['id:$id'], limit: 5, filter: false);
+        return posts
+            .where((post) => post.displayId == id || '${post.id}' == id)
+            .firstOrNull;
+      }
+
+      try {
+        MediaPost? post;
+        try {
+          post = await lookUp();
+        } on RateLimitedException catch (error) {
+          // Waits once for the website, then tries again.
+          final wait = error.retryAfter ?? const Duration(seconds: 15);
+          await Future<void>.delayed(
+            wait > const Duration(minutes: 1)
+                ? const Duration(minutes: 1)
+                : wait,
+          );
+          post = await lookUp();
+        }
+        if (post == null) {
+          failed++;
+        } else {
+          final saved = _saved(post, board);
+          if (isFavorite(post, board: board) || !seen.add(saved.identity)) {
+            existing++;
+          } else {
+            found.add(saved);
+          }
+          // Saved as it goes, so an interrupted import keeps what it found.
+          if (found.length >= 25) {
+            added += await _addFavorites(found);
+            existing += found.length;
+            found.clear();
+          }
+        }
+      } catch (_) {
+        failed++;
+      }
+      onProgress?.call(++done, links.length);
+    }
+    added += await _addFavorites(found);
+    existing += found.length;
+    return LinkImportSummary(
+      links: links.length,
+      added: added,
+      // Favorited meanwhile from elsewhere counts as already saved.
+      existing: existing - added,
+      failed: failed,
+    );
+  }
+
+  /// Adds [posts] to favorites, skipping any favorited meanwhile; returns
+  /// how many were added.
+  Future<int> _addFavorites(List<SavedPost> posts) async {
+    final added = [
+      for (final saved in posts)
+        if (!isFavorite(saved.post, board: saved.board)) saved,
+    ];
+    if (added.isEmpty) return 0;
+    _setFavorites([..._favoritePosts, ...added]);
+    await _postStore.saveFavorites(_favoritePosts);
+    notifyListeners();
+    return added.length;
   }
 
   /// The post [id] on [board], for a link opened in the app. Null when the
@@ -1197,16 +1429,30 @@ class AppState extends ChangeNotifier {
       } catch (_) {
         // History is optional; a damaged list starts empty.
       }
+      List<PendingDownload> queued = const [];
+      try {
+        queued = await _postStore.loadDownloadQueue();
+      } catch (_) {
+        // The queue is optional too.
+      }
       try {
         final profile = await _shortsStore.load();
         if (profile != null) _shortsProfile.loadMap(profile);
       } catch (_) {
         // The booruShorts profile is optional; a damaged one starts empty.
       }
+      try {
+        _resumeFeeds = settings.resumeFeed
+            ? Map<String, dynamic>.from(await _postStore.loadFeeds())
+            : const {};
+      } catch (_) {
+        // Saved feeds are optional too.
+      }
       for (final saved in [
         ..._favoritePosts,
         ..._hiddenPosts,
         for (final record in _downloadRecords) record.saved,
+        for (final download in queued) download.saved,
       ]) {
         if (saved.board.supportsAuth &&
             !_credentialsByBoard.containsKey(saved.board)) {
@@ -1219,8 +1465,12 @@ class AppState extends ChangeNotifier {
       _error = _friendly(error);
     }
     _initialized = true;
+    final resumed = _board != null && _error == null
+        ? _resumeSavedFeed(_board!)
+        : false;
     notifyListeners();
-    if (_board != null && _error == null) {
+    unawaited(downloads._restore());
+    if (_board != null && _error == null && !resumed) {
       await _load(reset: true, generation: _generation);
     }
   }
@@ -1244,6 +1494,13 @@ class AppState extends ChangeNotifier {
       _credentialsByBoard[value] = loadedCredentials;
       _clearResults();
       _tags = List.unmodifiable(tags);
+      // A website opened without a search reopens its feed from an
+      // earlier session.
+      if (tags.isEmpty && _resumeSavedFeed(value, browseOnly: true)) {
+        notifyListeners();
+        return;
+      }
+      _resumeChecked.add(value);
       notifyListeners();
       await _load(reset: true, generation: generation);
     } catch (error) {
@@ -1328,6 +1585,55 @@ class AppState extends ChangeNotifier {
         _settings = next;
         notifyListeners();
       });
+
+  /// Safe mode: only safe-rated posts, with explicit and questionable
+  /// blurring on. Switching it off restores the ratings and blur settings
+  /// from before it was switched on. Reloads the feed.
+  Future<void> setSafeMode(bool enabled) async {
+    var changed = false;
+    await _enqueueSettingsUpdate(() async {
+      final current = _settings;
+      if (current.safeMode == enabled) return;
+      final next = enabled
+          ? current.copyWith(
+              safeMode: true,
+              safeModeRatings: current.selectedRatings,
+              safeModeBlurExplicit: current.blurExplicit,
+              safeModeBlurQuestionable: current.blurQuestionable,
+              selectedRatings: const [Rating.general],
+              blurExplicit: true,
+              blurQuestionable: true,
+            )
+          : current.copyWith(
+              safeMode: false,
+              selectedRatings: current.safeModeRatings.isEmpty
+                  ? Rating.values
+                  : current.safeModeRatings,
+              blurExplicit: current.safeModeBlurExplicit,
+              blurQuestionable: current.safeModeBlurQuestionable,
+            );
+      try {
+        await _store.saveSettings(next);
+      } catch (_) {
+        return;
+      }
+      _settings = next;
+      changed = true;
+    });
+    if (!changed) return;
+    _invalidate();
+    _clearResults();
+    notifyListeners();
+    await _load(reset: true, generation: _generation);
+  }
+
+  /// How many queued downloads run at once; more start right away.
+  Future<void> setDownloadConcurrency(int value) async {
+    await _saveQuietly(
+      (settings) => settings.copyWith(downloadConcurrency: value),
+    );
+    downloads._pump();
+  }
 
   /// Persists the drawer's website order and hidden set without reloading
   /// the feed.
@@ -1455,6 +1761,46 @@ class AppState extends ChangeNotifier {
     });
   }
 
+  /// Recent searches pinned to the top of the history.
+  List<List<String>> get pinnedSearches => _settings.pinnedSearches;
+
+  String _queryKey(List<String> query) => query
+      .map(_normalize)
+      .where((tag) => tag.isNotEmpty)
+      .toSet()
+      .join('\u0000');
+
+  bool isPinnedSearch(List<String> query) {
+    final key = _queryKey(query);
+    return _settings.pinnedSearches.any((pinned) => _queryKey(pinned) == key);
+  }
+
+  /// Whether [query] is one of the current website's saved searches.
+  bool isSavedQuery(List<String> query) {
+    final key = _queryKey(query);
+    return savedQueries.any((saved) => _queryKey(saved) == key);
+  }
+
+  /// Pins [query] to the top of the search history, or unpins it.
+  Future<void> togglePinnedSearch(List<String> query) {
+    final key = _queryKey(query);
+    if (key.isEmpty) return Future<void>.value();
+    return _saveQuietly((settings) {
+      final pinned = settings.pinnedSearches;
+      final kept = pinned.where((value) => _queryKey(value) != key).toList();
+      return settings.copyWith(
+        pinnedSearches: kept.length == pinned.length
+            ? [query, ...pinned]
+            : kept,
+      );
+    });
+  }
+
+  /// The grid's column count, changed by pinching the feed; the feed is
+  /// not reloaded.
+  Future<void> setColumns(int columns) =>
+      _saveQuietly((settings) => settings.copyWith(columns: columns));
+
   Future<T> _enqueueSettingsUpdate<T>(Future<T> Function() update) {
     final operation = _settingsQueue.then<T>((_) => update());
     _settingsQueue = operation.then<void>(
@@ -1543,11 +1889,18 @@ class AppState extends ChangeNotifier {
             savedSearchMarks: _settings.savedSearchMarks,
             aiNoticeShown: _settings.aiNoticeShown,
             multiSearchOff: _settings.multiSearchOff,
+            downloadConcurrency: _settings.downloadConcurrency,
+            safeMode: _settings.safeMode,
+            safeModeRatings: _settings.safeModeRatings,
+            safeModeBlurExplicit: _settings.safeModeBlurExplicit,
+            safeModeBlurQuestionable: _settings.safeModeBlurQuestionable,
+            pinnedSearches: _settings.pinnedSearches,
           )
           .normalized();
       await _store.saveSettings(normalized);
       _settings = normalized;
     });
+    if (!_settings.resumeFeed) await _forgetSavedFeeds();
     _invalidate();
     _clearResults();
     notifyListeners();
@@ -1746,6 +2099,7 @@ class AppState extends ChangeNotifier {
     final board = _board!;
     final tags = _tags;
     var highest = 0;
+    final filtered = <FilterReason, int>{};
     try {
       var accepted = <MediaPost>[];
       var currentPage = page;
@@ -1766,7 +2120,15 @@ class AppState extends ChangeNotifier {
         for (final post in parsed) {
           if (post.id > highest) highest = post.id;
         }
-        final incoming = parsed.where(_allowed).toList();
+        final incoming = <MediaPost>[];
+        for (final post in parsed) {
+          final reason = _filterReason(post, board, tags);
+          if (reason == null) {
+            incoming.add(post);
+          } else {
+            filtered[reason] = (filtered[reason] ?? 0) + 1;
+          }
+        }
         final seen = {
           ...(reset ? const <String>[] : _posts.map(_postKey)),
           ...accepted.map(_postKey),
@@ -1782,6 +2144,12 @@ class AppState extends ChangeNotifier {
       _page = lastFetchedPage;
       if (accepted.length >= _settings.batchSize) _hasMore = true;
       _posts = [...(reset ? const <MediaPost>[] : _posts), ...accepted];
+      final counts = reset ? <FilterReason, int>{} : {..._filtered};
+      for (final entry in filtered.entries) {
+        counts[entry.key] = (counts[entry.key] ?? 0) + entry.value;
+      }
+      _filtered = Map.unmodifiable(counts);
+      _boardIssues.remove(board);
       if (reset) _markSavedSearch(board, tags, highest);
     } on RequestCancelledException {
       // A newer feed request superseded this one natively. A newer
@@ -1797,6 +2165,7 @@ class AppState extends ChangeNotifier {
           );
         }
       }
+      _noteBoardIssue(board, error);
     } finally {
       if (generation == _generation && !superseded) {
         _loading = false;
@@ -2004,21 +2373,35 @@ class AppState extends ChangeNotifier {
     MediaPost post,
     Board? board, [
     List<String> query = const [],
+  ]) => _filterReason(post, board, query) == null;
+
+  /// Why [_allowedOn] leaves [post] out, or null when it is shown.
+  FilterReason? _filterReason(
+    MediaPost post,
+    Board? board, [
+    List<String> query = const [],
   ]) {
-    if (excludedByQuery(post.tags, query)) return false;
+    if (excludedByQuery(post.tags, query)) return FilterReason.excluded;
     final aiTag = _aiTagFor(board);
     if (_excludesAiOn(board) &&
         post.tags.any((tag) => _normalize(tag) == aiTag)) {
-      return false;
+      return FilterReason.ai;
     }
     final blocked = _settings.blacklistFor(board);
     if (blocked.isNotEmpty) {
       final tags = post.tags.map(_normalize).toSet();
-      if (blocked.any((tag) => tags.contains(_normalize(tag)))) return false;
+      if (blocked.any((tag) => tags.contains(_normalize(tag)))) {
+        return FilterReason.blocked;
+      }
     }
-    if (_settings.hidesUploader(board, post.uploader)) return false;
-    return (board?.hasRatings == false || _ratingAllowed(post)) &&
-        !isHidden(post, board: board);
+    if (_settings.hidesUploader(board, post.uploader)) {
+      return FilterReason.uploader;
+    }
+    if (board?.hasRatings != false && !_ratingAllowed(post)) {
+      return FilterReason.rating;
+    }
+    if (isHidden(post, board: board)) return FilterReason.hidden;
+    return null;
   }
 
   static final _tagSeparators = RegExp(r'[\s_-]+');
@@ -2197,6 +2580,22 @@ class AppState extends ChangeNotifier {
     _posts = const [];
     _page = -1;
     _hasMore = true;
+    _filtered = const {};
+  }
+
+  /// Remembers that [board] failed recently, for the website list's status
+  /// badges. Errors about the search itself or the session say nothing
+  /// about the website.
+  void _noteBoardIssue(Board board, Object error) {
+    final issue = switch (error) {
+      RateLimitedException() => BoardIssue.rateLimited,
+      TagLimitException() ||
+      AuthExpiredException() ||
+      SignInRejectedException() ||
+      RequestCancelledException() => null,
+      _ => BoardIssue.unreachable,
+    };
+    if (issue != null) _boardIssues[board] = (issue, DateTime.now());
   }
 
   void _invalidate() {
@@ -2226,6 +2625,37 @@ class AppState extends ChangeNotifier {
   }
 }
 
+/// Why the local filters left a post out of the feed.
+enum FilterReason {
+  /// A tag the search excludes (`-tag`).
+  excluded,
+  ai,
+  blocked,
+  uploader,
+  rating,
+  hidden;
+
+  String get label => switch (this) {
+    excluded => 'Excluded by the search',
+    ai => 'AI-generated',
+    blocked => 'Blocked tags',
+    uploader => 'Hidden uploaders',
+    rating => 'Rating filter',
+    hidden => 'Hidden posts',
+  };
+}
+
+/// A recent problem reaching a website; see [AppState.boardIssue].
+enum BoardIssue {
+  rateLimited,
+  unreachable;
+
+  String get label => switch (this) {
+    rateLimited => 'Limiting requests',
+    unreachable => 'Not reachable recently',
+  };
+}
+
 /// The feed as it was before a search, from [AppState.snapshotFeed].
 class FeedSnapshot {
   const FeedSnapshot._({
@@ -2242,19 +2672,6 @@ class FeedSnapshot {
   final int page;
   final bool hasMore;
   final int? randomSeed;
-}
-
-/// What [AppState.downloadPosts] saved.
-class DownloadSummary {
-  const DownloadSummary({
-    required this.saved,
-    required this.failed,
-    this.folderLost = false,
-  });
-  final int saved, failed;
-
-  /// The download folder must be chosen again; the rest were not tried.
-  final bool folderLost;
 }
 
 /// One search on several websites at once, merged into a single feed.
@@ -2848,6 +3265,19 @@ class ShortsFeedSnapshot {
   final Set<(Board, String?)> exhausted;
   final Map<(Board, String?), String> errors;
   final int seed, cursor;
+}
+
+/// What [AppState.importPostLinks] found: the post links read, the posts
+/// added to favorites, those already there, and those that could not be
+/// found or looked up.
+class LinkImportSummary {
+  const LinkImportSummary({
+    required this.links,
+    required this.added,
+    required this.existing,
+    required this.failed,
+  });
+  final int links, added, existing, failed;
 }
 
 /// What [AppState.importBackup] restored.

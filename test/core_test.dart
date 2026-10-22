@@ -117,6 +117,7 @@ class _RecordingDownloads extends DownloadService {
     required String name,
     String? directory,
     DownloadProgress? onProgress,
+    DownloadControl? control,
   }) async {
     urls.add(url);
     return 'content://saved';
@@ -232,6 +233,40 @@ class FakeAccounts implements AccountRepository {
     if (refreshError != null) throw refreshError!;
     return refreshResult ?? (throw const SignInRejectedException());
   }
+}
+
+/// Holds each download until the test finishes it, and records partial
+/// files resumed or discarded and keep-alive changes.
+class _GatedDownloads extends DownloadService {
+  final gates = <String, Completer<String>>{};
+  final resumed = <String, String?>{};
+  final discarded = <String>[];
+  final alive = <bool>[];
+  @override
+  Future<String> download({
+    required String url,
+    required String name,
+    String? directory,
+    DownloadProgress? onProgress,
+    DownloadControl? control,
+  }) {
+    resumed[url] = control?.resume;
+    control?.target = 'content://partial/$name';
+    control?.onTarget?.call('content://partial/$name');
+    onProgress?.call(5, 10);
+    return (gates[url] = Completer<String>()).future;
+  }
+
+  @override
+  Future<void> discard(String uri, {String? directory}) async =>
+      discarded.add(uri);
+
+  @override
+  Future<void> keepAlive({
+    required bool active,
+    String text = '',
+    int? percent,
+  }) async => alive.add(active);
 }
 
 Map<String, dynamic> post(int id, {List<String> tags = const []}) => {
@@ -2029,6 +2064,202 @@ void main() {
     });
   });
 
+  group('download queue', () {
+    SavedPost saved(int id) =>
+        SavedPost(board: Board.safebooru, post: MediaPost.fromMap(post(id)));
+
+    Future<(AppState, _GatedDownloads, MemoryPostStore)> start({
+      MemoryPostStore? posts,
+    }) async {
+      final downloads = _GatedDownloads();
+      final postStore = posts ?? MemoryPostStore();
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore()
+          ..selected = Board.safebooru
+          ..settings = const AppSettings(downloadConcurrency: 2),
+        postStore: postStore,
+        downloads: downloads,
+      );
+      await state.initialize();
+      return (state, downloads, postStore);
+    }
+
+    test('runs a limited number at once, pauses, resumes the partial file, '
+        'and cancels', () async {
+      final (state, downloads, postStore) = await start();
+      final queue = state.downloads;
+      final tasks = queue.addAll([saved(1), saved(2), saved(3)]);
+      // Adding a queued post again does not queue it twice.
+      expect(queue.add(saved(1)), same(tasks[0]));
+      await pumpEventQueue();
+      expect(downloads.gates.keys, ['https://x/1.jpg', 'https://x/2.jpg']);
+      expect(tasks.map((task) => task.status), [
+        DownloadStatus.running,
+        DownloadStatus.running,
+        DownloadStatus.waiting,
+      ]);
+      expect(tasks[0].fraction, .5);
+      expect(downloads.alive.last, isTrue);
+      expect(queue.busy.value, isTrue);
+
+      downloads.gates['https://x/1.jpg']!.complete('content://saved/1');
+      expect(await tasks[0].settled, DownloadResult.saved);
+      await pumpEventQueue();
+      expect(state.isDownloaded(saved(1).post, board: Board.safebooru), isTrue);
+      expect(queue.tasks, [tasks[1], tasks[2]]);
+      expect(tasks[2].status, DownloadStatus.running);
+
+      queue.pause(tasks[1]);
+      expect(tasks[1].status, DownloadStatus.paused);
+      downloads.gates['https://x/2.jpg']!.completeError(
+        const DownloadPausedException('content://partial/2'),
+      );
+      await pumpEventQueue();
+      expect(tasks[1].status, DownloadStatus.paused);
+      final stored = await postStore.loadDownloadQueue();
+      expect(stored.first.paused, isTrue);
+      expect(stored.first.partial, 'content://partial/2');
+
+      queue.resume(tasks[1]);
+      await pumpEventQueue();
+      expect(tasks[1].status, DownloadStatus.running);
+      expect(downloads.resumed['https://x/2.jpg'], 'content://partial/2');
+
+      final removed = queue.remove(tasks[2]);
+      downloads.gates['https://x/3.jpg']!.completeError(
+        const DownloadPausedException('content://partial/3'),
+      );
+      await removed;
+      await pumpEventQueue();
+      expect(await tasks[2].settled, DownloadResult.removed);
+      expect(downloads.discarded, ['content://partial/3']);
+      expect(queue.tasks, [tasks[1]]);
+
+      downloads.gates['https://x/2.jpg']!.complete('content://saved/2');
+      await pumpEventQueue();
+      expect(queue.isEmpty, isTrue);
+      expect(queue.busy.value, isFalse);
+      expect(downloads.alive.last, isFalse);
+      expect(await postStore.loadDownloadQueue(), isEmpty);
+    });
+
+    test('a saved queue continues after a restart; paused ones wait', () async {
+      final posts = MemoryPostStore();
+      await posts.saveDownloadQueue([
+        PendingDownload(
+          saved: saved(1),
+          addedAt: DateTime(2026),
+          paused: true,
+          partial: 'content://partial/1',
+        ),
+        PendingDownload(
+          saved: saved(2),
+          addedAt: DateTime(2026),
+          partial: 'content://partial/2',
+        ),
+      ]);
+      final (state, downloads, _) = await start(posts: posts);
+      await pumpEventQueue();
+      final tasks = state.downloads.tasks;
+      expect(tasks.map((task) => task.status), [
+        DownloadStatus.paused,
+        DownloadStatus.running,
+      ]);
+      expect(downloads.gates.keys, ['https://x/2.jpg']);
+      // The interrupted download continues its file.
+      expect(downloads.resumed['https://x/2.jpg'], 'content://partial/2');
+    });
+
+    test(
+      'a lost download folder fails the download and pauses the rest',
+      () async {
+        final (state, downloads, _) = await start();
+        final queue = state.downloads;
+        await state.setDownloadConcurrency(1);
+        final tasks = queue.addAll([saved(1), saved(2)]);
+        await pumpEventQueue();
+        downloads.gates['https://x/1.jpg']!.completeError(
+          PlatformException(code: 'DIRECTORY_ACCESS'),
+        );
+        expect(await tasks[0].settled, DownloadResult.folderLost);
+        await pumpEventQueue();
+        expect(tasks[0].status, DownloadStatus.failed);
+        expect(tasks[1].status, DownloadStatus.paused);
+        expect(queue.folderLost, isTrue);
+        expect(downloads.gates, hasLength(1));
+
+        queue.resumeAll();
+        await pumpEventQueue();
+        expect(queue.folderLost, isFalse);
+        expect(tasks[0].status, DownloadStatus.running);
+        expect(tasks[1].status, DownloadStatus.waiting);
+      },
+    );
+
+    test('a failed download retries from its partial file, unless the '
+        'download folder changed', () async {
+      final (state, downloads, _) = await start();
+      final queue = state.downloads;
+      final task = queue.add(saved(1));
+      await pumpEventQueue();
+      downloads.gates['https://x/1.jpg']!.completeError(
+        PlatformException(code: 'REQUEST_FAILED'),
+      );
+      expect(await task.settled, DownloadResult.failed);
+      await pumpEventQueue();
+      expect(task.status, DownloadStatus.failed);
+
+      queue.resume(task);
+      await pumpEventQueue();
+      expect(
+        downloads.resumed['https://x/1.jpg'],
+        'content://partial/safebooru_1.jpg',
+      );
+      downloads.gates['https://x/1.jpg']!.completeError(
+        PlatformException(code: 'REQUEST_FAILED'),
+      );
+      await pumpEventQueue();
+
+      await state.updateSettings(
+        state.settings.copyWith(downloadDirectory: 'content://tree/other'),
+      );
+      queue.resume(task);
+      await pumpEventQueue();
+      expect(downloads.discarded, ['content://partial/safebooru_1.jpg']);
+      expect(downloads.resumed['https://x/1.jpg'], isNull);
+    });
+
+    test('new settings round-trip and keep their defaults', () {
+      const defaults = AppSettings();
+      expect(defaults.downloadConcurrency, 2);
+      expect(defaults.resumeFeed, isTrue);
+      final legacy = AppSettings.fromMap({'columns': 3});
+      expect(legacy.downloadConcurrency, 2);
+      expect(legacy.safeMode, isFalse);
+      expect(legacy.pinnedSearches, isEmpty);
+      expect(legacy.resumeFeed, isTrue);
+      final changed = defaults.copyWith(
+        downloadConcurrency: 9,
+        safeMode: true,
+        safeModeRatings: [Rating.explicit, Rating.general],
+        safeModeBlurQuestionable: true,
+        pinnedSearches: [
+          ['Blue_Sky', 'cat'],
+        ],
+        resumeFeed: false,
+      );
+      expect(changed.downloadConcurrency, AppSettings.maxDownloadConcurrency);
+      expect(changed.safeModeRatings, [Rating.general, Rating.explicit]);
+      expect(changed.pinnedSearches, [
+        ['blue_sky', 'cat'],
+      ]);
+      expect(AppSettings.decode(changed.encode()), changed);
+      // Saved values for safe mode only matter while it is on.
+      expect(changed.copyWith(safeMode: false).safeModeRatings, isEmpty);
+    });
+  });
+
   group('updates', () {
     Map<String, Object?> release(
       String tag,
@@ -2176,6 +2407,223 @@ void main() {
           isA<UpdateException>().having((e) => e.retryable, 'retryable', true),
         ),
       );
+    });
+  });
+
+  group('quality of life', () {
+    test('safe mode shows safe posts blurred and restores the settings '
+        'from before', () async {
+      final store = MemoryStore()
+        ..selected = Board.safebooru
+        ..settings = const AppSettings(
+          selectedRatings: [Rating.general, Rating.questionable],
+          blurExplicit: false,
+          blurQuestionable: false,
+        );
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+      await state.setSafeMode(true);
+      expect(state.settings.safeMode, isTrue);
+      expect(state.settings.selectedRatings, [Rating.general]);
+      expect(state.settings.blurExplicit, isTrue);
+      expect(state.settings.blurQuestionable, isTrue);
+      final saved = AppSettings.decode(store.settings.encode());
+      expect(saved.safeMode, isTrue);
+      expect(saved.safeModeRatings, [Rating.general, Rating.questionable]);
+
+      await state.setSafeMode(false);
+      expect(state.settings.safeMode, isFalse);
+      expect(state.settings.selectedRatings, [
+        Rating.general,
+        Rating.questionable,
+      ]);
+      expect(state.settings.blurExplicit, isFalse);
+      expect(state.settings.blurQuestionable, isFalse);
+      expect(state.settings.safeModeRatings, isEmpty);
+    });
+
+    test('counts posts the filters hid, by reason', () async {
+      final state = AppState(
+        repository: FakeRepo([
+          [
+            post(1, tags: ['cat']),
+            post(2, tags: ['dog']),
+            post(3, tags: ['dog']),
+          ],
+        ]),
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      await state.search(['cat', '-dog']);
+      expect(state.posts.map((post) => post.id), [1]);
+      expect(state.filteredCounts, {FilterReason.excluded: 2});
+      await state.search(['cat']);
+      expect(state.filteredCounts, isEmpty);
+    });
+
+    test('remembers websites that failed recently until they answer', () async {
+      final repo = _IssueRepo();
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      expect(state.boardIssue(Board.safebooru), BoardIssue.unreachable);
+      repo.error = const RateLimitedException();
+      await state.search(['cat']);
+      expect(state.boardIssue(Board.safebooru), BoardIssue.rateLimited);
+      repo.error = null;
+      await state.search(['cat']);
+      expect(state.boardIssue(Board.safebooru), isNull);
+    });
+
+    test('pins searches and keeps them in settings', () async {
+      final store = MemoryStore()..selected = Board.safebooru;
+      final state = AppState(repository: FakeRepo(const [[]]), store: store);
+      await state.initialize();
+      await state.togglePinnedSearch(['cat', 'rating:safe']);
+      expect(state.isPinnedSearch(['cat', 'rating:safe']), isTrue);
+      expect(store.settings.pinnedSearches, [
+        ['cat', 'rating:safe'],
+      ]);
+      expect(
+        AppSettings.decode(store.settings.encode()).pinnedSearches,
+        store.settings.pinnedSearches,
+      );
+      await state.togglePinnedSearch(['cat', 'rating:safe']);
+      expect(state.isPinnedSearch(['cat', 'rating:safe']), isFalse);
+      await state.setColumns(4);
+      expect(store.settings.columns, 4);
+    });
+
+    test(
+      'reopens the feed and scroll position from the last session',
+      () async {
+        final postStore = MemoryPostStore();
+        final store = MemoryStore()..selected = Board.safebooru;
+        final first = AppState(
+          repository: FakeRepo([
+            [post(1), post(2)],
+          ]),
+          store: store,
+          postStore: postStore,
+        );
+        await first.initialize();
+        await first.search(['cat']);
+        await first.persistFeed(offset: 120);
+
+        final repo = FakeRepo(const [[]]);
+        final second = AppState(
+          repository: repo,
+          store: store,
+          postStore: postStore,
+        );
+        await second.initialize();
+        expect(repo.calls, 0);
+        expect(second.tags, ['cat']);
+        expect(second.posts.map((post) => post.id), [1, 2]);
+        expect(second.takeRestoredOffset(), 120);
+        expect(second.takeRestoredOffset(), isNull);
+        // Only once per session: opening the website again loads it fresh.
+        await second.chooseBoard(Board.safebooru);
+        expect(repo.calls, greaterThan(0));
+        expect(second.tags, isEmpty);
+
+        // Nothing is reopened with the setting off.
+        store.settings = store.settings.copyWith(resumeFeed: false);
+        final third = AppState(
+          repository: FakeRepo(const [[]]),
+          store: store,
+          postStore: postStore,
+        );
+        await third.initialize();
+        expect(third.posts, isEmpty);
+      },
+    );
+
+    test('opening a website from the menu reopens only a saved feed that '
+        'was not a search, counting what the filters now hide', () async {
+      final postStore = MemoryPostStore();
+      final store = MemoryStore()..selected = Board.safebooru;
+      final first = AppState(
+        repository: FakeRepo([
+          [
+            post(1),
+            post(2, tags: ['dog']),
+          ],
+        ]),
+        store: store,
+        postStore: postStore,
+      );
+      await first.initialize();
+      await first.persistFeed(offset: 30);
+      await first.chooseBoard(Board.danbooru);
+      await first.search(['cat']);
+      await first.persistFeed();
+
+      store
+        ..selected = Board.konachan
+        ..settings = store.settings.copyWith(blacklist: ['dog']);
+      final repo = FakeRepo(const [[]]);
+      final second = AppState(
+        repository: repo,
+        store: store,
+        postStore: postStore,
+      );
+      await second.initialize();
+      final calls = repo.calls;
+      await second.chooseBoard(Board.safebooru);
+      expect(repo.calls, calls);
+      expect(second.posts.map((post) => post.id), [1]);
+      expect(second.filteredCounts, {FilterReason.blocked: 1});
+      expect(second.takeRestoredOffset(), 30);
+      await second.chooseBoard(Board.danbooru);
+      expect(repo.calls, greaterThan(calls));
+      expect(second.tags, isEmpty);
+    });
+
+    test('incognito saves no feed to resume', () async {
+      final postStore = MemoryPostStore();
+      final state = AppState(
+        repository: FakeRepo([
+          [post(1)],
+        ]),
+        store: MemoryStore()
+          ..selected = Board.safebooru
+          ..settings = const AppSettings(incognito: true),
+        postStore: postStore,
+      );
+      await state.initialize();
+      await state.persistFeed(offset: 40);
+      expect(await postStore.loadFeeds(), isEmpty);
+    });
+
+    test('imports post links as favorites', () async {
+      final state = AppState(
+        repository: _LinkRepo(),
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      await state.favoritePost(
+        MediaPost.fromMap(post(9)),
+        board: Board.danbooru,
+      );
+      final progress = <int>[];
+      final summary = await state.importPostLinks('''
+https://danbooru.donmai.us/posts/7
+{"url": "https://danbooru.donmai.us/posts/7"}, https://danbooru.donmai.us/posts/9
+https://danbooru.donmai.us/posts/404 https://example.com/posts/1
+https://danbooru.donmai.us/posts?tags=cat
+''', onProgress: (done, _) => progress.add(done));
+      expect(summary.links, 3);
+      expect(summary.added, 1);
+      expect(summary.existing, 1);
+      expect(summary.failed, 1);
+      expect(progress, [1, 2, 3]);
+      expect(state.favoritePosts.map((saved) => (saved.board, saved.post.id)), [
+        (Board.danbooru, 9),
+        (Board.danbooru, 7),
+      ]);
     });
   });
 
@@ -3050,4 +3498,46 @@ class _ShortsRepo implements BoardRepository {
     required int limit,
     Credentials? credentials,
   }) async => const [];
+}
+
+/// Fails every fetch with [error] while it is set.
+class _IssueRepo extends FakeRepo {
+  _IssueRepo() : super(const [[]]);
+  Object? error = StateError('offline');
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) async {
+    final error = this.error;
+    if (error != null) throw error;
+    return const [];
+  }
+}
+
+/// Answers `id:` lookups with that post, except 404.
+class _LinkRepo extends FakeRepo {
+  _LinkRepo() : super(const [[]]);
+  @override
+  Future<List<Map<String, dynamic>>> fetch({
+    required Board board,
+    required List<String> tags,
+    required int limit,
+    required int page,
+    required bool random,
+    int? randomSeed,
+    Credentials? credentials,
+    bool feed = false,
+  }) async {
+    final id = tags.isEmpty || !tags.first.startsWith('id:')
+        ? null
+        : int.tryParse(tags.first.substring(3));
+    return id == null || id == 404 ? const [] : [post(id)];
+  }
 }

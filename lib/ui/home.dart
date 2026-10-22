@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
@@ -80,7 +81,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Feed multi-select: identities of the selected posts, with the posts.
   bool _selecting = false;
   final Map<String, SavedPost> _selected = {};
-  String? _batchProgress;
 
   @override
   void initState() {
@@ -94,6 +94,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     });
     widget.state.addListener(_showNotice);
+    widget.state.addListener(_jumpToRestoredFeed);
     widget.locked?.addListener(_openPendingShortcut);
     _shortcutSubscription = _device.shortcuts.listen((shortcut) {
       // Clears the native copy kept for a cold start, so it is not reopened.
@@ -111,10 +112,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     widget.locked?.removeListener(_openPendingShortcut);
     _shortcutSubscription?.cancel();
     widget.state.removeListener(_showNotice);
+    widget.state.removeListener(_jumpToRestoredFeed);
     _scroll.dispose();
     _showScrollTop.dispose();
     _panelHidden.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _persistFeed();
+    }
+  }
+
+  /// Saves the feed and scroll position for the next launch.
+  Future<void> _persistFeed() =>
+      widget.state.persistFeed(offset: _scroll.hasClients ? _scroll.offset : 0);
+
+  /// Scrolls a feed reopened from an earlier session back to where it was.
+  void _jumpToRestoredFeed() {
+    if (!widget.state.initialized || widget.state.posts.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final offset = widget.state.takeRestoredOffset();
+      if (offset == null) return;
+      _scroll.jumpTo(offset.clamp(0.0, _scroll.position.maxScrollExtent));
+    });
   }
 
   @override
@@ -148,6 +173,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     if (shortcut.kind == 'link') {
       await _openLink(shortcut.url ?? '');
+      return;
+    }
+    if (shortcut.kind == 'downloads') {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => DownloadsScreen(state: widget.state),
+        ),
+      );
       return;
     }
     final state = widget.state;
@@ -352,35 +387,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Queues the selected posts in the Download Manager.
   Future<void> _downloadSelected() async {
-    if (_batchProgress != null || _selected.isEmpty) return;
-    final posts = _selected.values.toList();
-    setState(() => _batchProgress = 'Downloading 1 of ${posts.length}…');
-    final result = await widget.state.downloadPosts(
-      posts,
-      onProgress: (index, total) {
-        if (mounted) {
-          setState(
-            () => _batchProgress = 'Downloading ${index + 1} of $total…',
-          );
-        }
-      },
+    if (_selected.isEmpty) return;
+    final queued = await queueDownloads(
+      context,
+      widget.state,
+      _selected.values.toList(),
     );
-    if (!mounted) return;
-    setState(() => _batchProgress = null);
-    _endSelection();
-    final summary = result.failed == 0
-        ? 'Saved ${_postCount(result.saved)} to your download folder.'
-        : 'Saved ${_postCount(result.saved)}; ${_postCount(result.failed)} failed.';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          result.folderLost
-              ? '$summary Choose your download folder again in Settings, then retry.'
-              : summary,
-        ),
-      ),
-    );
+    if (queued != null && mounted) _endSelection();
   }
 
   static String _postCount(int count) => '$count post${count == 1 ? '' : 's'}';
@@ -392,48 +407,39 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     actions: [..._selectionActions(board), const SizedBox(width: 8)],
   );
 
-  String get _selectionTitle =>
-      _batchProgress ?? '${_selected.length} selected';
+  String get _selectionTitle => '${_selected.length} selected';
 
   Widget _cancelSelectionButton() => IconButton(
     tooltip: 'Cancel selection',
     icon: const Icon(Icons.close_rounded),
-    onPressed: _batchProgress != null ? null : _endSelection,
+    onPressed: _endSelection,
   );
 
   List<Widget> _selectionActions(Board board) {
     final state = widget.state;
-    final busy = _batchProgress != null;
     return [
       IconButton(
         tooltip: 'Select all loaded posts',
         icon: const Icon(Icons.select_all_rounded),
-        onPressed: busy
-            ? null
-            : () => setState(() {
-                for (final post in state.posts) {
-                  final saved = SavedPost(
-                    board: board,
-                    post: state.displayPost(post, board: board),
-                  );
-                  _selected[saved.identity] = saved;
-                }
-              }),
+        onPressed: () => setState(() {
+          for (final post in state.posts) {
+            final saved = SavedPost(
+              board: board,
+              post: state.displayPost(post, board: board),
+            );
+            _selected[saved.identity] = saved;
+          }
+        }),
       ),
       IconButton(
         tooltip: 'Favorite selected',
         icon: const Icon(Icons.favorite_border_rounded),
-        onPressed: busy || _selected.isEmpty ? null : _favoriteSelected,
+        onPressed: _selected.isEmpty ? null : _favoriteSelected,
       ),
       IconButton(
         tooltip: 'Download selected',
-        icon: busy
-            ? const SizedBox.square(
-                dimension: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : const Icon(Icons.download_outlined),
-        onPressed: busy || _selected.isEmpty ? null : _downloadSelected,
+        icon: const Icon(Icons.download_outlined),
+        onPressed: _selected.isEmpty ? null : _downloadSelected,
       ),
     ];
   }
@@ -458,7 +464,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               : Icons.bookmark_add_outlined,
         ),
       ),
-      if (state.recentSearches.isNotEmpty)
+      if (state.recentSearches.isNotEmpty || state.pinnedSearches.isNotEmpty)
         IconButton(
           tooltip: 'Open recent searches',
           onPressed: _showRecentSearches,
@@ -750,15 +756,126 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// The search history: pinned searches first, then recent ones. Each
+  /// can be pinned, saved as a bookmark, or swiped away.
   Future<void> _showRecentSearches() async {
-    await _showQueryPopup(
-      title: 'Recent searches',
-      headerIcon: Icons.history_rounded,
-      queries: widget.state.recentSearches,
-      emptyMessage:
-          'No recent searches yet. Search tags to build your history.',
-      deleteTooltip: 'Delete recent search',
-      onDelete: widget.state.removeRecentSearch,
+    final state = widget.state;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => ListenableBuilder(
+        listenable: state,
+        builder: (context, _) {
+          final pinned = state.pinnedSearches;
+          final recent = [
+            for (final query in state.recentSearches)
+              if (!state.isPinnedSearch(query)) query,
+          ];
+          Widget entry(List<String> query, {required bool isPinned}) {
+            final saved = state.isSavedQuery(query);
+            return Dismissible(
+              key: ValueKey(
+                'history:${isPinned ? 'pinned' : 'recent'}:${query.join(' ')}',
+              ),
+              background: Container(
+                color: accent.withValues(alpha: .18),
+                alignment: AlignmentDirectional.centerStart,
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Icon(Icons.delete_outline, color: ink(.70)),
+              ),
+              secondaryBackground: Container(
+                color: accent.withValues(alpha: .18),
+                alignment: AlignmentDirectional.centerEnd,
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Icon(Icons.delete_outline, color: ink(.70)),
+              ),
+              onDismissed: (_) async {
+                if (isPinned) await state.togglePinnedSearch(query);
+                await state.removeRecentSearch(query);
+              },
+              child: ListTile(
+                title: Text(query.join(' ')),
+                leading: Icon(
+                  isPinned ? Icons.push_pin_rounded : Icons.history_rounded,
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  _search(query);
+                },
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: saved
+                          ? 'Saved search'
+                          : 'Save as a saved search',
+                      icon: Icon(
+                        saved
+                            ? Icons.bookmark_rounded
+                            : Icons.bookmark_add_outlined,
+                      ),
+                      onPressed: saved
+                          ? null
+                          : () => state.addSavedQuery(query),
+                    ),
+                    IconButton(
+                      tooltip: isPinned ? 'Unpin' : 'Pin to the top',
+                      icon: Icon(
+                        isPinned
+                            ? Icons.push_pin_rounded
+                            : Icons.push_pin_outlined,
+                      ),
+                      onPressed: () => state.togglePinnedSearch(query),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * .75,
+              ),
+              child: pinned.isEmpty && recent.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(28),
+                      child: Text(
+                        'No recent searches yet. Search tags to build your history.',
+                      ),
+                    )
+                  : ListView(
+                      shrinkWrap: true,
+                      children: [
+                        ListTile(
+                          title: const Text('Recent searches'),
+                          subtitle: const Text(
+                            'Swipe a search away to delete it',
+                          ),
+                          leading: const Icon(Icons.history_rounded),
+                        ),
+                        if (pinned.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 24),
+                            child: SectionLabel('Pinned'),
+                          ),
+                          for (final query in pinned)
+                            entry(query, isPinned: true),
+                        ],
+                        if (pinned.isNotEmpty && recent.isNotEmpty)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 24),
+                            child: SectionLabel('Recent'),
+                          ),
+                        for (final query in recent)
+                          entry(query, isPinned: false),
+                      ],
+                    ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -808,6 +925,75 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
       ),
     );
+  }
+
+  static int _hiddenCount(AppState state) =>
+      state.filteredCounts.values.fold(0, (sum, count) => sum + count);
+
+  /// Explains the "hidden" note: how many loaded posts each local filter
+  /// left out, with shortcuts to the filters.
+  Future<void> _showFiltered() async {
+    final counts = widget.state.filteredCounts;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.filter_alt_outlined),
+              title: Text('${_hiddenCount(widget.state)} posts hidden'),
+              subtitle: const Text(
+                'Your filters left these out of the pages loaded so far.',
+              ),
+            ),
+            for (final reason in FilterReason.values)
+              if (counts[reason] case final count? when count > 0)
+                ListTile(
+                  key: ValueKey('filtered_${reason.name}'),
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+                  title: Text(reason.label),
+                  trailing: Text(
+                    '$count',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                children: [
+                  if ((counts[FilterReason.rating] ?? 0) > 0)
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, 'ratings'),
+                      child: const Text('Ratings'),
+                    ),
+                  FilledButton.tonal(
+                    onPressed: () => Navigator.pop(context, 'settings'),
+                    child: const Text('Filter settings'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case 'ratings':
+        await _chooseRatings();
+      case 'settings':
+        await Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) => SettingsScreen(state: widget.state),
+          ),
+        );
+    }
   }
 
   Future<void> _pickDate() async {
@@ -960,7 +1146,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.state,
+    listenable: Listenable.merge([widget.state, widget.state.downloads.busy]),
     builder: (context, _) => _build(context),
   );
 
@@ -1002,11 +1188,62 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// The grid's columns at [width]: the setting on a phone held upright,
+  /// more on wider screens (tablets, landscape) so tiles keep their size.
+  static int _columnsFor(int columns, double width) => width <= 600
+      ? columns
+      : (columns * width / 400).round().clamp(columns, 12);
+
+  // Pinch: the distance between the two fingers when the last column
+  // change happened.
+  final _pointers = <int, Offset>{};
+  double? _pinchStart;
+
+  /// Pinching the feed out makes tiles bigger (fewer columns), pinching in
+  /// makes them smaller. Each step of the gesture changes one column.
+  Widget _pinchColumns(Widget feed) => Listener(
+    onPointerDown: (event) {
+      _pointers[event.pointer] = event.position;
+      _pinchStart = _pointers.length == 2 ? _pinchDistance() : null;
+    },
+    onPointerMove: (event) {
+      if (!_pointers.containsKey(event.pointer)) return;
+      _pointers[event.pointer] = event.position;
+      final start = _pinchStart;
+      if (start == null || start <= 0 || _pointers.length != 2) return;
+      final ratio = _pinchDistance() / start;
+      final columns = widget.state.settings.columns;
+      final next = ratio > 1.3
+          ? columns - 1
+          : ratio < .77
+          ? columns + 1
+          : columns;
+      if (next == columns || next < 1 || next > 6) return;
+      _pinchStart = _pinchDistance();
+      HapticFeedback.selectionClick();
+      widget.state.setColumns(next);
+    },
+    onPointerUp: (event) => _endPointer(event.pointer),
+    onPointerCancel: (event) => _endPointer(event.pointer),
+    child: feed,
+  );
+
+  void _endPointer(int pointer) {
+    _pointers.remove(pointer);
+    if (_pointers.length != 2) _pinchStart = null;
+  }
+
+  double _pinchDistance() {
+    final points = _pointers.values.toList();
+    return (points[0] - points[1]).distance;
+  }
+
   Widget _gallery(
     BuildContext context,
     AppState state,
     List<MediaPost> posts,
     Board board,
+    int columns,
     double tileHeight,
     bool hierarchical,
     bool hidePostTags,
@@ -1014,7 +1251,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!hierarchical) {
       return SliverGrid(
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: state.settings.columns,
+          crossAxisCount: columns,
           mainAxisExtent: tileHeight,
           crossAxisSpacing: 8,
           mainAxisSpacing: 8,
@@ -1028,10 +1265,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     return SliverList(
       delegate: SliverChildBuilderDelegate((context, rowIndex) {
-        final start = rowIndex * state.settings.columns;
-        final end = (start + state.settings.columns)
-            .clamp(0, posts.length)
-            .toInt();
+        final start = rowIndex * columns;
+        final end = (start + columns).clamp(0, posts.length).toInt();
         final row = posts.sublist(start, end);
         final aspects = row.map((post) {
           final width = post.width > 0 ? post.width : 1;
@@ -1070,7 +1305,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
         );
-      }, childCount: (posts.length / state.settings.columns).ceil()),
+      }, childCount: (posts.length / columns).ceil()),
     );
   }
 
@@ -1083,6 +1318,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     Navigator.pop(context);
     _searchHistory.clear();
     _endSelection();
+    await _persistFeed();
     await widget.state.chooseBoard(option);
   }
 
@@ -1125,7 +1361,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             ),
                           ),
                         ),
-                        // Compact, so the two icons sit close together.
+                        // Compact, so the icons sit close together.
+                        IconButton(
+                          key: const ValueKey('drawer_safe_mode'),
+                          tooltip: state.settings.safeMode
+                              ? 'Safe mode is on · turn off'
+                              : 'Safe mode: safe posts only, blurred',
+                          visualDensity: VisualDensity.compact,
+                          isSelected: state.settings.safeMode,
+                          color: state.settings.safeMode ? accent : ink(.70),
+                          icon: Icon(
+                            state.settings.safeMode
+                                ? Icons.shield_rounded
+                                : Icons.shield_outlined,
+                          ),
+                          onPressed: () =>
+                              state.setSafeMode(!state.settings.safeMode),
+                        ),
                         IconButton(
                           tooltip: 'Learn to search',
                           visualDensity: VisualDensity.compact,
@@ -1262,7 +1514,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 title: Text(appearanceFor(option).name),
                                 trailing: option == board
                                     ? const Icon(Icons.check_rounded, size: 20)
-                                    : null,
+                                    : _BoardIssueBadge(
+                                        state.boardIssue(option),
+                                      ),
                                 onTap: option == board
                                     ? null
                                     : () => _chooseBoardFromDrawer(option),
@@ -1335,6 +1589,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     subtitle: const Text("Don't record searches or tags"),
                     value: state.settings.incognito,
                     onChanged: state.setIncognito,
+                  ),
+                  SwitchListTile(
+                    secondary: Icon(
+                      state.settings.safeMode
+                          ? Icons.shield_rounded
+                          : Icons.shield_outlined,
+                    ),
+                    title: const Text('Safe mode'),
+                    subtitle: const Text('Safe posts only, others blurred'),
+                    value: state.settings.safeMode,
+                    onChanged: state.setSafeMode,
                   ),
                   ListTile(
                     leading: const Icon(Icons.favorite_rounded),
@@ -1418,12 +1683,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         selected: option == board,
                         leading: SiteLogo(option, size: 32),
                         title: Text(appearanceFor(option).name),
+                        trailing: _BoardIssueBadge(state.boardIssue(option)),
                         onTap: option == board
                             ? null
                             : () async {
                                 Navigator.pop(context);
                                 _searchHistory.clear();
                                 _endSelection();
+                                await _persistFeed();
                                 await state.chooseBoard(option);
                               },
                       ),
@@ -1501,11 +1768,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // With the keyboard up, back only closes it rather than leaving the
     // search.
     final keyboardOpen = _keyboardOpen;
+    // While downloads run, leaving the app from here sends it to the
+    // background instead of closing it, which would stop them.
+    final downloading = state.downloads.busy.value;
     return PopScope<void>(
       canPop:
           !_selecting &&
           !keyboardOpen &&
-          (_searchHistory.isEmpty || _drawerOpen),
+          (_searchHistory.isEmpty || _drawerOpen) &&
+          (!downloading || _drawerOpen),
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         if (keyboardOpen) {
@@ -1514,9 +1785,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
         if (_drawerOpen) return;
         if (_selecting) {
-          if (_batchProgress == null) _endSelection();
-        } else {
+          _endSelection();
+        } else if (_searchHistory.isNotEmpty) {
           _handleBack();
+        } else if (downloading) {
+          _device.moveToBack();
         }
       },
       child: Scaffold(
@@ -1614,11 +1887,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
-                    const Spacer(),
+                    if (state.settings.safeMode) ...[
+                      Tooltip(
+                        message: 'Safe mode is on',
+                        child: Icon(
+                          Icons.shield_rounded,
+                          size: 14,
+                          color: ink(.54),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
                     Text(
                       '${posts.length} posts',
                       style: TextStyle(fontSize: 12, color: ink(.38)),
                     ),
+                    if (_hiddenCount(state) case final hidden when hidden > 0)
+                      _HiddenNote(count: hidden, onTap: _showFiltered),
                   ],
                 ),
               ),
@@ -1636,6 +1921,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               Expanded(
                 child: LayoutBuilder(
                   builder: (context, bounds) {
+                    final columns = _columnsFor(
+                      state.settings.columns,
+                      bounds.maxWidth,
+                    );
                     final tileHeight =
                         ((bounds.maxHeight - 8 * (state.settings.rows - 1)) /
                                 state.settings.rows)
@@ -1654,6 +1943,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               state,
                               posts,
                               board,
+                              columns,
                               tileHeight,
                               hierarchicalGrid,
                               hidePostTags,
@@ -1715,10 +2005,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                           ),
                                           const SizedBox(height: 8),
                                           Text(
-                                            'Try different tags or review your blacklist.',
+                                            _hiddenCount(state) > 0
+                                                ? 'Your filters hid ${_hiddenCount(state)} posts here.'
+                                                : 'Try different tags or review your blacklist.',
                                             textAlign: TextAlign.center,
                                             style: TextStyle(color: ink(.54)),
                                           ),
+                                          if (_hiddenCount(state) > 0)
+                                            TextButton(
+                                              onPressed: _showFiltered,
+                                              child: const Text('See why'),
+                                            ),
                                           TextButton(
                                             onPressed: state.refresh,
                                             child: const Text('Refresh'),
@@ -1745,10 +2042,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ],
                       ),
                     );
-                    if (!oneHanded) return feed;
+                    if (!oneHanded) return _pinchColumns(feed);
                     return Stack(
                       children: [
-                        feed,
+                        _pinchColumns(feed),
                         _scrollTopButton(),
                         // Filling the stack bounds the panel by the feed's
                         // height, so its search area shrinks to fit.
@@ -1890,6 +2187,61 @@ class _DrawerShortcut extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// "· 18 hidden" after the feed's post count; opens the reasons.
+class _HiddenNote extends StatelessWidget {
+  const _HiddenNote({required this.count, required this.onTap});
+  final int count;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: '$count posts hidden by your filters',
+    child: InkWell(
+      key: const ValueKey('feed_hidden_note'),
+      borderRadius: BorderRadius.circular(6),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: ExcludeSemantics(
+          child: Text(
+            ' · $count hidden',
+            style: TextStyle(
+              fontSize: 12,
+              color: ink(.54),
+              decoration: TextDecoration.underline,
+              decorationColor: ink(.38),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A website-list badge for a recent problem reaching the website.
+class _BoardIssueBadge extends StatelessWidget {
+  const _BoardIssueBadge(this.issue);
+  final BoardIssue? issue;
+
+  @override
+  Widget build(BuildContext context) {
+    final issue = this.issue;
+    if (issue == null) return const SizedBox.shrink();
+    return Tooltip(
+      message: issue.label,
+      child: Icon(
+        issue == BoardIssue.rateLimited
+            ? Icons.hourglass_top_rounded
+            : Icons.cloud_off_rounded,
+        size: 18,
+        color: ink(.54),
+        semanticLabel: issue.label,
       ),
     );
   }

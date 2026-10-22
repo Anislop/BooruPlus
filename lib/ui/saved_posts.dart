@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_state.dart';
 import '../core/models.dart';
+import 'downloads.dart';
 import 'home.dart';
 import 'media_viewer.dart';
 import 'theme.dart';
@@ -31,7 +32,6 @@ class _SavedPostsScreenState extends State<SavedPostsScreen> {
   Board? _board;
   _SavedSort _sort = _SavedSort.newest;
   bool _selecting = false;
-  bool _downloading = false;
   // Identities, so a selection survives rebuilds and refreshed media URLs.
   final Set<String> _selected = {};
 
@@ -152,27 +152,11 @@ class _SavedPostsScreenState extends State<SavedPostsScreen> {
     _notify('Unhid ${_count(all.length)}.');
   }
 
+  /// Queues the selected favorites in the Download Manager.
   Future<void> _downloadSelected(List<SavedPost> posts) async {
-    if (posts.isEmpty || _downloading) return;
-    setState(() => _downloading = true);
-    final result = await _state.downloadPosts(
-      posts,
-      onProgress: (index, total) => _notify(
-        'Downloading ${index + 1} of $total…',
-        duration: const Duration(minutes: 5),
-      ),
-    );
-    final saved = result.saved, failed = result.failed;
-    final stopReason = result.folderLost
-        ? 'Choose your download folder again in Settings, then retry.'
-        : null;
-    if (!mounted) return;
-    setState(() => _downloading = false);
-    _endSelection();
-    final summary = failed == 0
-        ? 'Saved ${_count(saved)} to your download folder.'
-        : 'Saved ${_count(saved)}; ${_count(failed)} failed.';
-    _notify(stopReason == null ? summary : '$summary $stopReason');
+    if (posts.isEmpty) return;
+    final queued = await queueDownloads(context, _state, posts);
+    if (queued != null && mounted) _endSelection();
   }
 
   static String _count(int count) => '$count post${count == 1 ? '' : 's'}';
@@ -299,13 +283,8 @@ class _SavedPostsScreenState extends State<SavedPostsScreen> {
         if (!_hidden)
           IconButton(
             tooltip: 'Download selected',
-            icon: _downloading
-                ? const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download_outlined),
-            onPressed: selected.isEmpty || _downloading
+            icon: const Icon(Icons.download_outlined),
+            onPressed: selected.isEmpty
                 ? null
                 : () => _downloadSelected(selected),
           ),
@@ -314,9 +293,7 @@ class _SavedPostsScreenState extends State<SavedPostsScreen> {
           icon: Icon(
             _hidden ? Icons.visibility_rounded : Icons.heart_broken_outlined,
           ),
-          onPressed: selected.isEmpty || _downloading
-              ? null
-              : () => _removeSelected(selected),
+          onPressed: selected.isEmpty ? null : () => _removeSelected(selected),
         ),
         const SizedBox(width: 4),
       ],

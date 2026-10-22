@@ -116,6 +116,15 @@ abstract interface class PostStore {
   /// Download history, oldest first.
   Future<List<DownloadRecord>> loadDownloads();
   Future<void> saveDownloads(Iterable<DownloadRecord> records);
+
+  /// Downloads still waiting, running, or paused, oldest first.
+  Future<List<PendingDownload>> loadDownloadQueue();
+  Future<void> saveDownloadQueue(Iterable<PendingDownload> downloads);
+
+  /// The feeds to reopen after a restart, by website name; each is a
+  /// JSON-safe map of sanitized posts and paging state.
+  Future<Map<String, dynamic>> loadFeeds();
+  Future<void> saveFeeds(Map<String, dynamic> feeds);
 }
 
 class MemoryPostStore implements PostStore {
@@ -137,6 +146,18 @@ class MemoryPostStore implements PostStore {
   @override
   Future<void> saveDownloads(Iterable<DownloadRecord> records) async =>
       _downloads = List.unmodifiable(records);
+  List<PendingDownload> _queue = const [];
+  @override
+  Future<List<PendingDownload>> loadDownloadQueue() async => _queue;
+  @override
+  Future<void> saveDownloadQueue(Iterable<PendingDownload> downloads) async =>
+      _queue = List.unmodifiable(downloads);
+  Map<String, dynamic> _feeds = const {};
+  @override
+  Future<Map<String, dynamic>> loadFeeds() async => _feeds;
+  @override
+  Future<void> saveFeeds(Map<String, dynamic> feeds) async =>
+      _feeds = jsonDecode(jsonEncode(feeds)) as Map<String, dynamic>;
 }
 
 /// Where the booruShorts interest profile ([ShortsProfile.toMap]) is kept.
@@ -240,6 +261,45 @@ class LocalPostStore implements PostStore {
         .toList(growable: false);
     await (await prefs).setStringList('posts.downloads', values);
   }
+
+  @override
+  Future<List<PendingDownload>> loadDownloadQueue() async {
+    final values = (await prefs).getStringList('posts.downloadQueue') ?? [];
+    return values
+        .map((value) {
+          try {
+            return PendingDownload.fromMap(jsonDecode(value) as Map);
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<PendingDownload>()
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> saveDownloadQueue(Iterable<PendingDownload> downloads) async {
+    // PendingDownload.toMap stores the post without credentials.
+    final values = downloads
+        .map((download) => jsonEncode(download.toMap()))
+        .toList(growable: false);
+    await (await prefs).setStringList('posts.downloadQueue', values);
+  }
+
+  @override
+  Future<Map<String, dynamic>> loadFeeds() async {
+    final value = (await prefs).getString('feeds.resume');
+    if (value == null) return const {};
+    try {
+      return jsonDecode(value) as Map<String, dynamic>;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  @override
+  Future<void> saveFeeds(Map<String, dynamic> feeds) async =>
+      (await prefs).setString('feeds.resume', jsonEncode(feeds));
 
   SavedPost _sanitized(SavedPost value) =>
       SavedPost(board: value.board, post: _sanitizePost(value.post));
@@ -423,6 +483,57 @@ class LocalSettingsStore implements SettingsStore {
 /// Bytes saved so far, and the file's size when the host reports it.
 typedef DownloadProgress = void Function(int received, int? total);
 
+/// A download was paused ([DownloadControl.pause], or the app closing). The
+/// partial file stays at [partial], when one was written, for
+/// [DownloadControl.resume].
+class DownloadPausedException implements Exception {
+  const DownloadPausedException([this.partial]);
+  final String? partial;
+}
+
+/// Pauses one [DownloadService.download] and learns where it writes, so a
+/// later download can continue the same file.
+class DownloadControl {
+  DownloadControl({this.resume, this.resumeTotal});
+
+  /// The partial file of an earlier, paused download of the same media,
+  /// and the size the website reported then. The platform appends to it
+  /// only when the website reports the same size again, and rewrites it
+  /// otherwise.
+  final String? resume;
+  final int? resumeTotal;
+
+  /// The file this download writes, once the platform created it.
+  String? target;
+
+  /// Called once [target] is known.
+  void Function(String uri)? onTarget;
+
+  int? _id;
+  MethodChannel? _channel;
+  bool _paused = false;
+  bool get paused => _paused;
+
+  /// Stops the download, keeping what was saved. It then fails with
+  /// [DownloadPausedException].
+  Future<void> pause() async {
+    if (_paused) return;
+    _paused = true;
+    final id = _id, channel = _channel;
+    if (id == null || channel == null) return;
+    try {
+      await channel.invokeMethod<void>('pauseDownload', {'id': id});
+    } catch (_) {
+      // Without the Android host there is no transfer to stop.
+    }
+  }
+
+  void _target(String uri) {
+    target = uri;
+    onTarget?.call(uri);
+  }
+}
+
 class DownloadService {
   DownloadService({MethodChannel? channel, MethodChannel? progressChannel})
     : channel = channel ?? const MethodChannel('booruplus/platform'),
@@ -430,50 +541,106 @@ class DownloadService {
           progressChannel ?? const MethodChannel('booruplus/downloads');
   final MethodChannel channel;
 
-  /// Native-to-Dart `progress` calls (`id`, `received`, nullable `total`).
+  /// Native-to-Dart `progress` calls (`id`, `received`, nullable `total`)
+  /// and `target` calls (`id`, `uri`).
   final MethodChannel progressChannel;
 
   static final _listeners = <int, DownloadProgress>{};
+  static final _controls = <int, DownloadControl>{};
   static final _listening = <String>{};
   static var _nextId = 0;
 
   Future<String?> chooseDirectory() =>
       channel.invokeMethod<String?>('pickDownloadDirectory');
 
+  /// Saves [url] as [name]. With [control] it can be paused, which throws
+  /// [DownloadPausedException], and continue a partial file
+  /// ([DownloadControl.resume]).
   Future<String> download({
     required String url,
     required String name,
     String? directory,
     DownloadProgress? onProgress,
+    DownloadControl? control,
   }) async {
-    final value = await reporting(
-      onProgress,
-      (id) => channel.invokeMethod<String>('download', {
-        'url': url,
-        'name': name,
+    if (control?.paused == true) throw DownloadPausedException(control?.resume);
+    try {
+      final value = await reporting(onProgress, (id) {
+        if (control != null && id != null) {
+          control
+            .._id = id
+            .._channel = channel;
+          _controls[id] = control;
+        }
+        return channel.invokeMethod<String>('download', {
+          'url': url,
+          'name': name,
+          'directory': directory,
+          'id': ?id,
+          'resume': ?control?.resume,
+          'resumeTotal': ?control?.resumeTotal,
+        });
+      }, track: control != null);
+      return value ?? '';
+    } on PlatformException catch (error) {
+      if (error.code != 'PAUSED') rethrow;
+      final details = error.details;
+      final uri = details is Map ? details['uri'] : null;
+      throw DownloadPausedException(
+        uri is String ? uri : control?.target ?? control?.resume,
+      );
+    }
+  }
+
+  /// Deletes the partial file a paused download left at [uri].
+  Future<void> discard(String uri, {String? directory}) async {
+    try {
+      await channel.invokeMethod<Object?>('discardDownload', {
+        'uri': uri,
         'directory': directory,
-        'id': ?id,
-      }),
-    );
-    return value ?? '';
+      });
+    } catch (_) {
+      // A file that cannot be removed now is left to the system.
+    }
+  }
+
+  /// Keeps the app running in the foreground while downloads are [active],
+  /// with a notification showing [text] and [percent] (null when unknown).
+  Future<void> keepAlive({
+    required bool active,
+    String text = '',
+    int? percent,
+  }) async {
+    try {
+      await channel.invokeMethod<void>('setDownloadsActive', {
+        'active': active,
+        'text': text,
+        'percent': percent ?? -1,
+      });
+    } catch (_) {
+      // Not available in widget tests or without the Android host.
+    }
   }
 
   /// Runs a native [request] that sends `progress` calls with the id it is
-  /// given; they reach [onProgress]. The id is null without [onProgress].
+  /// given; they reach [onProgress]. The id is null without [onProgress],
+  /// unless [track] asks for one.
   Future<T> reporting<T>(
     DownloadProgress? onProgress,
-    Future<T> Function(int? id) request,
-  ) async {
+    Future<T> Function(int? id) request, {
+    bool track = false,
+  }) async {
     int? id;
-    if (onProgress != null) {
+    if (onProgress != null || track) {
       _listen();
       id = ++_nextId;
-      _listeners[id] = onProgress;
+      if (onProgress != null) _listeners[id] = onProgress;
     }
     try {
       return await request(id);
     } finally {
       _listeners.remove(id);
+      _controls.remove(id);
     }
   }
 
@@ -494,9 +661,16 @@ class DownloadService {
     if (!_listening.add(progressChannel.name)) return;
     progressChannel.setMethodCallHandler((call) async {
       final args = call.arguments;
-      if (call.method != 'progress' || args is! Map) return;
-      final id = args['id'], received = args['received'], total = args['total'];
-      if (id is! num || received is! num) return;
+      if (args is! Map) return;
+      final id = args['id'];
+      if (id is! num) return;
+      if (call.method == 'target') {
+        final uri = args['uri'];
+        if (uri is String) _controls[id.toInt()]?._target(uri);
+        return;
+      }
+      final received = args['received'], total = args['total'];
+      if (call.method != 'progress' || received is! num) return;
       _listeners[id.toInt()]?.call(
         received.toInt(),
         total is num && total > 0 ? total.toInt() : null,
@@ -665,12 +839,54 @@ class DeviceService {
     'text': ?text,
   });
 
-  /// Lets the user choose where to save [content]. Returns false when the
-  /// picker is cancelled.
-  Future<bool> exportFile({required String name, required String content}) =>
-      channel
-          .invokeMethod<bool>('exportFile', {'name': name, 'content': content})
-          .then((value) => value ?? false);
+  /// Lets the user choose where to save [content] (JSON, or plain text
+  /// with [text]). Returns false when the picker is cancelled.
+  Future<bool> exportFile({
+    required String name,
+    required String content,
+    bool text = false,
+  }) => channel
+      .invokeMethod<bool>('exportFile', {
+        'name': name,
+        'content': content,
+        if (text) 'mimeType': 'text/plain',
+      })
+      .then((value) => value ?? false);
+
+  /// Opens Android's "Set as" chooser (wallpaper, contact photo) with the
+  /// image at [url].
+  Future<void> setAs({required String url, required String name}) =>
+      channel.invokeMethod<void>('setAs', {'url': url, 'name': name});
+
+  /// Copies the image at [url] to the clipboard.
+  Future<void> copyImage({required String url, required String name}) =>
+      channel.invokeMethod<void>('copyImage', {'url': url, 'name': name});
+
+  /// Saves the frame at [position] of the video at [url] as a JPEG named
+  /// [name] to the download folder; returns where it was saved.
+  Future<String> saveFrame({
+    required String url,
+    required String name,
+    required Duration position,
+    String? directory,
+  }) async =>
+      await channel.invokeMethod<String>('saveFrame', {
+        'url': url,
+        'name': name,
+        'positionMs': position.inMilliseconds,
+        'directory': directory,
+      }) ??
+      '';
+
+  /// Sends the app to the background instead of closing it, so downloads
+  /// keep running.
+  Future<void> moveToBack() async {
+    try {
+      await channel.invokeMethod<Object?>('moveToBack');
+    } catch (_) {
+      // Not available in widget tests or without the Android host.
+    }
+  }
 
   /// Reads a text file the user picks; null when the picker is cancelled.
   Future<String?> importFile() => channel.invokeMethod<String>('importFile');
@@ -831,6 +1047,15 @@ class AppShortcut {
     required this.tags,
   }) : kind = 'search',
        url = null;
+
+  /// The download notification: opens the Download Manager.
+  const AppShortcut.downloads()
+    : kind = 'downloads',
+      id = 'downloads',
+      label = 'Downloads',
+      board = null,
+      tags = const [],
+      url = null;
   const AppShortcut.link(String this.url)
     : kind = 'link',
       id = 'link',
@@ -857,6 +1082,7 @@ class AppShortcut {
     if (map['kind'] == 'link' && url is String && url.trim().isNotEmpty) {
       return AppShortcut.link(url.trim());
     }
+    if (map['kind'] == 'downloads') return const AppShortcut.downloads();
     final board = Board.values.asNameMap()['${map['board']}'];
     final tags = '${map['tags'] ?? ''}'
         .split(RegExp(r'\s+'))
