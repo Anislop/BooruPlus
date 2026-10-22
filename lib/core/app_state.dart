@@ -604,7 +604,7 @@ class AppState extends ChangeNotifier {
         for (final map in saved['posts'] as List)
           SavedPost(
             board: board,
-            post: MediaPost.fromMap(map as Map),
+            post: MediaPost.fromMap(map as Map, board: board),
           ).authorized(credentials).post,
       ];
       final tags = List<String>.unmodifiable([
@@ -2324,7 +2324,7 @@ class AppState extends ChangeNotifier {
       ..._settings.blacklistFor(board).map((tag) => '-$tag'),
       if (_excludesAiOn(board)) '-${_aiTagFor(board)}',
     ];
-    final rating = _singleProviderRatingFor(board);
+    final rating = _providerRatingTag(board);
     // Anonymous Sankaku searches allow four counted tags: ordinary tags,
     // negated or not, plus rating:q/rating:e (order:, rating:s and other
     // metatags are free). Exclusions are rejected unless a positive tag is
@@ -2332,10 +2332,7 @@ class AppState extends ChangeNotifier {
     // Signed-in searches allow more; their limit is learned on refusal.
     // Idol Complex uses the same API and is treated the same way.
     if (board?.isSankakuFamily == true) {
-      final query = [
-        ...tags,
-        if (rating != null) 'rating:${rating.shortQueryValue}',
-      ];
+      final query = [...tags, ?rating];
       final hasPositive = tags.any(
         (tag) => _isOrdinaryTag(tag) && !tag.startsWith('-'),
       );
@@ -2357,19 +2354,9 @@ class AppState extends ChangeNotifier {
       final limit = board == Board.aibooru ? 4 : 2;
       final ordinary = tags.where(_isOrdinaryTag).length;
       final budget = (limit - ordinary).clamp(0, limit);
-      return [
-        ...tags,
-        if (rating != null)
-          'rating:${board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
-        ...exclusions.take(budget),
-      ];
+      return [...tags, ?rating, ...exclusions.take(budget)];
     }
-    return [
-      ...tags,
-      if (rating != null)
-        'rating:${board == Board.konachan ? rating.shortQueryValue : rating.queryValue}',
-      ...exclusions,
-    ];
+    return [...tags, ?rating, ...exclusions];
   }
 
   /// The user's [tags] in [board]'s search syntax. `-tag` excludes on every
@@ -2403,12 +2390,18 @@ class AppState extends ChangeNotifier {
     return result;
   }
 
-  Rating? _singleProviderRatingFor(Board? board) =>
-      _settings.selectedRatings.length == 1 &&
-          board?.usesGelbooruSyntax != true &&
-          board?.hasRatings != false
-      ? _settings.selectedRatings.single
-      : null;
+  /// The `rating:` tag sent to [board] when the selected ratings that exist
+  /// there come down to one (General and Sensitive is General alone on a
+  /// website without sensitive); null leaves ratings to the local filter.
+  String? _providerRatingTag(Board? board) {
+    if (board == null || board.usesGelbooruSyntax || !board.hasRatings) {
+      return null;
+    }
+    final values = {
+      for (final rating in _settings.selectedRatings) board.ratingQuery(rating),
+    }..remove(null);
+    return values.length == 1 ? 'rating:${values.single}' : null;
+  }
 
   /// Tells the user, once, that the AI-only [board] ignores the no-AI
   /// setting, when it is chosen or restored at startup.

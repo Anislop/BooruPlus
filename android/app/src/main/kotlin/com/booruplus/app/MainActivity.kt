@@ -1096,7 +1096,9 @@ class MainActivity : FlutterActivity() {
             "tags" to rawTags,
             "tagDetails" to details,
             "postUrl" to postUrl(board, value(image, "getId")?.toString()),
-            "rating" to (image.getRating()?.toString() ?: "Unknown"),
+            // The library reads Danbooru's `s` (sensitive) as SAFE.
+            "rating" to if (board == "danbooru") danbooruRating(image.getRating()?.getShortName())
+                else (image.getRating()?.toString() ?: "Unknown"),
             "uploader" to (value(image, "getUploader_name", "getOwner", "getAuthor", "getUploader_id")?.toString() ?: ""),
             "source" to sourceValue(image), "width" to image.getWidth(), "height" to image.getHeight(),
             "score" to image.getScore(), "description" to (value(image, "getDescription")?.toString() ?: ""),

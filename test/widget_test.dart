@@ -888,9 +888,11 @@ void main() {
 
     await tester.tap(find.text('Ratings'));
     await tester.pumpAndSettle();
-    expect(find.byType(CheckboxListTile), findsNWidgets(3));
+    expect(find.byType(CheckboxListTile), findsNWidgets(4));
+    expect(find.text('Used by Danbooru and Gelbooru'), findsOneWidget);
 
     await tester.tap(find.text('General'));
+    await tester.tap(find.text('Sensitive'));
     await tester.tap(find.text('Questionable'));
     await tester.tap(find.text('Apply'));
     await tester.pumpAndSettle();

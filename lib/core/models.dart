@@ -97,6 +97,32 @@ extension BoardInfo on Board {
   /// [AppState.resolveMedia] reads the file from the post's page.
   bool get listsThumbnailsOnly => this == Board.realbooru;
 
+  /// Boards rating on Danbooru's scale (g/s/q/e), where `s` is *sensitive*,
+  /// not safe as on Moebooru, e621, and Sankaku.
+  bool get usesDanbooruRatings =>
+      this == Board.danbooru || this == Board.aibooru;
+
+  /// The `rating:` value searching [rating] on this board, or null when the
+  /// board has no such rating: only Danbooru's scale has sensitive (Gelbooru
+  /// has it too, but Gelbooru-syntax boards filter ratings locally).
+  String? ratingQuery(Rating rating) {
+    if (usesDanbooruRatings) {
+      return switch (rating) {
+        Rating.general => 'g',
+        Rating.sensitive => 's',
+        Rating.questionable => 'q',
+        Rating.explicit => 'e',
+      };
+    }
+    final short = this == Board.konachan || isSankakuFamily;
+    return switch (rating) {
+      Rating.general => short ? 's' : 'safe',
+      Rating.sensitive => null,
+      Rating.questionable => short ? 'q' : 'questionable',
+      Rating.explicit => short ? 'e' : 'explicit',
+    };
+  }
+
   /// Whether posts carry a rating. Nozomi, E-Shuushuu, Mikubooru, and
   /// Nanbooru do not rate posts, so rating filters do not apply there.
   bool get hasRatings => !const {
@@ -195,7 +221,9 @@ enum TagCategory {
   unknown,
 }
 
-enum Rating { general, questionable, explicit }
+/// Content ratings, mildest first. Sensitive is Danbooru's and Gelbooru's
+/// level between general and questionable; other websites do not use it.
+enum Rating { general, sensitive, questionable, explicit }
 
 /// The app palette: the BooruPlus dark theme, a white theme, or pure black
 /// for OLED screens.
@@ -227,8 +255,7 @@ extension ShortsContentInfo on ShortsContent {
   /// posts without a known rating (websites without ratings) are left out.
   bool allows(Rating? rating) => switch (this) {
     ShortsContent.all => true,
-    ShortsContent.noExplicit =>
-      rating == Rating.general || rating == Rating.questionable,
+    ShortsContent.noExplicit => rating != null && rating != Rating.explicit,
     ShortsContent.safeOnly => rating == Rating.general,
   };
 }
@@ -258,26 +285,19 @@ extension HandednessInfo on Handedness {
 extension RatingInfo on Rating {
   String get label => switch (this) {
     Rating.general => 'General',
+    Rating.sensitive => 'Sensitive',
     Rating.questionable => 'Questionable',
     Rating.explicit => 'Explicit',
   };
 
-  String get queryValue => switch (this) {
-    Rating.general => 'safe',
-    Rating.questionable => 'questionable',
-    Rating.explicit => 'explicit',
-  };
-
-  String get shortQueryValue => switch (this) {
-    Rating.general => 's',
-    Rating.questionable => 'q',
-    Rating.explicit => 'e',
-  };
-
+  /// Reads a rating as the native bridge reports it. `s`/`safe` is general:
+  /// the bridge reports Danbooru's `s` as `sensitive`, and
+  /// [MediaPost.fromMap] reads posts saved before it did with their board.
   static Rating? parse(dynamic value) {
     final text = '$value'.trim().toLowerCase();
     return switch (text) {
       'general' || 'safe' || 's' || 'g' => Rating.general,
+      'sensitive' || 'se' => Rating.sensitive,
       'questionable' || 'q' => Rating.questionable,
       'explicit' || 'e' => Rating.explicit,
       _ => null,
@@ -464,8 +484,15 @@ class MediaPost {
     this.pools = const [],
   });
 
-  factory MediaPost.fromMap(Map<dynamic, dynamic> map) {
+  /// With [board], a Danbooru-scale post saved before the bridge reported
+  /// sensitive (as `safe`, or AIBooru's raw `s`) reads as sensitive.
+  factory MediaPost.fromMap(Map<dynamic, dynamic> map, {Board? board}) {
     final url = '${map['url'] ?? ''}';
+    var rating = '${map['rating'] ?? ''}';
+    if (board?.usesDanbooruRatings == true &&
+        const {'safe', 's'}.contains(rating.trim().toLowerCase())) {
+      rating = 'sensitive';
+    }
     final rawTags = map['tags'];
     final tags = rawTags is List
         ? rawTags
@@ -515,7 +542,7 @@ class MediaPost {
       url: url,
       previewUrl: '${map['previewUrl'] ?? map['preview_url'] ?? url}',
       tags: tags,
-      rating: '${map['rating'] ?? ''}',
+      rating: rating,
       uploader: '${map['uploader'] ?? map['owner'] ?? ''}',
       source: '${map['source'] ?? ''}',
       width: _int(map['width']),
@@ -732,13 +759,16 @@ class SavedPost {
   );
 
   Map<String, dynamic> toMap() => {'board': board.name, 'post': post.toMap()};
-  factory SavedPost.fromMap(Map<dynamic, dynamic> map) => SavedPost(
-    board: Board.values.firstWhere(
+  factory SavedPost.fromMap(Map<dynamic, dynamic> map) {
+    final board = Board.values.firstWhere(
       (value) => value.name == map['board'],
       orElse: () => Board.safebooru,
-    ),
-    post: MediaPost.fromMap((map['post'] as Map?) ?? map),
-  );
+    );
+    return SavedPost(
+      board: board,
+      post: MediaPost.fromMap((map['post'] as Map?) ?? map, board: board),
+    );
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -954,6 +984,7 @@ class AppSettings {
     this.recentSearches = const [],
     this.selectedRatings = const [
       Rating.general,
+      Rating.sensitive,
       Rating.questionable,
       Rating.explicit,
     ],
@@ -1462,6 +1493,7 @@ class AppSettings {
     'savedQueries': savedQueries,
     'recentSearches': recentSearches,
     'selectedRatings': selectedRatings.map((rating) => rating.name).toList(),
+    'ratingsVersion': _ratingsVersion,
     'searchedTagCounts': searchedTagCounts,
     'browsedTagCounts': browsedTagCounts,
     'videoQuality': videoQuality,
@@ -1538,7 +1570,10 @@ class AppSettings {
     blurQuestionable: _asBool(map['blurQuestionable'], false),
     savedQueries: _queriesFromMap(map['savedQueries']),
     recentSearches: _queriesFromMap(map['recentSearches']),
-    selectedRatings: _ratingsFromMap(map['selectedRatings']),
+    selectedRatings: _ratingsFromMap(
+      map['selectedRatings'],
+      legacy: _asInt(map['ratingsVersion'], 1) < _ratingsVersion,
+    ),
     searchedTagCounts: _countsFromMap(map['searchedTagCounts']),
     browsedTagCounts: _countsFromMap(map['browsedTagCounts']),
     videoQuality: _asInt(map['videoQuality'], 0),
@@ -1617,7 +1652,10 @@ class AppSettings {
     downloadConcurrency: _asInt(map['downloadConcurrency'], 2),
     safeMode: _asBool(map['safeMode'], false),
     safeModeRatings: map['safeModeRatings'] is List
-        ? _ratingsFromMap(map['safeModeRatings'])
+        ? _ratingsFromMap(
+            map['safeModeRatings'],
+            legacy: _asInt(map['ratingsVersion'], 1) < _ratingsVersion,
+          )
         : const [],
     safeModeBlurExplicit: _asBool(map['safeModeBlurExplicit'], false),
     safeModeBlurQuestionable: _asBool(map['safeModeBlurQuestionable'], false),
@@ -1672,9 +1710,24 @@ class AppSettings {
             .toList()
       : const [];
 
-  static List<Rating> _ratingsFromMap(dynamic value) => value is List
-      ? value.map(RatingInfo.parse).whereType<Rating>().toList()
-      : Rating.values;
+  /// Settings saved before [Rating.sensitive] existed have no
+  /// `ratingsVersion`; 2 adds sensitive.
+  static const _ratingsVersion = 2;
+
+  /// [legacy] lists come from before sensitive existed, when Danbooru's
+  /// sensitive posts passed as general. They gain sensitive only when they
+  /// kept both levels around it (general and questionable), so "General
+  /// only" now means general alone.
+  static List<Rating> _ratingsFromMap(dynamic value, {bool legacy = false}) {
+    if (value is! List) return Rating.values;
+    final ratings = value.map(RatingInfo.parse).whereType<Rating>().toList();
+    if (legacy &&
+        ratings.contains(Rating.general) &&
+        ratings.contains(Rating.questionable)) {
+      ratings.add(Rating.sensitive);
+    }
+    return ratings;
+  }
 
   static Map<Board, T> _boardMapFrom<T>(
     dynamic value,

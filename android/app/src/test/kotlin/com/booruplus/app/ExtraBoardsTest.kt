@@ -20,6 +20,26 @@ class ExtraBoardsTest {
                 .build()
         }.build()
 
+    @Test fun danbooruRatingLettersAreItsScaleNotMoebooru() {
+        assertEquals("general", danbooruRating("g"))
+        assertEquals("sensitive", danbooruRating("s"))
+        assertEquals("sensitive", danbooruRating("Sensitive"))
+        assertEquals("questionable", danbooruRating("q"))
+        assertEquals("explicit", danbooruRating("e"))
+        assertEquals("Unknown", danbooruRating(null))
+        assertEquals("Unknown", danbooruRating("safe"))
+    }
+
+    @Test fun danbooruSensitiveSurvivesTheLibraryRating() {
+        // RatingDeserializer looks letters up by short name first, reading
+        // Danbooru's `s` as SAFE; the short name keeps the letter.
+        fun rated(letter: String) =
+            net.kodehawa.lib.imageboards.entities.Rating.lookupFromStringShort(letter)?.getShortName()
+        assertEquals("sensitive", danbooruRating(rated("s")))
+        assertEquals("general", danbooruRating(rated("g")))
+        assertEquals("explicit", danbooruRating(rated("e")))
+    }
+
     @Test fun derpibooruQueriesUseTagNamesAndPhilomenaFields() {
         assertEquals(
             "twilight sparkle,-ai generated,artist:some artist,score.gte:100,created_at.gte:2024-01-01," +
