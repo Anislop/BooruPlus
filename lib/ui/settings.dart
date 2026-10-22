@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 
 import '../core/app_state.dart';
 import '../core/models.dart';
@@ -357,29 +358,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// Favorites the posts linked in a text file the user picks.
+  /// Favorites the posts in a file the user picks: a LoliSnatcher
+  /// `store.db` backup, a Boorusama bookmarks export, or any text file of
+  /// post links.
   Future<void> _importPostLinks() async {
     setState(() => _backingUp = true);
     try {
-      final content = await _device.importFile();
-      if (content == null || !mounted) return;
+      final list = await _device.importList();
+      if (list == null || !mounted) return;
       _notify('Looking up posts…');
-      final summary = await widget.state.importPostLinks(
-        content,
+      final summary = await widget.state.importFavoriteList(
+        list.format,
+        list.text,
         onProgress: (done, total) {
           if (mounted) setState(() => _importProgress = '$done/$total');
         },
       );
       if (summary.links == 0) {
-        _notify('No post links from supported websites in this file.');
+        _notify(
+          summary.source == ImportSource.links
+              ? 'No post links from supported websites in this file.'
+              : 'No favorites from supported websites in these ${summary.source.label}.',
+        );
         return;
       }
       final parts = [
-        'Added ${summary.added} favorite${summary.added == 1 ? '' : 's'}',
+        'Added ${summary.added} favorite${summary.added == 1 ? '' : 's'} from ${summary.source.label}',
         if (summary.existing > 0) '${summary.existing} already saved',
         if (summary.failed > 0) '${summary.failed} not found',
+        if (summary.remaining > 0)
+          '${summary.remaining} left: import the file again to continue',
       ];
       _notify('${parts.join(', ')}.');
+    } on PlatformException catch (error) {
+      _notify(
+        error.code == 'INVALID_REQUEST'
+            ? 'This file is not a backup BooruPlus can read.'
+            : 'Could not read the file. Please try again.',
+      );
     } catch (_) {
       _notify('Could not read the file. Please try again.');
     } finally {
@@ -1787,7 +1803,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links, and any text file of post links, such as a list from another app, can be imported as favorites.',
+                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links. Import favorites reads a LoliSnatcher database backup (store.db), a Boorusama bookmarks export, or any text file of post links.',
                               style: TextStyle(
                                 color: ink(.54),
                                 fontSize: 12,
@@ -1841,7 +1857,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   ),
                                   label: Text(
                                     _importProgress == null
-                                        ? 'Import post links'
+                                        ? 'Import favorites'
                                         : 'Importing $_importProgress',
                                   ),
                                 ),

@@ -828,29 +828,107 @@ class AppState extends ChangeNotifier {
   }
 
   static final _linkPattern = RegExp(r'https?://[^\s<>"]+');
-  static const _importLinkLimit = 500;
+  static const _importLookupLimit = 1000;
+
+  /// Adds the favorites in another app's export to favorites (see
+  /// [importPostLinks]). [format] `lolisnatcher` is the post links the
+  /// platform read from a LoliSnatcher `store.db`; text that is a Boorusama
+  /// bookmarks export (`{version, data: [bookmark]}`, or the older bare
+  /// list) uses each bookmark's `sourceUrl`, its post link; any other text
+  /// uses the post links found anywhere in it.
+  Future<LinkImportSummary> importFavoriteList(
+    String format,
+    String text, {
+    void Function(int done, int total)? onProgress,
+  }) {
+    var source = format == 'lolisnatcher'
+        ? ImportSource.loliSnatcher
+        : ImportSource.links;
+    var links = text;
+    if (source == ImportSource.links) {
+      final bookmarks = _boorusamaBookmarkLinks(text);
+      if (bookmarks != null) {
+        source = ImportSource.boorusama;
+        links = bookmarks.join('\n');
+      }
+    }
+    return importPostLinks(links, onProgress: onProgress, source: source);
+  }
+
+  /// The post links of a Boorusama bookmarks export, or null when [text]
+  /// is not one.
+  static List<String>? _boorusamaBookmarkLinks(String text) {
+    final trimmed = text.trimLeft();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+    Object? json;
+    try {
+      json = jsonDecode(trimmed);
+    } on FormatException {
+      return null;
+    }
+    final items = switch (json) {
+      {'version': num _, 'data': final List data} => data,
+      final List list => list,
+      _ => null,
+    };
+    if (items == null || items.isEmpty) return null;
+    final links = <String>[];
+    for (final item in items) {
+      if (item is! Map ||
+          item['booruId'] is! num ||
+          !item.containsKey('originalUrl')) {
+        return null;
+      }
+      final link = item['sourceUrl'];
+      if (link is String && link.isNotEmpty) links.add(link);
+    }
+    return links;
+  }
 
   /// Adds the posts linked in [text] to favorites: one link per line, or
-  /// links anywhere in a file such as another app's export. Each post is
-  /// looked up on its website (ignoring the local filters, like favorites
-  /// restored from a backup); at most 500 links are read. [onProgress]
-  /// reports looked-up links.
+  /// links anywhere in a file such as another app's export. Posts already
+  /// in favorites are skipped without a request; the others are looked up
+  /// on their website (ignoring the local filters, like favorites restored
+  /// from a backup), at most 1000 per import, so importing the same file
+  /// again continues where it stopped. [onProgress] reports looked-up links.
   Future<LinkImportSummary> importPostLinks(
     String text, {
     void Function(int done, int total)? onProgress,
+    ImportSource source = ImportSource.links,
   }) async {
     final links = <String, PostLink>{};
+    final overflow = <String>{};
+    var existing = 0;
     for (final match in _linkPattern.allMatches(text)) {
       final link = PostLink.parse(match[0]!);
       final id = link?.postId;
       if (link == null || id == null) continue;
-      links.putIfAbsent('${link.board.name}:$id', () => link);
-      if (links.length >= _importLinkLimit) break;
+      final key = '${link.board.name}:id:$id';
+      if (links.containsKey(key) || overflow.contains(key)) continue;
+      if (_favoriteIds.contains(key)) {
+        existing++;
+        links[key] = link;
+        continue;
+      }
+      if (links.length - existing >= _importLookupLimit) {
+        overflow.add(key);
+        continue;
+      }
+      links[key] = link;
     }
+    final remaining = overflow.length;
+    final lookups = [
+      for (final entry in links.entries)
+        if (!_favoriteIds.contains(entry.key)) entry.value,
+    ];
     final found = <SavedPost>[];
+    // Favorites saved before their website reported post IDs (see
+    // SavedPost.legacyIdentity), stored again with their ID so the next
+    // import skips them without a lookup.
+    final upgraded = <SavedPost>[];
     final seen = <String>{};
-    var added = 0, existing = 0, failed = 0, done = 0;
-    for (final link in links.values) {
+    var added = 0, failed = 0, done = 0;
+    for (final link in lookups) {
       final board = link.board;
       if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
         _credentialsByBoard[board] = await _loadCredentials(board);
@@ -883,6 +961,10 @@ class AppState extends ChangeNotifier {
           final saved = _saved(post, board);
           if (isFavorite(post, board: board) || !seen.add(saved.identity)) {
             existing++;
+            if (!_favoriteIds.contains(saved.identity) &&
+                isFavorite(post, board: board)) {
+              upgraded.add(saved);
+            }
           } else {
             found.add(saved);
           }
@@ -896,16 +978,29 @@ class AppState extends ChangeNotifier {
       } catch (_) {
         failed++;
       }
-      onProgress?.call(++done, links.length);
+      onProgress?.call(++done, lookups.length);
     }
     added += await _addFavorites(found);
     existing += found.length;
+    if (upgraded.isNotEmpty) {
+      final replace = [
+        for (final saved in upgraded) (_same(saved.post, saved.board), saved),
+      ];
+      _setFavorites([
+        for (final value in _favoritePosts)
+          replace.where((entry) => entry.$1(value)).firstOrNull?.$2 ?? value,
+      ]);
+      await _postStore.saveFavorites(_favoritePosts);
+      notifyListeners();
+    }
     return LinkImportSummary(
-      links: links.length,
+      source: source,
+      links: links.length + remaining,
       added: added,
       // Favorited meanwhile from elsewhere counts as already saved.
       existing: existing - added,
       failed: failed,
+      remaining: remaining,
     );
   }
 
@@ -2589,6 +2684,7 @@ class AppState extends ChangeNotifier {
   void _noteBoardIssue(Board board, Object error) {
     final issue = switch (error) {
       RateLimitedException() => BoardIssue.rateLimited,
+      ApiOffException() => BoardIssue.apiOff,
       TagLimitException() ||
       AuthExpiredException() ||
       SignInRejectedException() ||
@@ -2621,6 +2717,9 @@ class AppState extends ChangeNotifier {
       final wait = seconds > 1 ? 'about $seconds seconds' : 'a moment';
       return '${board?.label ?? 'This website'} is busy or limiting requests. Wait $wait, then try again.';
     }
+    if (error is ApiOffException) {
+      return '${board?.label ?? 'This website'} has switched off its API, so BooruPlus cannot load it right now. Try again later or choose another website.';
+    }
     return 'Unable to load ${board?.label ?? 'the selected board'}. Check your connection and search tag limits. If this website needs an API key, reconnect in Settings.';
   }
 }
@@ -2648,10 +2747,12 @@ enum FilterReason {
 /// A recent problem reaching a website; see [AppState.boardIssue].
 enum BoardIssue {
   rateLimited,
+  apiOff,
   unreachable;
 
   String get label => switch (this) {
     rateLimited => 'Limiting requests',
+    apiOff => 'API switched off',
     unreachable => 'Not reachable recently',
   };
 }
@@ -3272,12 +3373,30 @@ class ShortsFeedSnapshot {
 /// found or looked up.
 class LinkImportSummary {
   const LinkImportSummary({
+    this.source = ImportSource.links,
     required this.links,
     required this.added,
     required this.existing,
     required this.failed,
+    this.remaining = 0,
   });
-  final int links, added, existing, failed;
+  final ImportSource source;
+
+  /// [remaining]: links left for another import, past the lookup limit.
+  final int links, added, existing, failed, remaining;
+}
+
+/// What a favorites import read.
+enum ImportSource {
+  links,
+  loliSnatcher,
+  boorusama;
+
+  String get label => switch (this) {
+    links => 'post links',
+    loliSnatcher => 'LoliSnatcher favorites',
+    boorusama => 'Boorusama bookmarks',
+  };
 }
 
 /// What [AppState.importBackup] restored.

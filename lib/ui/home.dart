@@ -2236,9 +2236,11 @@ class _BoardIssueBadge extends StatelessWidget {
     return Tooltip(
       message: issue.label,
       child: Icon(
-        issue == BoardIssue.rateLimited
-            ? Icons.hourglass_top_rounded
-            : Icons.cloud_off_rounded,
+        switch (issue) {
+          BoardIssue.rateLimited => Icons.hourglass_top_rounded,
+          BoardIssue.apiOff => Icons.power_off_rounded,
+          BoardIssue.unreachable => Icons.cloud_off_rounded,
+        },
         size: 18,
         color: ink(.54),
         semanticLabel: issue.label,

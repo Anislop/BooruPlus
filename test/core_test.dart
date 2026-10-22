@@ -2472,6 +2472,10 @@ void main() {
       repo.error = const RateLimitedException();
       await state.search(['cat']);
       expect(state.boardIssue(Board.safebooru), BoardIssue.rateLimited);
+      repo.error = const ApiOffException();
+      await state.search(['cat']);
+      expect(state.boardIssue(Board.safebooru), BoardIssue.apiOff);
+      expect(state.error, contains('switched off its API'));
       repo.error = null;
       await state.search(['cat']);
       expect(state.boardIssue(Board.safebooru), isNull);
@@ -2619,11 +2623,99 @@ https://danbooru.donmai.us/posts?tags=cat
       expect(summary.added, 1);
       expect(summary.existing, 1);
       expect(summary.failed, 1);
-      expect(progress, [1, 2, 3]);
+      // Post 9 is already a favorite, so it is not looked up.
+      expect(progress, [1, 2]);
       expect(state.favoritePosts.map((saved) => (saved.board, saved.post.id)), [
         (Board.danbooru, 9),
         (Board.danbooru, 7),
       ]);
+    });
+
+    test('an import stores favorites saved before post IDs with their ID, '
+        'so the next import skips them', () async {
+      final state = AppState(
+        repository: _LinkRepo(),
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      // Saved before Danbooru reported post IDs: identified by its URLs.
+      await state.favoritePost(
+        MediaPost.fromMap({
+          'url': 'https://x/7.jpg',
+          'previewUrl': 'https://x/7.jpg',
+          'tags': const <String>[],
+        }),
+        board: Board.danbooru,
+      );
+      final progress = <int>[];
+      final first = await state.importPostLinks(
+        'https://danbooru.donmai.us/posts/7',
+        onProgress: (done, _) => progress.add(done),
+      );
+      expect(first.existing, 1);
+      expect(first.added, 0);
+      expect(progress, [1]);
+      expect(state.favoritePosts.single.post.id, 7);
+
+      final again = await state.importPostLinks(
+        'https://danbooru.donmai.us/posts/7',
+        onProgress: (done, _) => progress.add(done),
+      );
+      expect(again.existing, 1);
+      expect(progress, [1]);
+    });
+
+    test('imports Boorusama bookmarks and LoliSnatcher favorites', () async {
+      final state = AppState(
+        repository: _LinkRepo(),
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      // A Boorusama bookmarks export: each bookmark's sourceUrl is its post.
+      final boorusama = jsonEncode({
+        'version': 1,
+        'date': '2026-10-20T10:00:00.000',
+        'exportVersion': '4.2.0',
+        'data': [
+          for (final id in [3, 4])
+            {
+              'id': id,
+              'booruId': 1,
+              'createdAt': '2026-10-01T00:00:00.000',
+              'updatedAt': '2026-10-01T00:00:00.000',
+              'thumbnailUrl': 'https://cdn.donmai.us/180x180/$id.jpg',
+              'sampleUrl': 'https://cdn.donmai.us/sample/$id.jpg',
+              'originalUrl': 'https://cdn.donmai.us/original/$id.jpg',
+              'sourceUrl': 'https://danbooru.donmai.us/posts/$id',
+              'width': 100,
+              'height': 100,
+              'md5': 'abc',
+              'tags': ['cat'],
+              'postId': id,
+            },
+        ],
+      });
+      final bookmarks = await state.importFavoriteList('text', boorusama);
+      expect(bookmarks.source, ImportSource.boorusama);
+      expect(bookmarks.added, 2);
+      // Read the same way from the older bare list.
+      final legacy = await state.importFavoriteList(
+        'text',
+        jsonEncode((jsonDecode(boorusama) as Map)['data']),
+      );
+      expect(legacy.source, ImportSource.boorusama);
+      expect(legacy.existing, 2);
+
+      // LoliSnatcher favorites arrive as the post links the platform read
+      // from its store.db.
+      final loli = await state.importFavoriteList(
+        'lolisnatcher',
+        'https://danbooru.donmai.us/posts/5\nhttps://danbooru.donmai.us/posts/404',
+      );
+      expect(loli.source, ImportSource.loliSnatcher);
+      expect(loli.added, 1);
+      expect(loli.failed, 1);
+      expect(state.favoritePosts.map((saved) => saved.post.id), [3, 4, 5]);
     });
   });
 
