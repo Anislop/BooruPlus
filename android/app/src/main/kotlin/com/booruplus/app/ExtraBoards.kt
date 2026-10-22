@@ -314,6 +314,11 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
         cursorKey: String, cancelled: () -> Boolean,
     ): List<Map<String, Any?>> {
         if (cancelled()) throw IOException("Cancelled")
+        // `id:<n>` (a post link opened in the app) reads that one post; Dart
+        // applies the other tags locally.
+        tags.firstNotNullOfOrNull { ID_LOOKUP.matchEntire(it.trim())?.groupValues?.get(1)?.toLongOrNull() }?.let { id ->
+            return if (page > 0) emptyList() else listOfNotNull(post(id))
+        }
         val popular = tags.any { it.equals("order:popular", ignoreCase = true) }
         val terms = tags.filterNot { it.contains(':') }.map { it.lowercase() }
         val excluded = terms.filter { it.startsWith("-") }.map { it.substring(1) }.filter { it.isNotEmpty() }.toSet()
@@ -507,6 +512,7 @@ internal class NozomiApi(private val client: OkHttpClient, private val userAgent
         private val RETRY_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(2)
         private val HASH = Regex("^[0-9a-f]{3,128}$")
         private val TYPE = Regex("^[a-z0-9]{2,5}$")
+        private val ID_LOOKUP = Regex("^id:(\\d{1,12})$", RegexOption.IGNORE_CASE)
 
         /** Whether [host] serves Nozomi media that needs [REFERER]. */
         fun isMediaHost(host: String): Boolean = host.endsWith(".$MEDIA_DOMAIN")

@@ -169,7 +169,18 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun shortcutFrom(intent: Intent?): Map<String, String>? {
-        val kind = intent?.getStringExtra(SHORTCUT_KIND)?.takeIf { it == "favorites" || it == "search" } ?: return null
+        // A link handed over by LinkActivity; Dart decides what it names. It
+        // opens once: not again when the activity is recreated, or reopened
+        // from Recents with the intent that first started it.
+        intent?.getStringExtra(LINK_TEXT)?.let { text ->
+            intent.removeExtra(LINK_TEXT)
+            if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return null
+            text.take(MAX_LINK_TEXT).takeIf { it.isNotBlank() }?.let {
+                return mapOf("kind" to "link", "url" to it)
+            }
+            return null
+        }
+        val kind =intent?.getStringExtra(SHORTCUT_KIND)?.takeIf { it == "favorites" || it == "search" } ?: return null
         return buildMap {
             put("kind", kind)
             intent.getStringExtra(SHORTCUT_BOARD)?.let { put("board", it) }
@@ -1518,6 +1529,9 @@ class MainActivity : FlutterActivity() {
         private const val SHORTCUT_KIND = "com.booruplus.app.SHORTCUT_KIND"
         private const val SHORTCUT_BOARD = "com.booruplus.app.SHORTCUT_BOARD"
         private const val SHORTCUT_TAGS = "com.booruplus.app.SHORTCUT_TAGS"
+        internal const val LINK_TEXT = "com.booruplus.app.LINK_TEXT"
+        // A link or a short shared message; longer text is cut here.
+        internal const val MAX_LINK_TEXT = 2048
         private const val MAX_SHARE_BYTES = 200L * 1024L * 1024L
         // Provider API responses (JSON/XML) are far smaller; media is apart.
         private const val MAX_RESPONSE_BYTES = 16L * 1024L * 1024L

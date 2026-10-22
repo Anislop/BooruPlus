@@ -127,6 +127,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// A launcher shortcut, kept until the app lock opens. Any app can start
   /// this activity with shortcut extras, so nothing runs behind the lock.
   AppShortcut? _pendingShortcut;
+  int _linkGeneration = 0;
 
   void _receiveShortcut(AppShortcut shortcut) {
     _pendingShortcut = shortcut;
@@ -145,6 +146,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// which the shortcuts are made from.
   Future<void> _openShortcut(AppShortcut shortcut) async {
     if (!mounted) return;
+    if (shortcut.kind == 'link') {
+      await _openLink(shortcut.url ?? '');
+      return;
+    }
     final state = widget.state;
     final board = shortcut.board;
     if (board?.isRetired == true) return;
@@ -171,6 +176,90 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(_searchHistory.clear);
       await state.chooseBoard(board, tags: shortcut.tags);
     }
+  }
+
+  /// Opens the post or runs the search that a website link names (see
+  /// [PostLink]). A post is looked up with `id:` and opens only when the
+  /// feed's filters would show it.
+  Future<void> _openLink(String text) async {
+    final state = widget.state;
+    // A newer link replaces one still being looked up.
+    final generation = ++_linkGeneration;
+    final link = PostLink.parse(text);
+    if (link == null) {
+      _linkNotice('BooruPlus cannot open this link.');
+      return;
+    }
+    final board = link.board;
+    final searchable = await state.searchableBoards(among: [board]);
+    if (!mounted || generation != _linkGeneration) return;
+    if (searchable.isEmpty) {
+      _linkNotice('Connect ${board.label} in Settings to open its links.');
+      return;
+    }
+    final id = link.postId;
+    if (id == null) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _endSelection();
+      if (state.board == board) {
+        _search(link.tags);
+      } else {
+        setState(_searchHistory.clear);
+        await state.chooseBoard(board, tags: link.tags);
+      }
+      return;
+    }
+    _linkNotice('Opening ${board.label} post…');
+    final MediaPost? post;
+    try {
+      post = await state.postById(board, id);
+    } catch (_) {
+      if (mounted && generation == _linkGeneration) {
+        _linkNotice('Could not open this post. Check your connection.');
+      }
+      return;
+    }
+    if (!mounted || generation != _linkGeneration) return;
+    if (post == null) {
+      _linkNotice('This post was not found, or your filters hide it.');
+      return;
+    }
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    _endSelection();
+    if (state.board == board) {
+      await _openViewer([post], board, 0);
+      return;
+    }
+    // Another website's post: its tags start a search there, since adding
+    // to or excluding from the current search would mix websites.
+    final result = await Navigator.push<ViewerTagBrowse>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MediaViewer(
+          post: state.displayPost(post!, board: board),
+          board: board,
+          savedPosts: [SavedPost(board: board, post: post)],
+          state: state,
+        ),
+      ),
+    );
+    if (result == null || result.mode != TagBrowseMode.replace || !mounted) {
+      return;
+    }
+    if (state.board == board) {
+      _search([result.tag]);
+      return;
+    }
+    setState(_searchHistory.clear);
+    await state.chooseBoard(board, tags: [result.tag]);
+  }
+
+  void _linkNotice(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// Slides the one-handed panel away as the user scrolls down and brings

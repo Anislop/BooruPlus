@@ -691,6 +691,16 @@ class AppState extends ChangeNotifier {
         .toList(growable: false);
   }
 
+  /// The post [id] on [board], for a link opened in the app. Null when the
+  /// website has no such post or the local filters hide it; throws when the
+  /// lookup fails.
+  Future<MediaPost?> postById(Board board, String id) async {
+    final posts = await _lookup(board, ['id:$id'], limit: 5);
+    return posts
+        .where((post) => post.displayId == id || '${post.id}' == id)
+        .firstOrNull;
+  }
+
   /// The parent of [post] and its child posts, when the website reports
   /// them. Either part is empty when missing; throws when a lookup fails.
   Future<({MediaPost? parent, List<MediaPost> children})> postFamily(

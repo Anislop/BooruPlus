@@ -1932,6 +1932,103 @@ void main() {
     expect(plain.settings.secureScreen, isTrue);
   });
 
+  group('post links', () {
+    (Board, String?, List<String>)? read(String text) {
+      final link = PostLink.parse(text);
+      return link == null ? null : (link.board, link.postId, link.tags);
+    }
+
+    test('post pages name the website and post', () {
+      expect(read('https://danbooru.donmai.us/posts/42?q=cat'), (
+        Board.danbooru,
+        '42',
+        const <String>[],
+      ));
+      expect(read('https://e621.net/posts/7')?.$2, '7');
+      expect(read('https://yande.re/post/show/9/some-tags')?.$2, '9');
+      expect(read('https://konachan.net/post/show/3')?.$1, Board.konachan);
+      expect(
+        read('https://www.gelbooru.com/index.php?page=post&s=view&id=11')?.$2,
+        '11',
+      );
+      expect(
+        read('https://chan.sankakucomplex.com/en/posts/aB3x9')?.$2,
+        'aB3x9',
+      );
+      expect(
+        read('https://idol.sankakucomplex.com/post/show/77')?.$1,
+        Board.idolcomplex,
+      );
+      expect(read('https://nozomi.la/post/123.html')?.$2, '123');
+      expect(read('https://derpibooru.org/images/5')?.$2, '5');
+      expect(read('https://derpibooru.org/5')?.$2, '5');
+      expect(read('https://e-shuushuu.net/image/12/')?.$2, '12');
+      expect(read('https://emmytherobot.art/post/view/8')?.$1, Board.nanbooru);
+    });
+
+    test('search pages carry their tags', () {
+      final search = read('https://danbooru.donmai.us/posts?tags=cat+-dog');
+      expect(search?.$1, Board.danbooru);
+      expect(search?.$2, isNull);
+      expect(search?.$3, ['cat', '-dog']);
+      expect(read('https://yande.re/post?tags=sky')?.$3, ['sky']);
+      expect(
+        read('https://rule34.xxx/index.php?page=post&s=list&tags=all'),
+        isNull,
+      );
+      expect(read('https://nozomi.la/tag/blue_eyes-1.html')?.$3, ['blue_eyes']);
+      expect(
+        read('https://derpibooru.org/search?q=safe%2C+twilight+sparkle')?.$3,
+        ['safe', 'twilight_sparkle'],
+      );
+      expect(read('https://emmytherobot.art/post/list/a%20b/1')?.$3, [
+        'a',
+        'b',
+      ]);
+    });
+
+    test('shared text, punctuation, and unsupported links', () {
+      expect(read('Look at this (https://e621.net/posts/7).')?.$2, '7');
+      expect(
+        read('https://example.com/posts/1 then https://e926.net/posts/2'),
+        (Board.e926, '2', const <String>[]),
+      );
+      expect(read('no link here'), isNull);
+      expect(read('https://danbooru.donmai.us/wiki_pages/cat'), isNull);
+      expect(read('https://danbooru.donmai.us/posts/random'), isNull);
+      // Media files on a website's host are not posts.
+      expect(read('https://realbooru.com/images/12/ab/cd.jpg'), isNull);
+      // Retired websites are not opened.
+      expect(read('https://aibooru.online/posts/1'), isNull);
+      expect(read('https://danbooru.donmai.us/posts?tags=%E0%A4%A'), isNull);
+    });
+
+    test('a link shortcut survives the channel map', () {
+      final shortcut = AppShortcut.fromMap(
+        const AppShortcut.link('https://e621.net/posts/7').toMap(),
+      );
+      expect(shortcut.kind, 'link');
+      expect(shortcut.url, 'https://e621.net/posts/7');
+      expect(AppShortcut.fromMap(const {'kind': 'favorites'}).url, isNull);
+    });
+
+    test('postById returns the matching post that the filters allow', () async {
+      final state = AppState(
+        repository: FakeRepo([
+          [
+            post(5),
+            post(6, tags: ['gore']),
+          ],
+        ]),
+        store: MemoryStore()..settings = const AppSettings(blacklist: ['gore']),
+      );
+      await state.initialize();
+      expect((await state.postById(Board.safebooru, '5'))?.id, 5);
+      expect(await state.postById(Board.safebooru, '6'), isNull);
+      expect(await state.postById(Board.safebooru, '9'), isNull);
+    });
+  });
+
   group('updates', () {
     Map<String, Object?> release(
       String tag,
