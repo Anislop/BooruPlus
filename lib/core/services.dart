@@ -71,6 +71,11 @@ class RateLimitedException implements Exception {
   final Duration? retryAfter;
 }
 
+/// The website answered that its API is switched off.
+class ApiOffException implements Exception {
+  const ApiOffException();
+}
+
 /// The request was cancelled natively, because a newer feed request
 /// superseded it or the activity closed. Nothing waits on its result.
 class RequestCancelledException implements Exception {
@@ -83,6 +88,7 @@ Object _platformError(Object error) {
   if (error is! PlatformException) return error;
   return switch (error.code) {
     'CANCELLED' => const RequestCancelledException(),
+    'API_OFF' => const ApiOffException(),
     'AUTH_REJECTED' => const SignInRejectedException(),
     'AUTH_EXPIRED' => const AuthExpiredException(),
     'TAG_LIMIT' => TagLimitException(switch (error.details) {
@@ -890,6 +896,21 @@ class DeviceService {
 
   /// Reads a text file the user picks; null when the picker is cancelled.
   Future<String?> importFile() => channel.invokeMethod<String>('importFile');
+
+  /// Reads a favorites list the user picks: a text or JSON file, or a
+  /// LoliSnatcher `store.db` backup, whose favorites' post links the
+  /// platform reads (`format` `lolisnatcher`, one link per line). Null when
+  /// the picker is cancelled.
+  Future<({String format, String text})?> importList() async {
+    final value = await channel.invokeMapMethod<String, Object?>('importFile', {
+      'databases': true,
+    });
+    if (value == null) return null;
+    return (
+      format: value['format'] is String ? value['format'] as String : 'text',
+      text: value['text'] is String ? value['text'] as String : '',
+    );
+  }
 
   /// Whether the active network is metered (usually mobile data). False
   /// when unknown.

@@ -86,6 +86,7 @@ class MainActivity : FlutterActivity() {
         .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
         .addInterceptor(Interceptor(::trackFeedCall))
         .addInterceptor(RateLimitInterceptor())
+        .addInterceptor(ApiOffInterceptor())
         .followSslRedirects(false).build()
     // Provider responses are parsed whole, so their size is capped; media
     // bytes have their own bound in readMedia.
@@ -127,6 +128,7 @@ class MainActivity : FlutterActivity() {
     private var exportResult: MethodChannel.Result? = null
     private var exportContent: String? = null
     private var importResult: MethodChannel.Result? = null
+    private var importDatabases = false
     private var authResult: MethodChannel.Result? = null
     private var channel: MethodChannel? = null
     // Native-to-Dart download progress, kept apart from the main channel's handler.
@@ -224,7 +226,7 @@ class MainActivity : FlutterActivity() {
             "authenticate" -> authenticate(call, result)
             "share" -> share(call, result)
             "exportFile" -> exportFile(call, result)
-            "importFile" -> importFile(result)
+            "importFile" -> importFile(call, result)
             "pools" -> pools(call, result)
             "isMeteredNetwork" -> result.success(
                 getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
@@ -609,18 +611,28 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /** Lets the user pick a text file (a backup) and returns its contents. */
-    private fun importFile(result: MethodChannel.Result) {
+    /**
+     * Lets the user pick a text file (a backup) and returns its contents.
+     * With `databases`, a SQLite file may be picked too, and the result is a
+     * map: `{format: lolisnatcher, text}` with the post links of a
+     * LoliSnatcher `store.db` backup's favorites, one per line, or
+     * `{format: text, text}`.
+     */
+    private fun importFile(call: MethodCall, result: MethodChannel.Result) {
         if (exportResult != null || importResult != null) { result.error("PICKER_BUSY", "A file picker is already open", null); return }
         importResult = result
+        importDatabases = call.argument<Boolean>("databases") == true
+        val types = arrayOf("application/json", "text/plain", "application/octet-stream") +
+            if (importDatabases) arrayOf("application/x-sqlite3", "application/vnd.sqlite3", "application/x-sqlite") else emptyArray()
         try {
             startActivityForResult(
                 Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
-                    .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream")),
+                    .putExtra(Intent.EXTRA_MIME_TYPES, types),
                 IMPORT
             )
         } catch (_: Exception) {
             importResult = null
+            importDatabases = false
             result.error("PICKER_UNAVAILABLE", "No file picker is available", null)
         }
     }
@@ -771,7 +783,11 @@ class MainActivity : FlutterActivity() {
                     is SankakuTagLimitException -> "TAG_LIMIT"
                     is UpdateRejectedException -> error.code
                     is DownloadPausedException -> "PAUSED"
-                    else -> if (rateLimit(error) != null) "RATE_LIMITED" else "REQUEST_FAILED"
+                    else -> when {
+                        rateLimit(error) != null -> "RATE_LIMITED"
+                        apiOff(error) != null -> "API_OFF"
+                        else -> "REQUEST_FAILED"
+                    }
                 }
                 // Only the provider's numeric tag limit or retry delay is passed on as details.
                 val details = (error as? SankakuTagLimitException)?.limit?.let { mapOf("limit" to it) }
@@ -1369,7 +1385,13 @@ class MainActivity : FlutterActivity() {
     private fun finishImport(resultCode: Int, uri: Uri?) {
         val result = importResult ?: return
         importResult = null
+        val databases = importDatabases
+        importDatabases = false
         if (resultCode != Activity.RESULT_OK || uri == null) { result.success(null); return }
+        if (databases) {
+            background(result, mediaExecutor) { importList(uri) }
+            return
+        }
         background(result, mediaExecutor) {
             (contentResolver.openInputStream(uri) ?: throw IOException("Cannot open file")).use { input ->
                 val output = ByteArrayOutputStream()
@@ -1385,6 +1407,78 @@ class MainActivity : FlutterActivity() {
                 output.toString(Charsets.UTF_8.name())
             }
         }
+    }
+
+    /**
+     * Reads a picked favorites list (see [importFile]): a LoliSnatcher
+     * `store.db` is copied to the cache, opened, and its favorites' post
+     * links read (table `BooruItem`, `postURL` where `isFavourite = 1`);
+     * anything else is read as UTF-8 text.
+     */
+    private fun importList(uri: Uri): Map<String, String> {
+        val input = java.io.BufferedInputStream(contentResolver.openInputStream(uri) ?: throw IOException("Cannot open file"))
+        input.use {
+            input.mark(SQLITE_HEADER.size)
+            val header = ByteArray(SQLITE_HEADER.size)
+            val read = input.readNBytesCompat(header)
+            input.reset()
+            if (read != SQLITE_HEADER.size || !header.contentEquals(SQLITE_HEADER)) {
+                val output = ByteArrayOutputStream()
+                copyBounded(input, output, MAX_IMPORT_BYTES)
+                return mapOf("format" to "text", "text" to output.toString(Charsets.UTF_8.name()))
+            }
+            val file = File(cacheDir, "import-${java.util.UUID.randomUUID()}.db")
+            try {
+                file.outputStream().use { copyBounded(input, it, MAX_IMPORT_DATABASE_BYTES) }
+                return mapOf("format" to "lolisnatcher", "text" to loliSnatcherFavorites(file).joinToString("\n"))
+            } finally {
+                android.database.sqlite.SQLiteDatabase.deleteDatabase(file)
+            }
+        }
+    }
+
+    private fun loliSnatcherFavorites(file: File): List<String> {
+        val database = try {
+            android.database.sqlite.SQLiteDatabase.openDatabase(file.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READWRITE)
+        } catch (_: Exception) { throw IllegalArgumentException("Unreadable database") }
+        database.use { db ->
+            try {
+                val columns = db.rawQuery("PRAGMA table_info(BooruItem)", null).use { cursor ->
+                    buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+                }
+                if ("postURL" !in columns || "isFavourite" !in columns) throw IllegalArgumentException("Not a LoliSnatcher database")
+                return db.rawQuery(
+                    "SELECT postURL FROM BooruItem WHERE isFavourite = 1 AND postURL IS NOT NULL ORDER BY id LIMIT $MAX_IMPORT_LINKS",
+                    null,
+                ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+            } catch (error: android.database.SQLException) {
+                // A damaged file that still opened.
+                throw IllegalArgumentException("Unreadable database", error)
+            }
+        }
+    }
+
+    private fun copyBounded(input: InputStream, output: java.io.OutputStream, limit: Long) {
+        val buffer = ByteArray(65536)
+        var total = 0L
+        while (true) {
+            if (closing || Thread.currentThread().isInterrupted) throw IOException("Cancelled")
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            if (total > limit) throw IllegalArgumentException("File too large")
+            output.write(buffer, 0, count)
+        }
+    }
+
+    private fun InputStream.readNBytesCompat(target: ByteArray): Int {
+        var offset = 0
+        while (offset < target.size) {
+            val count = read(target, offset, target.size - offset)
+            if (count < 0) break
+            offset += count
+        }
+        return offset
     }
 
     /**
@@ -1804,6 +1898,9 @@ class MainActivity : FlutterActivity() {
         private const val TRANSFER_DEADLINE_NANOS = 60L * 60L * 1_000_000_000L
         private const val FRAME_TIMEOUT_SECONDS = 60L
         private const val MAX_IMPORT_BYTES = 20L * 1024L * 1024L
+        private const val MAX_IMPORT_DATABASE_BYTES = 512L * 1024L * 1024L
+        private const val MAX_IMPORT_LINKS = 20000
+        private val SQLITE_HEADER = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
         private const val SHARE_CACHE_MILLIS = 60L * 60L * 1000L
         private const val MAX_WINDOW_REQUESTS = 32
         private const val MAX_MEDIA_REDIRECTS = 5
