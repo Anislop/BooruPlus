@@ -36,6 +36,74 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Website links opened with BooruPlus and text shared to it; hands
+             them to MainActivity in its own task and shows nothing. Links
+             are not verified (these are not our domains), so Android opens
+             them here only when chosen or allowed in the app's settings. -->
+        <activity
+            android:name=".LinkActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="safebooru.org" />
+                <data android:host="danbooru.donmai.us" />
+                <data android:host="safebooru.donmai.us" />
+                <data android:host="konachan.com" />
+                <data android:host="konachan.net" />
+                <data android:host="yande.re" />
+                <data android:host="e926.net" />
+                <data android:host="e621.net" />
+                <data android:host="gelbooru.com" />
+                <data android:host="rule34.xxx" />
+                <data android:host="chan.sankakucomplex.com" />
+                <data android:host="sankaku.app" />
+                <data android:host="www.sankaku.app" />
+                <data android:host="idol.sankakucomplex.com" />
+                <data android:host="idolcomplex.com" />
+                <data android:host="www.idolcomplex.com" />
+                <data android:host="tbib.org" />
+                <data android:host="nozomi.la" />
+                <data android:host="sakugabooru.com" />
+                <data android:host="www.sakugabooru.com" />
+                <data android:host="xbooru.com" />
+                <data android:host="mspabooru.com" />
+                <data android:host="e-shuushuu.net" />
+                <data android:host="booru.funmaker.moe" />
+                <data android:host="realbooru.com" />
+                <data android:host="derpibooru.org" />
+                <data android:host="trixiebooru.org" />
+            </intent-filter>
+            <!-- Hosts that also serve pages other than the booru: posts only. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="www.sankakucomplex.com" />
+                <data android:host="sankakucomplex.com" />
+                <data android:host="emmytherobot.art" />
+                <data android:pathPrefix="/posts/" />
+                <data android:pathPrefix="/post/show/" />
+                <data android:pathPrefix="/post/view/" />
+                <data android:pathPrefix="/post/list/" />
+                <!-- Sankaku links often start with a language, as in /en/posts/. -->
+                <data android:pathPattern="/.*/posts/.*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <!-- Serves media saved for the share sheet and downloaded updates for
              the package installer; readable only through the intent's
              temporary grant. -->

@@ -2273,6 +2273,82 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('a shared link waits for the app lock, then opens its post', (
+    tester,
+  ) async {
+    const channel = MethodChannel('booruplus/platform');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    var verified = false;
+    final shortcuts = <Map<String, String>>[];
+    messenger.setMockMethodCallHandler(
+      channel,
+      (call) async => switch (call.method) {
+        'authenticate' => verified,
+        'takeShortcut' => shortcuts.isEmpty ? null : shortcuts.removeAt(0),
+        _ => null,
+      },
+    );
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    Future<(FakeRepo, AppState)> launch(AppSettings settings) async {
+      final repo = FakeRepo(const [
+        [
+          {
+            'id': 123,
+            'url': 'https://x/123.jpg',
+            'previewUrl': 'https://x/123.jpg',
+            'tags': ['cat'],
+          },
+        ],
+      ]);
+      final state = AppState(
+        repository: repo,
+        store: MemoryStore()
+          ..selected = Board.safebooru
+          ..settings = settings,
+      );
+      addTearDown(state.dispose);
+      await tester.pumpWidget(BooruPlusApp(state: state));
+      await tester.pumpAndSettle();
+      return (repo, state);
+    }
+
+    bool searched(FakeRepo repo, String tag) =>
+        repo.queries.any((tags) => tags.contains(tag));
+
+    shortcuts.add({
+      'kind': 'link',
+      'url': 'Look: https://safebooru.org/index.php?page=post&s=view&id=123.',
+    });
+    final (locked, _) = await launch(const AppSettings(appLock: true));
+    expect(find.text('BooruPlus is locked'), findsOneWidget);
+    expect(searched(locked, 'id:123'), isFalse);
+    verified = true;
+    await tester.tap(find.text('Unlock'));
+    await tester.pumpAndSettle();
+    expect(searched(locked, 'id:123'), isTrue);
+    expect(find.byType(MediaViewer), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+
+    // A search link on another website switches to it and searches there.
+    shortcuts.add({
+      'kind': 'link',
+      'url': 'https://danbooru.donmai.us/posts?tags=dog+-cat',
+    });
+    final (other, state) = await launch(const AppSettings());
+    expect(state.board, Board.danbooru);
+    expect(state.tags, ['dog', '-cat']);
+    expect(searched(other, 'dog'), isTrue);
+    await tester.pumpWidget(const SizedBox());
+
+    shortcuts.add({'kind': 'link', 'url': 'https://example.com/posts/1'});
+    final (_, unchanged) = await launch(const AppSettings());
+    expect(find.text('BooruPlus cannot open this link.'), findsOneWidget);
+    expect(unchanged.board, Board.safebooru);
+    expect(unchanged.tags, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('a release signed with another key is not offered by hand', (
     tester,
   ) async {

@@ -1868,3 +1868,160 @@ class AppSettings {
     ),
   );
 }
+
+/// A post or search named by a website link opened with, or shared to, the
+/// app: the website, and either the post's ID or the searched tags.
+class PostLink {
+  const PostLink(this.board, {this.postId, this.tags = const []});
+  final Board board;
+  final String? postId;
+  final List<String> tags;
+
+  static final _url = RegExp(r'https?://[^\s<>"]+', caseSensitive: false);
+  static final _numericId = RegExp(r'^\d{1,12}$');
+  // Sankaku and Idol Complex post IDs are opaque alphanumeric strings.
+  static final _opaqueId = RegExp(r'^[A-Za-z0-9]{1,64}$');
+
+  /// The first link in [text] to a supported website's post or search;
+  /// null when there is none. Retired websites are not recognized.
+  static PostLink? parse(String text) {
+    for (final match in _url.allMatches(text).take(5)) {
+      final uri = Uri.tryParse(_trimTrailing(match[0]!));
+      final board = uri == null ? null : _boardFor(uri.host);
+      if (board == null) continue;
+      try {
+        final link = _read(board, uri!);
+        if (link != null) return link;
+      } on FormatException {
+        continue;
+      } on ArgumentError {
+        // Malformed percent-encoding in the query.
+        continue;
+      }
+    }
+    return null;
+  }
+
+  /// Drops punctuation that ends the sentence around a link, and a closing
+  /// parenthesis that has no opening one inside the link.
+  static String _trimTrailing(String url) {
+    var value = url.replaceFirst(RegExp(r'[.,;:!?]+$'), '');
+    if (value.endsWith(')') &&
+        ')'.allMatches(value).length > '('.allMatches(value).length) {
+      value = value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  static Board? _boardFor(String host) {
+    var name = host.toLowerCase();
+    if (name.startsWith('www.')) name = name.substring(4);
+    return switch (name) {
+      'safebooru.org' => Board.safebooru,
+      'danbooru.donmai.us' || 'safebooru.donmai.us' => Board.danbooru,
+      'konachan.com' || 'konachan.net' => Board.konachan,
+      'yande.re' => Board.yandere,
+      'e926.net' => Board.e926,
+      'e621.net' => Board.e621,
+      'gelbooru.com' => Board.gelbooru,
+      'rule34.xxx' => Board.rule34,
+      'sankakucomplex.com' ||
+      'chan.sankakucomplex.com' ||
+      'sankaku.app' => Board.sankaku,
+      'idolcomplex.com' || 'idol.sankakucomplex.com' => Board.idolcomplex,
+      'tbib.org' => Board.tbib,
+      'nozomi.la' => Board.nozomi,
+      'sakugabooru.com' => Board.sakugabooru,
+      'xbooru.com' => Board.xbooru,
+      'mspabooru.com' => Board.mspabooru,
+      'e-shuushuu.net' => Board.eshuushuu,
+      'booru.funmaker.moe' => Board.mikubooru,
+      'emmytherobot.art' => Board.nanbooru,
+      'realbooru.com' => Board.realbooru,
+      'derpibooru.org' || 'trixiebooru.org' => Board.derpibooru,
+      _ => null,
+    };
+  }
+
+  static PostLink? _read(Board board, Uri uri) {
+    final path = uri.pathSegments.where((part) => part.isNotEmpty).toList();
+    final query = uri.queryParameters;
+    // The segment after [prefix] in the path, such as the ID in
+    // `/post/show/<id>`.
+    String? after(List<String> prefix) {
+      for (var i = 0; i + prefix.length < path.length; i++) {
+        var matches = true;
+        for (var j = 0; j < prefix.length; j++) {
+          if (path[i + j].toLowerCase() != prefix[j]) matches = false;
+        }
+        if (matches) return path[i + prefix.length];
+      }
+      return null;
+    }
+
+    final gelbooruPages = board == Board.safebooru || board.usesGelbooruSyntax;
+    final id = switch (board) {
+      _ when gelbooruPages =>
+        query['page'] == 'post' && query['s'] == 'view' ? query['id'] : null,
+      Board.danbooru ||
+      Board.e621 ||
+      Board.e926 ||
+      Board.mikubooru => after(['posts']),
+      // Sankaku's current `/posts/<id>` (often after a language such as
+      // `/en`) and older `/post/show/<id>` links.
+      Board.sankaku ||
+      Board.idolcomplex => after(['posts']) ?? after(['post', 'show']),
+      Board.konachan ||
+      Board.yandere ||
+      Board.sakugabooru => after(['post', 'show']),
+      Board.nanbooru => after(['post', 'view']),
+      Board.nozomi => after(['post'])?.replaceFirst(RegExp(r'\.html$'), ''),
+      // Derpibooru links images both as `/images/<id>` and as `/<id>`.
+      Board.derpibooru =>
+        after(['images']) ??
+            (path.length == 1 && _numericId.hasMatch(path.first)
+                ? path.first
+                : null),
+      Board.eshuushuu => after(['image']),
+      _ => null,
+    };
+    if (id != null) {
+      final valid = board.isSankakuFamily ? _opaqueId : _numericId;
+      return valid.hasMatch(id) ? PostLink(board, postId: id) : null;
+    }
+    final last = path.isEmpty ? '' : path.last.toLowerCase();
+    final String? search = switch (board) {
+      _ when gelbooruPages =>
+        query['page'] == 'post' && query['s'] == 'list' ? query['tags'] : null,
+      Board.danbooru ||
+      Board.e621 ||
+      Board.e926 ||
+      Board.sankaku ||
+      Board.idolcomplex => last == 'posts' ? query['tags'] : null,
+      Board.mikubooru => last == 'posts' ? query['query'] : null,
+      Board.konachan ||
+      Board.yandere ||
+      Board.sakugabooru => last == 'post' ? query['tags'] : null,
+      // Shimmie: `/post/list/<tags>/<page>`.
+      Board.nanbooru => after(['post', 'list']),
+      // Nozomi: `/tag/<tag>-<page>.html`.
+      Board.nozomi => after(['tag'])?.replaceFirst(RegExp(r'-\d+\.html$'), ''),
+      // Philomena separates tags with commas; tag names have spaces, which
+      // the app writes as underscores.
+      Board.derpibooru =>
+        last == 'search'
+            ? query['q']
+                  ?.split(',')
+                  .map((tag) => tag.trim().replaceAll(' ', '_'))
+                  .join(' ')
+            : null,
+      _ => null,
+    };
+    final tags = (search ?? '')
+        .split(RegExp(r'\s+'))
+        .where((tag) => tag.isNotEmpty && tag.toLowerCase() != 'all')
+        .take(20)
+        .toList(growable: false);
+    return tags.isEmpty ? null : PostLink(board, tags: tags);
+  }
+}

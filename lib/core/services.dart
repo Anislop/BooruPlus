@@ -813,24 +813,35 @@ class PostPool {
   );
 }
 
-/// A launcher icon shortcut: open favorites, or run a saved search.
+/// A launcher icon shortcut: open favorites, or run a saved search. Also
+/// carries a link opened with, or text shared to, the app (`link`), whose
+/// [url] is read with [PostLink.parse].
 class AppShortcut {
   const AppShortcut.favorites()
     : kind = 'favorites',
       id = 'favorites',
       label = 'Favorites',
       board = null,
-      tags = const [];
+      tags = const [],
+      url = null;
   const AppShortcut.search({
     required this.id,
     required this.label,
     required Board this.board,
     required this.tags,
-  }) : kind = 'search';
+  }) : kind = 'search',
+       url = null;
+  const AppShortcut.link(String this.url)
+    : kind = 'link',
+      id = 'link',
+      label = '',
+      board = null,
+      tags = const [];
 
   final String kind, id, label;
   final Board? board;
   final List<String> tags;
+  final String? url;
 
   Map<String, Object?> toMap() => {
     'id': id,
@@ -838,9 +849,14 @@ class AppShortcut {
     'kind': kind,
     'board': ?board?.name,
     if (tags.isNotEmpty) 'tags': tags.join(' '),
+    'url': ?url,
   };
 
   factory AppShortcut.fromMap(Map<dynamic, dynamic> map) {
+    final url = map['url'];
+    if (map['kind'] == 'link' && url is String && url.trim().isNotEmpty) {
+      return AppShortcut.link(url.trim());
+    }
     final board = Board.values.asNameMap()['${map['board']}'];
     final tags = '${map['tags'] ?? ''}'
         .split(RegExp(r'\s+'))
