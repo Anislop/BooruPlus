@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show PlatformException;
 
 import '../core/app_state.dart';
+import '../core/edition.dart';
 import '../core/models.dart';
 import '../core/services.dart';
 import '../core/updates.dart';
 import 'blocked_tags.dart';
 import 'media_viewer.dart' show postBrowserUrl;
+import 'ads.dart';
 import 'onboarding.dart';
+import 'premium_page.dart';
 import 'saved_posts.dart';
 import 'shorts_library.dart';
 import 'site_catalog.dart';
@@ -93,10 +96,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _settings = widget.state.settings;
     _measureCache();
-    _updates.installedVersion().then((version) {
-      if (mounted) setState(() => _installed = version);
-    });
+    if (!kPlayEdition) {
+      _updates.installedVersion().then((version) {
+        if (mounted) setState(() => _installed = version);
+      });
+    }
   }
+
+  /// Video qualities above the free limit (1080p, original) need Premium.
+  bool _qualityLocked(int quality) =>
+      !widget.state.unlocked(PremiumFeature.videoQuality) &&
+      (quality <= 0 || quality > FreeLimits.videoQuality);
 
   Future<void> _checkForUpdate() async {
     setState(() => _checkingUpdate = true);
@@ -493,8 +503,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final summary = await widget.state.importBackup(content);
       if (!mounted) return;
       setState(() => _settings = widget.state.settings);
+      final skipped = summary.skipped == 0
+          ? ''
+          : ' ${summary.skipped} saved post${summary.skipped == 1 ? '' : 's'} not available here ${summary.skipped == 1 ? 'was' : 'were'} left out.';
       _notify(
-        'Backup restored: ${summary.favorites} new favorite${summary.favorites == 1 ? '' : 's'}, ${summary.hidden} new hidden post${summary.hidden == 1 ? '' : 's'}.',
+        'Backup restored: ${summary.favorites} new favorite${summary.favorites == 1 ? '' : 's'}, ${summary.hidden} new hidden post${summary.hidden == 1 ? '' : 's'}.$skipped',
       );
     } on FormatException catch (error) {
       _notify(error.message);
@@ -511,22 +524,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required IconData icon,
     required String title,
     required String subtitle,
-  }) => Padding(
-    padding: const EdgeInsets.only(top: 8),
-    child: Material(
-      color: panel,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: SwitchListTile.adaptive(
-        value: value,
-        onChanged: _busy ? null : onChanged,
-        secondary: Icon(icon),
-        title: Text(title),
-        subtitle: Text(subtitle),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+    PremiumFeature? premium,
+  }) {
+    // A Premium setting stays off without Premium; switching it on shows
+    // what Premium includes instead.
+    final locked = premium != null && !widget.state.unlocked(premium);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Material(
+        color: panel,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: SwitchListTile.adaptive(
+          value: !locked && value,
+          onChanged: _busy
+              ? null
+              : locked
+              ? (_) => _openPremium()
+              : onChanged,
+          secondary: Icon(icon),
+          title: locked
+              ? Row(
+                  children: [
+                    Flexible(child: Text(title)),
+                    const SizedBox(width: 6),
+                    const PremiumLock(size: 16),
+                  ],
+                )
+              : Text(title),
+          subtitle: Text(subtitle),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+        ),
       ),
-    ),
-  );
+    );
+  }
+
+  Future<void> _openPremium() async {
+    await openPremium(context, widget.state);
+    if (mounted) setState(() {});
+  }
 
   /// A setting with a few choices, as a button group.
   Widget _choiceCard<T>({
@@ -537,6 +573,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String Function(T) label,
     required T selected,
     required ValueChanged<T> onChanged,
+    bool Function(T)? locked,
   }) => Padding(
     padding: const EdgeInsets.only(top: 8),
     child: Container(
@@ -570,12 +607,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               showSelectedIcon: false,
               segments: [
                 for (final value in values)
-                  ButtonSegment<T>(value: value, label: Text(label(value))),
+                  ButtonSegment<T>(
+                    value: value,
+                    label: Text(label(value)),
+                    icon: locked?.call(value) == true
+                        ? const Icon(Icons.lock_rounded, size: 14)
+                        : null,
+                  ),
               ],
               selected: {selected},
               onSelectionChanged: _busy
                   ? null
-                  : (choice) => onChanged(choice.single),
+                  : (choice) => locked?.call(choice.single) == true
+                        ? _openPremium()
+                        : onChanged(choice.single),
             ),
           ),
           const SizedBox(height: 8),
@@ -819,6 +864,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           letterSpacing: -.7,
                         ),
                       ),
+                      if (kPlayEdition) ...[
+                        const SectionLabel('Premium'),
+                        _PremiumCard(state: widget.state, onTap: _openPremium),
+                      ],
                       const SectionLabel('Appearance'),
                       _choiceCard<ThemeChoice>(
                         icon: Icons.palette_outlined,
@@ -834,6 +883,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: (choice) => setState(
                           () => _settings = _settings.copyWith(theme: choice),
                         ),
+                        locked: (choice) =>
+                            choice == ThemeChoice.amoled &&
+                            !widget.state.unlocked(PremiumFeature.amoled),
                       ),
                       const SectionLabel('Media grid'),
                       Padding(
@@ -844,16 +896,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           clipBehavior: Clip.antiAlias,
                           child: Column(
                             children: [
-                              _blurSwitch(
-                                'Blur explicit media',
-                                'Obscure explicit previews, viewer media, and booruShorts videos until revealed.',
-                                true,
-                              ),
-                              _blurSwitch(
-                                'Blur questionable media',
-                                'Obscure questionable previews, viewer media, and booruShorts videos until revealed.',
-                                false,
-                              ),
+                              // The Play edition shows general posts only.
+                              if (!kPlayEdition) ...[
+                                _blurSwitch(
+                                  'Blur explicit media',
+                                  'Obscure explicit previews, viewer media, and booruShorts videos until revealed.',
+                                  true,
+                                ),
+                                _blurSwitch(
+                                  'Blur questionable media',
+                                  'Obscure questionable previews, viewer media, and booruShorts videos until revealed.',
+                                  false,
+                                ),
+                              ],
                               ListTile(
                                 leading: const Icon(
                                   Icons.visibility_off_outlined,
@@ -1089,6 +1144,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                         icon: Icons.view_sidebar_outlined,
+                        premium: PremiumFeature.classicDrawer,
                         title: 'Classic side menu',
                         subtitle: 'Use the original side menu layout with every entry listed above the websites.',
                       ),
@@ -1222,17 +1278,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               underline: const SizedBox.shrink(),
                               onChanged: _busy
                                   ? null
-                                  : (value) => setState(
-                                      () => _settings = _settings.copyWith(
-                                        videoQuality: value ?? 0,
-                                      ),
-                                    ),
+                                  : (value) => _qualityLocked(value ?? 0)
+                                        ? _openPremium()
+                                        : setState(
+                                            () =>
+                                                _settings = _settings.copyWith(
+                                                  videoQuality: value ?? 0,
+                                                ),
+                                          ),
                               items: [
                                 for (final quality in _videoQualities)
                                   DropdownMenuItem(
                                     value: quality,
-                                    child: Text(
-                                      quality == 0 ? 'Original' : '${quality}p',
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          quality == 0
+                                              ? 'Original'
+                                              : '${quality}p',
+                                        ),
+                                        if (_qualityLocked(quality)) ...[
+                                          const SizedBox(width: 4),
+                                          const PremiumLock(size: 14),
+                                        ],
+                                      ],
                                     ),
                                   ),
                               ],
@@ -1393,23 +1463,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
-                      _choiceCard<ShortsContent>(
-                        icon: Icons.shield_outlined,
-                        title: 'Content',
-                        subtitle: switch (_settings.shortsContent) {
-                          ShortsContent.all => 'booruShorts shows every rating your feed filter allows.',
-                          ShortsContent.noExplicit => 'Leaves explicit videos out of booruShorts, and websites without ratings.',
-                          ShortsContent.safeOnly => 'Leaves explicit and suggestive (questionable) videos out of booruShorts, and websites without ratings.',
-                        },
-                        values: ShortsContent.values,
-                        label: (value) => value.label,
-                        selected: _settings.shortsContent,
-                        onChanged: (value) => setState(
-                          () => _settings = _settings.copyWith(
-                            shortsContent: value,
+                      // The Play edition keeps booruShorts to safe videos.
+                      if (!kPlayEdition)
+                        _choiceCard<ShortsContent>(
+                          icon: Icons.shield_outlined,
+                          title: 'Content',
+                          subtitle: switch (_settings.shortsContent) {
+                            ShortsContent.all => 'booruShorts shows every rating your feed filter allows.',
+                            ShortsContent.noExplicit => 'Leaves explicit videos out of booruShorts, and websites without ratings.',
+                            ShortsContent.safeOnly => 'Leaves explicit and suggestive (questionable) videos out of booruShorts, and websites without ratings.',
+                          },
+                          values: ShortsContent.values,
+                          label: (value) => value.label,
+                          selected: _settings.shortsContent,
+                          onChanged: (value) => setState(
+                            () => _settings = _settings.copyWith(
+                              shortsContent: value,
+                            ),
                           ),
                         ),
-                      ),
                       const SizedBox(height: 8),
                       _switchCard(
                         value: _settings.shortsMuted,
@@ -1789,9 +1861,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           () => _settings = _settings.copyWith(noShare: value),
                         ),
                         icon: Icons.share_outlined,
+                        premium: PremiumFeature.noShare,
                         title: 'No share',
                         subtitle: 'Hide all share buttons to not accidentally share something to your boss.',
                       ),
+                      if (kPlayEdition && Ads.instance.privacyOptionsRequired)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Material(
+                            color: panel,
+                            borderRadius: BorderRadius.circular(16),
+                            clipBehavior: Clip.antiAlias,
+                            child: ListTile(
+                              leading: const Icon(Icons.ads_click_rounded),
+                              title: const Text('Ad privacy choices'),
+                              subtitle: const Text(
+                                'Review the consent you gave for ads.',
+                              ),
+                              onTap: Ads.instance.showPrivacyOptions,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
+                            ),
+                          ),
+                        ),
                       const SectionLabel('Backup'),
                       Container(
                         padding: const EdgeInsets.all(16),
@@ -1803,7 +1896,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links. Import favorites reads a LoliSnatcher database backup (store.db), a Boorusama bookmarks export, or any text file of post links.',
+                              kPlayEdition
+                                  ? "Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links. Import favorites reads another booru app's favorites database or bookmarks export, or any text file of post links."
+                                  : 'Save your settings, saved searches, blocked tags, favorites, and hidden posts to a file, or restore them from one. Website credentials are never included. Favorites can also be exported as post links. Import favorites reads a LoliSnatcher database backup (store.db), a Boorusama bookmarks export, or any text file of post links.',
                               style: TextStyle(
                                 color: ink(.54),
                                 fontSize: 12,
@@ -1866,52 +1961,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ],
                         ),
                       ),
-                      const SectionLabel('Updates'),
-                      Material(
-                        color: panel,
-                        borderRadius: BorderRadius.circular(16),
-                        clipBehavior: Clip.antiAlias,
-                        child: ListTile(
-                          leading: const Icon(Icons.info_outline_rounded),
-                          title: Text(
-                            _installed == null
-                                ? 'BooruPlus'
-                                : 'BooruPlus ${_installed!.label}',
-                          ),
-                          subtitle: const Text(
-                            'Updates are the uncensored edition from GitHub releases.',
-                          ),
-                          trailing: TextButton(
-                            onPressed: _checkingUpdate || _busy
-                                ? null
-                                : _checkForUpdate,
-                            child: Text(
-                              _checkingUpdate ? 'Checking…' : 'Check now',
+                      // Play updates the Play edition.
+                      if (!kPlayEdition) ...[
+                        const SectionLabel('Updates'),
+                        Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: ListTile(
+                            leading: const Icon(Icons.info_outline_rounded),
+                            title: Text(
+                              _installed == null
+                                  ? 'BooruPlus'
+                                  : 'BooruPlus ${_installed!.label}',
+                            ),
+                            subtitle: const Text(
+                              'Updates are the uncensored edition from GitHub releases.',
+                            ),
+                            trailing: TextButton(
+                              onPressed: _checkingUpdate || _busy
+                                  ? null
+                                  : _checkForUpdate,
+                              child: Text(
+                                _checkingUpdate ? 'Checking…' : 'Check now',
+                              ),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
                             ),
                           ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                          ),
                         ),
-                      ),
-                      _switchCard(
-                        value: _settings.checkUpdates,
-                        onChanged: (value) => setState(
-                          () => _settings = _settings.copyWith(
-                            checkUpdates: value,
+                        _switchCard(
+                          value: _settings.checkUpdates,
+                          onChanged: (value) => setState(
+                            () => _settings = _settings.copyWith(
+                              checkUpdates: value,
+                            ),
                           ),
+                          icon: Icons.system_update_outlined,
+                          title: 'Check for updates at launch',
+                          subtitle: 'Look for a newer release when BooruPlus starts and offer to install it.',
                         ),
-                        icon: Icons.system_update_outlined,
-                        title: 'Check for updates at launch',
-                        subtitle: 'Look for a newer release when BooruPlus starts and offer to install it.',
-                      ),
+                      ],
                       const SectionLabel('Website connections'),
                       Text(
                         'Manage credentials stored on this device.',
                         style: TextStyle(color: ink(.54), fontSize: 13),
                       ),
-                      for (final board in Board.values.where(
-                        (b) => b.supportsAuth,
+                      for (final board in listedBoards.where(
+                        (b) =>
+                            b.supportsAuth &&
+                            widget.state.policy.allowsSignIn(b),
                       ))
                         FutureBuilder<Credentials?>(
                           future: widget.state.credentialsFor(board),
@@ -2005,4 +2105,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
   }
+}
+
+/// Settings' Premium entry (Play edition): what it is and whether it is
+/// owned; opens the Premium page.
+class _PremiumCard extends StatelessWidget {
+  const _PremiumCard({required this.state, required this.onTap});
+  final AppState state;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: state.premium,
+    builder: (context, _) {
+      final owned = state.premiumActive;
+      return Material(
+        color: panel,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: ListTile(
+          key: const ValueKey('settings_premium'),
+          leading: const Icon(Icons.workspace_premium_rounded, color: accent),
+          title: Text(owned ? 'Premium is active' : 'BooruPlus Premium'),
+          subtitle: Text(
+            owned ? 'Thanks for your support. Everything is unlocked.' : 'No ads, more websites, faster downloads, and more. One-time purchase.',
+          ),
+          trailing: const Icon(Icons.chevron_right_rounded),
+          onTap: onTap,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+        ),
+      );
+    },
+  );
 }

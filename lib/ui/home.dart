@@ -8,12 +8,15 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
+import '../core/edition.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'ads.dart';
 import 'downloads.dart';
 import 'media_viewer.dart';
 import 'media_image.dart';
 import 'multi_search.dart';
+import 'premium_page.dart';
 import 'search_guide.dart';
 import 'settings.dart';
 import 'shorts.dart';
@@ -226,6 +229,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
     final board = link.board;
+    if (!state.policy.offers(board)) {
+      _linkNotice('${board.label} is not available in this edition.');
+      return;
+    }
+    if (state.boardLocked(board)) {
+      _linkNotice('${board.label} is part of Premium.');
+      return;
+    }
     final searchable = await state.searchableBoards(among: [board]);
     if (!mounted || generation != _linkGeneration) return;
     if (searchable.isEmpty) {
@@ -1253,6 +1264,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     bool hierarchical,
     bool hidePostTags,
   ) {
+    // The Play edition without Premium places an ad tile among the posts;
+    // grid positions are slots, which [AdLayout] maps to posts and ads.
+    final ads = showsAds(state) ? const AdLayout(Ads.feedEvery) : AdLayout.none;
+    final count = ads.slots(posts.length);
+    Widget slot(int index) => ads.isAd(index)
+        ? FeedAdTile(
+            key: ValueKey('ad:${board.name}:${ads.adIndex(index)}'),
+            state: state,
+          )
+        : _tile(
+            context,
+            state,
+            posts,
+            board,
+            ads.postIndex(index),
+            hidePostTags,
+          );
     if (!hierarchical) {
       return SliverGrid(
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1262,18 +1290,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           mainAxisSpacing: 8,
         ),
         delegate: SliverChildBuilderDelegate(
-          (context, index) =>
-              _tile(context, state, posts, board, index, hidePostTags),
-          childCount: posts.length,
+          (context, index) => slot(index),
+          childCount: count,
         ),
       );
     }
     return SliverList(
       delegate: SliverChildBuilderDelegate((context, rowIndex) {
         final start = rowIndex * columns;
-        final end = (start + columns).clamp(0, posts.length).toInt();
-        final row = posts.sublist(start, end);
-        final aspects = row.map((post) {
+        final end = (start + columns).clamp(0, count).toInt();
+        final row = [for (var i = start; i < end; i++) i];
+        final aspects = row.map((index) {
+          // An ad takes a square.
+          if (ads.isAd(index)) return 1.0;
+          final post = posts[ads.postIndex(index)];
           final width = post.width > 0 ? post.width : 1;
           final height = post.height > 0 ? post.height : 1;
           return (width / height).clamp(.5, 3.0).toDouble();
@@ -1296,21 +1326,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       padding: EdgeInsets.only(
                         right: i + 1 == row.length ? 0 : 8,
                       ),
-                      child: _tile(
-                        context,
-                        state,
-                        posts,
-                        board,
-                        start + i,
-                        hidePostTags,
-                      ),
+                      child: slot(start + i),
                     ),
                   ),
               ],
             ),
           ),
         );
-      }, childCount: (posts.length / columns).ceil()),
+      }, childCount: (count / columns).ceil()),
     );
   }
 
@@ -1366,23 +1389,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             ),
                           ),
                         ),
-                        // Compact, so the icons sit close together.
-                        IconButton(
-                          key: const ValueKey('drawer_safe_mode'),
-                          tooltip: state.settings.safeMode
-                              ? 'Safe mode is on · turn off'
-                              : 'Safe mode: safe posts only, blurred',
-                          visualDensity: VisualDensity.compact,
-                          isSelected: state.settings.safeMode,
-                          color: state.settings.safeMode ? accent : ink(.70),
-                          icon: Icon(
-                            state.settings.safeMode
-                                ? Icons.shield_rounded
-                                : Icons.shield_outlined,
+                        // Compact, so the icons sit close together. The
+                        // Play edition's content rules are fixed.
+                        if (!kPlayEdition)
+                          IconButton(
+                            key: const ValueKey('drawer_safe_mode'),
+                            tooltip: state.settings.safeMode
+                                ? 'Safe mode is on · turn off'
+                                : 'Safe mode: safe posts only, blurred',
+                            visualDensity: VisualDensity.compact,
+                            isSelected: state.settings.safeMode,
+                            color: state.settings.safeMode ? accent : ink(.70),
+                            icon: Icon(
+                              state.settings.safeMode
+                                  ? Icons.shield_rounded
+                                  : Icons.shield_outlined,
+                            ),
+                            onPressed: () =>
+                                state.setSafeMode(!state.settings.safeMode),
                           ),
-                          onPressed: () =>
-                              state.setSafeMode(!state.settings.safeMode),
-                        ),
                         IconButton(
                           tooltip: 'Learn to search',
                           visualDensity: VisualDensity.compact,
@@ -1519,11 +1544,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 title: Text(appearanceFor(option).name),
                                 trailing: option == board
                                     ? const Icon(Icons.check_rounded, size: 20)
+                                    : state.boardLocked(option)
+                                    ? const PremiumLock()
                                     : _BoardIssueBadge(
                                         state.boardIssue(option),
                                       ),
                                 onTap: option == board
                                     ? null
+                                    : state.boardLocked(option)
+                                    ? () => openPremium(context, state)
                                     : () => _chooseBoardFromDrawer(option),
                               ),
                         ],
@@ -1595,17 +1624,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     value: state.settings.incognito,
                     onChanged: state.setIncognito,
                   ),
-                  SwitchListTile(
-                    secondary: Icon(
-                      state.settings.safeMode
-                          ? Icons.shield_rounded
-                          : Icons.shield_outlined,
+                  if (!kPlayEdition)
+                    SwitchListTile(
+                      secondary: Icon(
+                        state.settings.safeMode
+                            ? Icons.shield_rounded
+                            : Icons.shield_outlined,
+                      ),
+                      title: const Text('Safe mode'),
+                      subtitle: const Text('Safe posts only, others blurred'),
+                      value: state.settings.safeMode,
+                      onChanged: state.setSafeMode,
                     ),
-                    title: const Text('Safe mode'),
-                    subtitle: const Text('Safe posts only, others blurred'),
-                    value: state.settings.safeMode,
-                    onChanged: state.setSafeMode,
-                  ),
                   ListTile(
                     leading: const Icon(Icons.favorite_rounded),
                     title: const Text('Favorites'),
@@ -1688,9 +1718,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         selected: option == board,
                         leading: SiteLogo(option, size: 32),
                         title: Text(appearanceFor(option).name),
-                        trailing: _BoardIssueBadge(state.boardIssue(option)),
+                        trailing: state.boardLocked(option)
+                            ? const PremiumLock()
+                            : _BoardIssueBadge(state.boardIssue(option)),
                         onTap: option == board
                             ? null
+                            : state.boardLocked(option)
+                            ? () => openPremium(context, state)
                             : () async {
                                 Navigator.pop(context);
                                 _searchHistory.clear();
@@ -1768,7 +1802,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       selectedRatings: state.selectedRatings,
       onFilter: _chooseFilter,
       onDate: _pickDate,
-      onRatings: _chooseRatings,
+      onRatings: kPlayEdition ? null : _chooseRatings,
     );
     // With the keyboard up, back only closes it rather than leaving the
     // search.
@@ -2391,6 +2425,9 @@ class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
     _save();
   }
 
+  bool get _reorderLocked =>
+      !widget.state.unlocked(PremiumFeature.reorderWebsites);
+
   @override
   Widget build(BuildContext context) {
     final visibleCount = _order.length - _hidden.length;
@@ -2405,7 +2442,11 @@ class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
             ListTile(
               leading: const Icon(Icons.tune_rounded),
               title: const Text('Websites'),
-              subtitle: const Text('Drag to reorder. Switch off to hide.'),
+              subtitle: Text(
+                _reorderLocked
+                    ? 'Switch off to hide. Reordering is part of Premium.'
+                    : 'Drag to reorder. Switch off to hide.',
+              ),
               trailing: TextButton(
                 onPressed: _reset,
                 child: const Text('Reset'),
@@ -2422,13 +2463,22 @@ class _BoardLayoutSheetState extends State<_BoardLayoutSheet> {
                   final visible = !_hidden.contains(board);
                   return ListTile(
                     key: ValueKey(board),
-                    leading: ReorderableDragStartListener(
-                      index: index,
-                      child: const Padding(
-                        padding: EdgeInsets.all(4),
-                        child: Icon(Icons.drag_handle_rounded),
-                      ),
-                    ),
+                    leading: _reorderLocked
+                        ? IconButton(
+                            tooltip: 'Reorder with Premium',
+                            icon: const Icon(Icons.lock_rounded, color: accent),
+                            onPressed: () async {
+                              await openPremium(context, widget.state);
+                              if (mounted) setState(() {});
+                            },
+                          )
+                        : ReorderableDragStartListener(
+                            index: index,
+                            child: const Padding(
+                              padding: EdgeInsets.all(4),
+                              child: Icon(Icons.drag_handle_rounded),
+                            ),
+                          ),
                     title: Row(
                       children: [
                         Opacity(
@@ -3493,7 +3543,9 @@ class FilterBar extends StatelessWidget {
   final List<Rating> selectedRatings;
   final ValueChanged<String> onFilter;
   final VoidCallback onDate;
-  final VoidCallback onRatings;
+
+  /// Null hides the ratings chip (the Play edition's rating is fixed).
+  final VoidCallback? onRatings;
 
   @override
   Widget build(BuildContext context) {
@@ -3544,18 +3596,22 @@ class FilterBar extends StatelessWidget {
               ),
               onPressed: onDate,
             ),
-            const SizedBox(width: 6),
-            ActionChip(
-              avatar: const Icon(Icons.shield_outlined, size: 16),
-              label: Text(
-                selectedRatings.length == Rating.values.length
-                    ? 'Ratings'
-                    : selectedRatings.isEmpty
-                    ? 'No ratings'
-                    : selectedRatings.map((rating) => rating.label).join(', '),
+            if (onRatings != null) ...[
+              const SizedBox(width: 6),
+              ActionChip(
+                avatar: const Icon(Icons.shield_outlined, size: 16),
+                label: Text(
+                  selectedRatings.length == Rating.values.length
+                      ? 'Ratings'
+                      : selectedRatings.isEmpty
+                      ? 'No ratings'
+                      : selectedRatings
+                            .map((rating) => rating.label)
+                            .join(', '),
+                ),
+                onPressed: onRatings,
               ),
-              onPressed: onRatings,
-            ),
+            ],
           ],
         ),
       ),

@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_state.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'premium_page.dart';
 import 'theme.dart';
 import 'site_catalog.dart';
 
@@ -18,6 +19,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Board _selected = Board.safebooru;
   bool _busy = false;
   String? _error;
+
+  /// Whether [board] offers its optional sign-in in this edition.
+  bool _signIn(Board board) =>
+      board.supportsSignIn && widget.state.policy.allowsSignIn(board);
+
   Future<void> _signInFirst() async {
     final ok = await showAuthentication(context, widget.state, _selected);
     if (ok && mounted) await _continue();
@@ -99,6 +105,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       borderRadius: BorderRadius.circular(18),
                       onTap: _busy
                           ? null
+                          : widget.state.boardLocked(board)
+                          ? () async {
+                              await openPremium(context, widget.state);
+                              if (mounted) setState(() {});
+                            }
                           : () => setState(() => _selected = board),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
@@ -122,9 +133,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                   ),
                                   const SizedBox(height: 3),
                                   Text(
-                                    board.requiresAuth
+                                    widget.state.boardLocked(board)
+                                        ? '${board.host} · Premium'
+                                        : board.requiresAuth
                                         ? 'API key required'
-                                        : board.supportsSignIn
+                                        : _signIn(board)
                                         ? '${board.host} · sign-in optional'
                                         : board.host,
                                     style: TextStyle(
@@ -144,12 +157,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                                   color: ink(.38),
                                 ),
                               ),
-                            Icon(
-                              _selected == board
-                                  ? Icons.radio_button_checked
-                                  : Icons.radio_button_off,
-                              color: _selected == board ? accent : ink(.30),
-                            ),
+                            if (widget.state.boardLocked(board))
+                              const PremiumLock(size: 22)
+                            else
+                              Icon(
+                                _selected == board
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: _selected == board ? accent : ink(.30),
+                              ),
                           ],
                         ),
                       ),
@@ -185,7 +201,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       )
                     : const Icon(Icons.arrow_forward),
               ),
-              if (_selected.supportsSignIn)
+              if (_signIn(_selected))
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
                   child: TextButton.icon(

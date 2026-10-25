@@ -14,6 +14,7 @@ import 'downloads.dart';
 import 'home.dart';
 import 'media_image.dart';
 import 'multi_search.dart';
+import 'premium_page.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
 
@@ -2199,21 +2200,44 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       if (original > 0 && variant.quality >= original) continue;
       if (tiers.add(variant.quality)) options.add(variant);
     }
+    // Without Premium, streams above 720p (and an original above it, or
+    // of unknown size) are locked.
+    bool locked(int quality) {
+      if (widget.state.unlocked(PremiumFeature.videoQuality)) return false;
+      final tier = quality > 0 ? quality : original;
+      return tier <= 0 || tier > FreeLimits.videoQuality;
+    }
+
+    Widget label(String text, int quality) => locked(quality)
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(text),
+              const SizedBox(width: 6),
+              const PremiumLock(size: 16),
+            ],
+          )
+        : Text(text);
     return PopupMenuButton<int>(
       tooltip: 'Video quality',
-      onSelected: _selectQuality,
+      onSelected: (quality) => locked(quality)
+          ? openPremium(context, widget.state)
+          : _selectQuality(quality),
       icon: const Icon(Icons.high_quality_outlined),
       itemBuilder: (_) => [
         CheckedPopupMenuItem(
           value: 0,
           checked: _streamQuality == 0,
-          child: Text(original > 0 ? 'Original · ${original}p' : 'Original'),
+          child: label(
+            original > 0 ? 'Original · ${original}p' : 'Original',
+            0,
+          ),
         ),
         for (final variant in options)
           CheckedPopupMenuItem(
             value: variant.quality,
             checked: _streamQuality == variant.quality,
-            child: Text(variant.label),
+            child: label(variant.label, variant.quality),
           ),
       ],
     );

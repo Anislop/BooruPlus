@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'core/app_state.dart';
+import 'core/edition.dart';
 import 'core/models.dart';
+import 'core/play_billing.dart';
 import 'core/services.dart';
 import 'core/updates.dart';
+import 'ui/ads.dart';
 import 'ui/home.dart';
 import 'ui/onboarding.dart';
 import 'ui/theme.dart';
@@ -13,7 +18,11 @@ import 'ui/update_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(BooruPlusApp(state: AppState()));
+  runApp(
+    BooruPlusApp(
+      state: AppState(premium: kPlayEdition ? PlayPremiumService() : null),
+    ),
+  );
 }
 
 class BooruPlusApp extends StatefulWidget {
@@ -26,8 +35,9 @@ class BooruPlusApp extends StatefulWidget {
   final AppState state;
   final DeviceService? device;
 
-  /// Checks for a newer release at launch. Without one, release builds use
-  /// [UpdateService] and other builds do not check.
+  /// Checks for a newer release at launch. Without one, Full edition
+  /// release builds use [UpdateService]; other builds do not check, and Play
+  /// updates the Play edition.
   final UpdateService? updates;
   @override
   State<BooruPlusApp> createState() => _BooruPlusAppState();
@@ -41,7 +51,8 @@ class _BooruPlusAppState extends State<BooruPlusApp>
 
   late final DeviceService _device = widget.device ?? DeviceService();
   late final UpdateService? _updates =
-      widget.updates ?? (kReleaseMode ? UpdateService() : null);
+      widget.updates ??
+      (kReleaseMode && !kPlayEdition ? UpdateService() : null);
   // Dialogs shown from here (the update offer) need the app's navigator.
   final _navigator = GlobalKey<NavigatorState>();
   // A newer release found at launch, until it is offered.
@@ -69,12 +80,14 @@ class _BooruPlusAppState extends State<BooruPlusApp>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.state.addListener(_applySettings);
+    widget.state.premium.addListener(_premiumChanged);
     _initialize();
   }
 
   @override
   void dispose() {
     widget.state.removeListener(_applySettings);
+    widget.state.premium.removeListener(_premiumChanged);
     WidgetsBinding.instance.removeObserver(this);
     _lockedOut.dispose();
     super.dispose();
@@ -88,10 +101,20 @@ class _BooruPlusAppState extends State<BooruPlusApp>
   }
 
   Future<void> _initialize() async {
+    // Premium as last known first, so loaded settings keep what it allows.
+    await widget.state.premium.start();
     await Future.wait([widget.state.initialize(), loadSiteCatalog()]);
     if (!mounted) return;
     _syncLockedOut();
     setState(() {});
+    _premiumChanged();
+  }
+
+  /// Play edition ads: started without Premium (after the consent form).
+  /// Once Premium is bought the ad widgets leave and release their ads.
+  void _premiumChanged() {
+    if (!kPlayEdition || !widget.state.initialized) return;
+    if (!widget.state.premiumActive) unawaited(Ads.instance.start());
   }
 
   /// Looks for a newer release once settings load, unless turned off in

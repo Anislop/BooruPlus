@@ -4,6 +4,7 @@ import '../core/app_state.dart';
 import '../core/models.dart';
 import 'home.dart';
 import 'media_viewer.dart';
+import 'premium_page.dart';
 import 'settings.dart';
 import 'site_catalog.dart';
 import 'theme.dart';
@@ -164,6 +165,8 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 selected: count == current,
                 trailing: count == current
                     ? const Icon(Icons.check_rounded)
+                    : _locked(count)
+                    ? const PremiumLock()
                     : null,
                 onTap: () => Navigator.pop(context, count),
               ),
@@ -172,8 +175,18 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         ),
       ),
     );
-    if (value != null) await _state.setDownloadConcurrency(value);
+    if (value == null) return;
+    if (_locked(value)) {
+      if (mounted) await openPremium(context, _state);
+      return;
+    }
+    await _state.setDownloadConcurrency(value);
   }
+
+  /// More than one download at once needs Premium.
+  bool _locked(int count) =>
+      count > FreeLimits.downloadConcurrency &&
+      !_state.unlocked(PremiumFeature.downloads);
 
   void _open(List<SavedPost> posts, int index) => Navigator.push(
     context,

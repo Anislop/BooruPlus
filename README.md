@@ -289,9 +289,11 @@ Download `booruplus-<version>-<build>-uncensored.apk` from [Releases](https://gi
 git clone https://github.com/Anislop/BooruPlus.git
 cd BooruPlus
 flutter pub get
-flutter run                # on a connected device or emulator
-flutter build apk --release
+flutter run --flavor full  # on a connected device or emulator
+flutter build apk --release --flavor full
 ```
+
+The `full` flavor is the GitHub edition (`com.booruplus.app`). The `play` flavor builds the Google Play edition (`com.booruplus.play`): general-audience websites only, with ads and a one-time Premium purchase. Its release builds need the Play upload key in `android/key.play.properties`.
 
 **Checks**
 
@@ -306,7 +308,8 @@ Live integration tests (`integration_test/`) need a real Android device with net
 
 ## Privacy
 
-- No accounts, analytics, or ads. The app talks only to the websites you choose, and to GitHub to look for updates (you can turn that off in Settings).
+- The GitHub edition has no accounts, analytics, or ads. The app talks only to the websites you choose, and to GitHub to look for updates (you can turn that off in Settings).
+- The Google Play edition shows non-personalized Google AdMob ads (after asking for consent where the law requires it) until Premium is bought, and buys Premium through Google Play. It does not check for updates itself.
 - booruShorts learns on your phone. Turn **Personalize For you** off, or use incognito, to stop it.
 - API keys and sign-in sessions live in Android's encrypted storage and are never written to backups. Sankaku passwords are exchanged for a session and not stored.
 - **We do not send or store anything about you to the websites and servers.** Check the source code to see.
@@ -323,7 +326,7 @@ Live integration tests (`integration_test/`) need a real Android device with net
 - **Play Store?**
     - Coming soon.
 - **Is this all free?**
-    - Yes. Will always be. You can fork it, you can do whatever you want as long as you follow our license. We will not add ads at all (it's open source anyways)
+    - Yes. The GitHub edition is free and will always be, with no ads. You can fork it, you can do whatever you want as long as you follow our license. The Google Play edition is a separate, general-audience app with ads and an optional one-time Premium purchase.
 
 ---
 

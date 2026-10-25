@@ -169,6 +169,12 @@ class MainActivity : FlutterActivity() {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/platform")
             .also { it.setMethodCallHandler(::handle) }
         downloadChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "booruplus/downloads")
+        Edition.attach(this, flutterEngine)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        Edition.detach(flutterEngine)
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -201,6 +207,17 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
+        // The edition's boards only, whatever Dart asks for: a board left
+        // out of this build is refused before any request.
+        val board = (call.arguments as? Map<*, *>)?.get("board") as? String
+        if (board != null && Edition.boards?.contains(board) == false) {
+            result.error("INVALID_BOARD", "Unsupported imageboard", null)
+            return
+        }
+        if (Edition.PLAY && call.method in PLAY_REFUSED) {
+            result.error("UNAVAILABLE", "Not available in this edition", null)
+            return
+        }
         when (call.method) {
             "fetch" -> fetch(call, result)
             "autocomplete" -> autocomplete(call, result)
@@ -252,7 +269,7 @@ class MainActivity : FlutterActivity() {
             }
             "appVersion" -> {
                 val info = installedPackage()
-                result.success(mapOf("name" to (info.versionName ?: ""), "build" to versionCode(info)))
+                result.success(mapOf("name" to (info.versionName ?: ""), "build" to versionCode(info), "edition" to BuildConfig.FLAVOR))
             }
             "installUpdate" -> installUpdate(call, result)
             else -> result.notImplemented()
@@ -1053,6 +1070,8 @@ class MainActivity : FlutterActivity() {
         window: Int,
         cursorKey: String,
     ): List<BoardImage> {
+        // The Play edition reads konachan.net, the safe-mode mirror, only.
+        if (Edition.PLAY) return fetchWindow(konachanNet, "konachan", tags, page, limit, window, cursorKey)
         val safeFallback = konachanFallbackAllowed(tags)
         try {
             val primary = fetchWindow(konachanCom, "konachan", tags, page, limit, window, cursorKey)
@@ -1922,7 +1941,9 @@ class MainActivity : FlutterActivity() {
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         // GitHub release downloads redirect to its asset storage.
         private fun isUpdateHost(host: String): Boolean = host == "github.com" || host.endsWith(".githubusercontent.com")
-        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST, "realbooru" to RealbooruApi.HOST, "derpibooru" to DerpibooruApi.HOST)
+        // Optional sign-in reaches more content, and Play updates the app.
+        private val PLAY_REFUSED = setOf("signIn", "refreshSignIn", "installUpdate")
+        private val HOSTS = mapOf("rule34" to "rule34.xxx", "e621" to "e621.net", "konachan" to if (Edition.PLAY) "konachan.net" else "konachan.com", "yandere" to "yande.re", "danbooru" to "danbooru.donmai.us", "safebooru" to "safebooru.org", "gelbooru" to "gelbooru.com", "e926" to "e926.net", "sankaku" to SankakuApi.SITE_HOST, "idolcomplex" to SankakuApi.IDOL_SITE_HOST, "tbib" to Gelbooru02Api.TBIB_HOST, "aibooru" to AiBooruApi.HOST, "nozomi" to NozomiApi.SITE_HOST, "sakugabooru" to SakugabooruApi.HOST, "xbooru" to Gelbooru02Api.XBOORU_HOST, "mspabooru" to Gelbooru02Api.MSPABOORU_HOST, "eshuushuu" to EShuushuuApi.HOST, "mikubooru" to HybooruApi.HOST, "nanbooru" to ShimmieApi.HOST, "realbooru" to RealbooruApi.HOST, "derpibooru" to DerpibooruApi.HOST)
         private fun isGelbooruHost(host: String): Boolean = host == "gelbooru.com" || host.endsWith(".gelbooru.com")
     }
 }

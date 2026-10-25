@@ -262,6 +262,8 @@ class DownloadQueue extends ChangeNotifier {
     for (final record in saved) {
       final identity = record.saved.identity;
       if (_byIdentity.containsKey(identity)) continue;
+      // A download the edition does not allow never starts.
+      if (!_app._policy.allowsSaved(record.saved)) continue;
       final task = DownloadTask._(record.saved, record.addedAt)
         .._status = record.failed
             ? DownloadStatus.failed

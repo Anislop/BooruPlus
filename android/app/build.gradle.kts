@@ -15,6 +15,24 @@ val keystoreProperties =
     }
 val hasReleaseKey = keystoreProperties.getProperty("storeFile") != null
 
+// The Play edition's upload key, from android/key.play.properties (same
+// fields, never committed). Play release builds fail without it rather
+// than fall back to the debug key; setting the Gradle property
+// playDebugSigning=true (for example ORG_GRADLE_PROJECT_playDebugSigning)
+// signs a local Play release with the debug key for testing only.
+val playKeystoreProperties =
+    Properties().apply {
+        val file = rootProject.file("key.play.properties")
+        if (file.exists()) file.inputStream().use { load(it) }
+    }
+val hasPlayKey = playKeystoreProperties.getProperty("storeFile") != null
+val playDebugSigning = (findProperty("playDebugSigning") as String?) == "true"
+
+// Google's sample AdMob app ID unless the build passes the real one
+// (Gradle property admobAppId). The Full edition never starts the ads SDK
+// but still declares an ID, which the SDK checks when the process starts.
+val testAdmobAppId = "ca-app-pub-3940256099942544~3347511713"
+
 android {
     namespace = "com.booruplus.app"
     compileSdk = flutter.compileSdkVersion
@@ -40,6 +58,32 @@ android {
     }
     sourceSets["main"].res.srcDir(launcherResDir)
     tasks.named("preBuild").configure { dependsOn(copyLauncherIcon) }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    // Two editions from one source tree: "full" (com.booruplus.app, GitHub
+    // releases, every website and the updater) and "play" (Google Play,
+    // its own application ID, fixed content policy, ads and Premium).
+    // Flutter passes the flavor to Dart as FLUTTER_APP_FLAVOR (see
+    // lib/core/edition.dart); src/full and src/play hold each edition's
+    // manifest entries and native code.
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("full") {
+            dimension = "distribution"
+            isDefault = true
+            applicationId = "com.booruplus.app"
+            manifestPlaceholders["admobAppId"] = testAdmobAppId
+        }
+        create("play") {
+            dimension = "distribution"
+            applicationId = "com.booruplus.play"
+            manifestPlaceholders["admobAppId"] =
+                (findProperty("admobAppId") as String?) ?: testAdmobAppId
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -72,14 +116,43 @@ android {
                 keyPassword = keystoreProperties.getProperty("keyPassword")
             }
         }
+        if (hasPlayKey) {
+            create("playRelease") {
+                storeFile = file(playKeystoreProperties.getProperty("storeFile"))
+                storePassword = playKeystoreProperties.getProperty("storePassword")
+                keyAlias = playKeystoreProperties.getProperty("keyAlias")
+                keyPassword = playKeystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    // Release signing per edition; debug builds keep the debug key, since
+    // the debug build type's signing config wins over the flavor's.
+    productFlavors.getByName("full").signingConfig =
+        signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
+    productFlavors.getByName("play").signingConfig = when {
+        hasPlayKey -> signingConfigs.getByName("playRelease")
+        playDebugSigning -> signingConfigs.getByName("debug")
+        else -> null
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
+            )
+        }
+    }
+}
+
+// A Play release must never be built without its upload key.
+tasks.configureEach {
+    if (!hasPlayKey && !playDebugSigning &&
+        Regex("^(assemble|bundle|package)PlayRelease$").matches(name)) {
+        doFirst {
+            throw GradleException(
+                "Play release builds need android/key.play.properties (the Play upload key)."
             )
         }
     }

@@ -6,10 +6,15 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show PlatformException;
 
+import 'content_policy.dart';
+import 'edition.dart';
 import 'models.dart';
+import 'premium.dart';
 import 'services.dart';
 import 'shorts_profile.dart';
 
+export 'content_policy.dart';
+export 'premium.dart';
 export 'shorts_profile.dart';
 
 part 'download_queue.dart';
@@ -22,10 +27,21 @@ class AppState extends ChangeNotifier {
     AccountRepository? accounts,
     DownloadService? downloads,
     ShortsProfileStore? shortsStore,
-  }) : _repository = repository ?? PlatformBoardRepository(),
+    ContentPolicy? policy,
+    PremiumService? premium,
+  }) : _policy = policy ?? ContentPolicy.current,
+       _premium =
+           premium ??
+           ((policy ?? ContentPolicy.current).restricted
+               ? ManualPremium()
+               : UnlockedPremium()),
+       _repository = _guarded(
+         repository ?? PlatformBoardRepository(),
+         policy ?? ContentPolicy.current,
+       ),
        _accounts = accounts ?? PlatformAccountRepository(),
        _downloads = downloads ?? DownloadService(),
-       _store = store ?? LocalSettingsStore(),
+       _settingsStore = store ?? LocalSettingsStore(),
        _postStore =
            postStore ??
            (store == null || store is LocalSettingsStore
@@ -35,16 +51,58 @@ class AppState extends ChangeNotifier {
            shortsStore ??
            (store == null || store is LocalSettingsStore
                ? LocalShortsProfileStore()
-               : MemoryShortsProfileStore());
+               : MemoryShortsProfileStore()) {
+    _premium.addListener(_premiumChanged);
+  }
+
+  static BoardRepository _guarded(
+    BoardRepository repository,
+    ContentPolicy policy,
+  ) => policy.restricted
+      ? PolicyBoardRepository(repository, policy)
+      : repository;
+
+  /// What this edition may show; see [ContentPolicy].
+  final ContentPolicy _policy;
+  ContentPolicy get policy => _policy;
+
+  /// Premium (the Play edition's purchase); always active in Full.
+  final PremiumService _premium;
+  PremiumService get premium => _premium;
+  bool get premiumActive => _premium.active;
+
+  /// Whether [feature] can be used now.
+  bool unlocked(PremiumFeature feature) => _premium.active;
+
+  /// Whether [board] needs Premium that is not owned.
+  bool boardLocked(Board board) =>
+      _policy.needsPremium(board) && !_premium.active;
+
+  /// Whether [board] can be opened and searched now: offered by this
+  /// edition, not retired, and not waiting for Premium.
+  bool canOpen(Board board) =>
+      !board.isRetired && _policy.offers(board) && !boardLocked(board);
+
   final BoardRepository _repository;
   final AccountRepository _accounts;
   final DownloadService _downloads;
-  final SettingsStore _store;
+  final SettingsStore _settingsStore;
+  // Saves what was chosen ([_kept]) rather than the narrowed settings, so
+  // a change made without Premium keeps the Premium choices on disk.
+  late final SettingsStore _store = _KeptSettingsStore(_settingsStore, _kept);
   final PostStore _postStore;
   final ShortsProfileStore _shortsStore;
   final ShortsProfile _shortsProfile = ShortsProfile();
   bool _shortsSaving = false, _shortsDirty = false;
-  AppSettings _settings = const AppSettings();
+  late AppSettings _settingsValue = _enforced(const AppSettings());
+  // As chosen, before the rules, so Premium arriving after the settings
+  // loaded (or returning) brings back the choices it allows.
+  AppSettings _settingsChosen = const AppSettings();
+  AppSettings get _settings => _settingsValue;
+  // Every settings change passes through the edition's rules, so restored
+  // backups, old saved settings, and stray writes can never widen them.
+  set _settings(AppSettings value) =>
+      _settingsValue = _enforced(_settingsChosen = _kept(value));
   Future<void> _settingsQueue = Future<void>.value();
   Board? _board;
   List<MediaPost> _posts = const [];
@@ -104,6 +162,74 @@ class AppState extends ChangeNotifier {
 
   AppSettings get settings => _settings;
 
+  /// [value] within the edition's fixed rules and, without Premium, the
+  /// free limits. A change saved without Premium saves the narrowed
+  /// settings.
+  AppSettings _enforced(AppSettings value) {
+    var next = value;
+    if (_policy.restricted) {
+      next = next.copyWith(
+        selectedRatings: _policy.ratings,
+        safeMode: false,
+        safeModeRatings: const [],
+        safeModeBlurExplicit: false,
+        safeModeBlurQuestionable: false,
+        shortsContent: ShortsContent.safeOnly,
+        checkUpdates: false,
+      );
+    }
+    if (!_premium.active) {
+      final quality = next.videoQuality;
+      next = next.copyWith(
+        noShare: false,
+        classicDrawer: false,
+        theme: next.theme == ThemeChoice.amoled
+            ? ThemeChoice.standard
+            : next.theme,
+        downloadConcurrency: min(
+          next.downloadConcurrency,
+          FreeLimits.downloadConcurrency,
+        ),
+        videoQuality: quality <= 0 || quality > FreeLimits.videoQuality
+            ? FreeLimits.videoQuality
+            : quality,
+        boardOrder: const AppSettings().boardOrder,
+      );
+    }
+    return next;
+  }
+
+  /// [next] (built from the narrowed [settings]) with the Premium choices
+  /// it did not change taken from [_settingsChosen]. Without Premium a
+  /// free-limited field still at its narrowed value was not chosen.
+  AppSettings _kept(AppSettings next) {
+    if (_premium.active) return next;
+    final shown = _settingsValue, chosen = _settingsChosen;
+    T keep<T>(T Function(AppSettings) field) =>
+        field(next) == field(shown) ? field(chosen) : field(next);
+    return next.copyWith(
+      noShare: keep((s) => s.noShare),
+      classicDrawer: keep((s) => s.classicDrawer),
+      theme: keep((s) => s.theme),
+      downloadConcurrency: keep((s) => s.downloadConcurrency),
+      videoQuality: keep((s) => s.videoQuality),
+      boardOrder: listEquals(next.boardOrder, shown.boardOrder)
+          ? chosen.boardOrder
+          : next.boardOrder,
+    );
+  }
+
+  void _premiumChanged() {
+    _settings = _settingsChosen;
+    downloads._pump();
+    final current = _board;
+    if (current != null && !canOpen(current)) {
+      final fallback = _settings.visibleBoards.where(canOpen).firstOrNull;
+      if (fallback != null) unawaited(chooseBoard(fallback));
+    }
+    notifyListeners();
+  }
+
   /// Posts the local filters left out of the current feed, by reason, for
   /// the feed's "hidden by your filters" note.
   Map<FilterReason, int> get filteredCounts => _filtered;
@@ -159,8 +285,14 @@ class AppState extends ChangeNotifier {
       Map.unmodifiable(_settings.browsedTagCounts);
   List<String> get topSearchedTags => _topTags(_settings.searchedTagCounts);
   List<String> get topBrowsedTags => _topTags(_settings.browsedTagCounts);
-  List<SavedPost> get favoritePosts => List.unmodifiable(_favoritePosts);
-  List<SavedPost> get hiddenPosts => List.unmodifiable(_hiddenPosts);
+  List<SavedPost> get favoritePosts => List.unmodifiable(
+    _policy.restricted
+        ? _favoritePosts.where(_policy.allowsSaved)
+        : _favoritePosts,
+  );
+  List<SavedPost> get hiddenPosts => List.unmodifiable(
+    _policy.restricted ? _hiddenPosts.where(_policy.allowsSaved) : _hiddenPosts,
+  );
   bool isFavorite(MediaPost post, {Board? board}) =>
       _savedIn(_favoriteIds, post, board);
   bool isHidden(MediaPost post, {Board? board}) =>
@@ -188,8 +320,11 @@ class AppState extends ChangeNotifier {
   }
 
   /// Download history, newest last.
-  List<DownloadRecord> get downloadHistory =>
-      List.unmodifiable(_downloadRecords);
+  List<DownloadRecord> get downloadHistory => List.unmodifiable(
+    _policy.restricted
+        ? _downloadRecords.where((record) => _policy.allowsSaved(record.saved))
+        : _downloadRecords,
+  );
   bool isDownloaded(MediaPost post, {Board? board}) =>
       _downloadedIds.contains(_identity(post, board));
 
@@ -430,6 +565,9 @@ class AppState extends ChangeNotifier {
     DownloadControl? control,
   }) async {
     final target = _saved(post, board);
+    if (!_policy.allowsPost(target.board, post)) {
+      throw StateError('This post is not available');
+    }
     await resolveMedia(post, board: target.board);
     final display = displayReady(target);
     final url = display.post.url;
@@ -745,7 +883,7 @@ class AppState extends ChangeNotifier {
   /// Websites that can search now: those not needing credentials, or with
   /// credentials saved.
   Future<List<Board>> searchableBoards({Iterable<Board>? among}) async {
-    final boards = (among ?? listedBoards).toList();
+    final boards = (among ?? listedBoards).where(canOpen).toList();
     for (final board in boards) {
       if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
         try {
@@ -821,9 +959,14 @@ class AppState extends ChangeNotifier {
         credentials: credentials,
       ),
     );
+    // [filter] skips the user's own filters, never the edition's policy.
     return raw
         .map(MediaPost.fromMap)
-        .where((post) => !filter || _allowedOn(post, board, tags))
+        .where(
+          (post) =>
+              _policy.allowsPost(board, post) &&
+              (!filter || _allowedOn(post, board, tags)),
+        )
         .toList(growable: false);
   }
 
@@ -898,11 +1041,16 @@ class AppState extends ChangeNotifier {
   }) async {
     final links = <String, PostLink>{};
     final overflow = <String>{};
-    var existing = 0;
+    var existing = 0, unavailable = 0;
     for (final match in _linkPattern.allMatches(text)) {
       final link = PostLink.parse(match[0]!);
       final id = link?.postId;
       if (link == null || id == null) continue;
+      // Links to websites outside this edition are counted, not looked up.
+      if (!_policy.offers(link.board)) {
+        unavailable++;
+        continue;
+      }
       final key = '${link.board.name}:id:$id';
       if (links.containsKey(key) || overflow.contains(key)) continue;
       if (_favoriteIds.contains(key)) {
@@ -927,7 +1075,7 @@ class AppState extends ChangeNotifier {
     // import skips them without a lookup.
     final upgraded = <SavedPost>[];
     final seen = <String>{};
-    var added = 0, failed = 0, done = 0;
+    var added = 0, failed = unavailable, done = 0;
     for (final link in lookups) {
       final board = link.board;
       if (board.supportsAuth && !_credentialsByBoard.containsKey(board)) {
@@ -995,7 +1143,7 @@ class AppState extends ChangeNotifier {
     }
     return LinkImportSummary(
       source: source,
-      links: links.length + remaining,
+      links: links.length + remaining + unavailable,
       added: added,
       // Favorited meanwhile from elsewhere counts as already saved.
       existing: existing - added,
@@ -1407,16 +1555,27 @@ class AppState extends ChangeNotifier {
           // A backup can turn secure screen on, never off.
           secureScreen: _settings.secureScreen || restored.secureScreen,
         );
-        await _store.saveSettings(next);
+        // The backup's settings are all chosen, even where they equal a
+        // free limit.
+        await _settingsStore.saveSettings(next);
+        _settingsChosen = next;
         _settings = next;
       });
     }
     // SavedPost equality is its identity, so the sets also drop duplicates
     // inside the backup.
-    final newFavorites = posts(decoded['favorites'])
+    // Posts this edition cannot show are left out (and counted).
+    var skipped = 0;
+    Iterable<SavedPost> allowed(Iterable<SavedPost> saved) =>
+        saved.where((value) {
+          if (_policy.allowsSaved(value)) return true;
+          skipped++;
+          return false;
+        });
+    final newFavorites = allowed(posts(decoded['favorites']))
         .where((saved) => !_favoriteIds.contains(saved.identity))
         .toSet();
-    final newHidden = posts(decoded['hidden'])
+    final newHidden = allowed(posts(decoded['hidden']))
         .where((saved) => !_hiddenIds.contains(saved.identity))
         .toSet();
     if (newFavorites.isNotEmpty) {
@@ -1450,6 +1609,7 @@ class AppState extends ChangeNotifier {
       settings: settings is Map,
       favorites: newFavorites.length,
       hidden: newHidden.length,
+      skipped: skipped,
     );
   }
 
@@ -1500,11 +1660,13 @@ class AppState extends ChangeNotifier {
       final settings = await _store.loadSettings();
       final stored = await _store.loadBoard();
       // A retired website reopens on the first website the drawer shows.
-      final board = stored?.isRetired == true
-          ? settings.visibleBoards.firstOrNull
+      // Stored settings are all chosen, even where they equal a limit.
+      _settingsChosen = settings;
+      _settings = settings;
+      final board = stored != null && !canOpen(stored)
+          ? _settings.visibleBoards.where(canOpen).firstOrNull
           : stored;
       final credentials = board == null ? null : await _loadCredentials(board);
-      _settings = settings;
       _board = board;
       _noteIgnoredAiSetting(board);
       _credentials = credentials;
@@ -1576,8 +1738,12 @@ class AppState extends ChangeNotifier {
     Credentials? credentials,
     List<String> tags = const [],
   }) async {
+    // Retired websites stay reachable here (saved links, tests); the lists
+    // leave them out.
+    if (!_policy.offers(value) || boardLocked(value)) return;
     _invalidate();
     final generation = _generation;
+    tags = _sanitized(tags, value);
     try {
       final loadedCredentials = credentials ?? await _loadCredentials(value);
       if (generation != _generation) return;
@@ -1627,6 +1793,7 @@ class AppState extends ChangeNotifier {
   Future<void> search(List<String> value) async {
     _invalidate();
     final generation = _generation;
+    value = _sanitized(value, _board);
     _tags = value
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
@@ -1642,6 +1809,17 @@ class AppState extends ChangeNotifier {
     } else {
       await recent;
     }
+  }
+
+  /// [tags] without the terms this edition never searches for; tells the
+  /// user when some were removed.
+  List<String> _sanitized(List<String> tags, Board? board) {
+    final result = _policy.sanitize(tags, board: board);
+    if (result.removed.isNotEmpty) {
+      _notice =
+          "Some search terms aren't available and were left out: ${result.removed.join(' ')}";
+    }
+    return result.tags;
   }
 
   Future<void> recordBrowsedTags(Iterable<String> tags) =>
@@ -2054,6 +2232,8 @@ class AppState extends ChangeNotifier {
   /// [board]'s stored credentials, read after its pending writes. When the
   /// session changed during the read, the current session is returned.
   Future<Credentials?> _loadCredentials(Board board) async {
+    // Sign-ins this edition leaves out are ignored, even when stored.
+    if (!_policy.allowsSignIn(board)) return null;
     final generation = _sessionGenerations[board];
     final stored = await _queueCredentials(
       board,
@@ -2076,7 +2256,7 @@ class AppState extends ChangeNotifier {
   /// Signs in to a [BoardInfo.supportsSignIn] board. Only the returned
   /// session is stored; [password] is passed to the platform and dropped.
   Future<void> signIn(Board value, String login, String password) async {
-    if (!value.supportsSignIn) {
+    if (!value.supportsSignIn || !_policy.allowsSignIn(value)) {
       throw ArgumentError('${value.label} does not support signing in.');
     }
     if (login.trim().isEmpty || password.isEmpty) {
@@ -2319,7 +2499,10 @@ class AppState extends ChangeNotifier {
     List<String> userTags, {
     bool signedIn = false,
   }) {
-    final tags = providerSyntax(board, userTags);
+    final tags = providerSyntax(
+      board,
+      _policy.sanitize(userTags, board: board).tags,
+    );
     final exclusions = [
       ..._settings.blacklistFor(board).map((tag) => '-$tag'),
       if (_excludesAiOn(board)) '-${_aiTagFor(board)}',
@@ -2469,6 +2652,9 @@ class AppState extends ChangeNotifier {
     Board? board, [
     List<String> query = const [],
   ]) {
+    if (board != null && !_policy.allowsPost(board, post)) {
+      return FilterReason.policy;
+    }
     if (excludedByQuery(post.tags, query)) return FilterReason.excluded;
     final aiTag = _aiTagFor(board);
     if (_excludesAiOn(board) &&
@@ -2710,6 +2896,9 @@ class AppState extends ChangeNotifier {
       final wait = seconds > 1 ? 'about $seconds seconds' : 'a moment';
       return '${board?.label ?? 'This website'} is busy or limiting requests. Wait $wait, then try again.';
     }
+    if (error is EditionBoardException) {
+      return '${error.board.label} is not available in this edition.';
+    }
     if (error is ApiOffException) {
       return '${board?.label ?? 'This website'} has switched off its API, so BooruPlus cannot load it right now. Try again later or choose another website.';
     }
@@ -2725,7 +2914,10 @@ enum FilterReason {
   blocked,
   uploader,
   rating,
-  hidden;
+  hidden,
+
+  /// The edition's fixed content rules (Play edition).
+  policy;
 
   String get label => switch (this) {
     excluded => 'Excluded by the search',
@@ -2734,6 +2926,7 @@ enum FilterReason {
     uploader => 'Hidden uploaders',
     rating => 'Rating filter',
     hidden => 'Hidden posts',
+    policy => 'Content rules',
   };
 }
 
@@ -2816,7 +3009,7 @@ class MultiSiteSearch extends ChangeNotifier {
     _tags = List.unmodifiable(
       tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty),
     );
-    _boards = List.unmodifiable(boards);
+    _boards = List.unmodifiable(boards.where(_app.canOpen));
     _enabled = _boards.toSet();
     _results = const [];
     _visible = null;
@@ -2867,7 +3060,7 @@ class MultiSiteSearch extends ChangeNotifier {
   /// websites switched on. A website not yet in the search joins it from
   /// its first page.
   Future<void> setEnabled(Iterable<Board> boards) async {
-    final enabled = boards.toSet();
+    final enabled = boards.where(_app.canOpen).toSet();
     _enabled = enabled;
     final added = enabled.where((board) => !_boards.contains(board));
     if (added.isNotEmpty) _boards = List.unmodifiable([..._boards, ...added]);
@@ -3036,7 +3229,7 @@ class ShortsFeed extends ChangeNotifier {
       tags.map((tag) => tag.trim()).where((tag) => tag.isNotEmpty).toSet(),
     );
     _boards = List.unmodifiable(
-      boards.where((board) => board.hasShorts && !board.isRetired),
+      boards.where((board) => board.hasShorts && _app.canOpen(board)),
     );
     _interestTags = _ranked && _tags.isEmpty
         ? List.unmodifiable(_profile.topTags(_interestStreams))
@@ -3387,8 +3580,13 @@ enum ImportSource {
 
   String get label => switch (this) {
     links => 'post links',
-    loliSnatcher => 'LoliSnatcher favorites',
-    boorusama => 'Boorusama bookmarks',
+    // The Play edition names neither app.
+    loliSnatcher =>
+      kPlayEdition
+          ? "another app's favorites database"
+          : 'LoliSnatcher favorites',
+    boorusama =>
+      kPlayEdition ? "another app's bookmarks" : 'Boorusama bookmarks',
   };
 }
 
@@ -3398,7 +3596,37 @@ class BackupSummary {
     required this.settings,
     required this.favorites,
     required this.hidden,
+    this.skipped = 0,
   });
   final bool settings;
   final int favorites, hidden;
+
+  /// Saved posts this edition cannot show, left out of the restore.
+  final int skipped;
+}
+
+/// Saves settings through [kept] (see `AppState._kept`); everything else
+/// goes to [inner] unchanged.
+class _KeptSettingsStore implements SettingsStore {
+  _KeptSettingsStore(this.inner, this.kept);
+  final SettingsStore inner;
+  final AppSettings Function(AppSettings) kept;
+
+  @override
+  Future<AppSettings> loadSettings() => inner.loadSettings();
+  @override
+  Future<void> saveSettings(AppSettings settings) =>
+      inner.saveSettings(kept(settings));
+  @override
+  Future<Board?> loadBoard() => inner.loadBoard();
+  @override
+  Future<void> saveBoard(Board? board) => inner.saveBoard(board);
+  @override
+  Future<Credentials?> loadCredentials(Board board) =>
+      inner.loadCredentials(board);
+  @override
+  Future<void> saveCredentials(Board board, Credentials credentials) =>
+      inner.saveCredentials(board, credentials);
+  @override
+  Future<void> removeCredentials(Board board) => inner.removeCredentials(board);
 }

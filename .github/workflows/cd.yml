@@ -1,7 +1,9 @@
 name: CD
 
-# Every push to main publishes both APKs to the rolling `nightly` prerelease;
-# a `v*` tag publishes them as a versioned release.
+# Every push to main publishes both Full edition APKs to the rolling
+# `nightly` prerelease; a `v*` tag publishes them as a versioned release.
+# The Play edition's bundle is only kept as a workflow artifact, for upload
+# to the Play Console by hand.
 #
 # The in-app updater (lib/core/updates.dart) reads this repository's
 # releases and installs the asset named
@@ -53,7 +55,7 @@ jobs:
 
       - run: flutter pub get
       - run: >-
-          flutter build apk --debug
+          flutter build apk --debug --flavor full
           --build-number=${{ github.run_number }}
           --dart-define=UPDATE_REPOSITORY=${{ github.repository }}
 
@@ -61,7 +63,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-debug.apk \
+          cp build/app/outputs/flutter-apk/app-full-debug.apk \
             "dist/booruplus-${version}-${{ github.run_number }}-uncensored-debug.apk"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -115,22 +117,112 @@ jobs:
 
       - run: flutter pub get
       - run: >-
-          flutter build apk --release
+          flutter build apk --release --flavor full
           --build-number=${{ github.run_number }}
           --dart-define=UPDATE_REPOSITORY=${{ github.repository }}
 
-      # The uncensored edition; the in-app updater installs this asset.
+      # The uncensored (Full) edition; the in-app updater installs this
+      # asset.
       - name: Name the APK
         run: |
           version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk \
+          cp build/app/outputs/flutter-apk/app-full-release.apk \
             "dist/booruplus-${version}-${{ github.run_number }}-uncensored.apk"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: booruplus-release-apk
           path: dist/*.apk
+          if-no-files-found: error
+
+  # The Play edition (com.booruplus.play) as an app bundle, signed with the
+  # Play upload key. Skipped without the PLAY_KEYSTORE_* secrets: Gradle
+  # refuses a Play release without its key. The AdMob and product IDs come
+  # from repository variables; without them the bundle uses Google's test
+  # ad units and must not be uploaded.
+  play:
+    name: Play bundle
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KEYSTORE_BASE64: ${{ secrets.PLAY_KEYSTORE_BASE64 }}
+    steps:
+      - name: Check for the Play upload key
+        id: key
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::PLAY_KEYSTORE_BASE64 is not set; the Play bundle is not built."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - if: steps.key.outputs.present == 'true'
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Set up Play signing
+        if: steps.key.outputs.present == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.PLAY_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.PLAY_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.PLAY_KEY_PASSWORD }}
+        run: |
+          keystore="$RUNNER_TEMP/play.jks"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          {
+            echo "storeFile=$keystore"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > android/key.play.properties
+
+      - name: Build the bundle
+        if: steps.key.outputs.present == 'true'
+        env:
+          ADMOB_APP_ID: ${{ vars.ADMOB_APP_ID }}
+          ADMOB_FEED_UNIT: ${{ vars.ADMOB_FEED_UNIT }}
+          ADMOB_SHORTS_UNIT: ${{ vars.ADMOB_SHORTS_UNIT }}
+          PREMIUM_PRODUCT_ID: ${{ vars.PREMIUM_PRODUCT_ID }}
+        run: |
+          flutter pub get
+          # Unset variables keep the defaults rather than passing empty IDs.
+          args=()
+          for name in ADMOB_FEED_UNIT ADMOB_SHORTS_UNIT PREMIUM_PRODUCT_ID; do
+            if [ -n "${!name}" ]; then args+=("--dart-define=$name=${!name}"); fi
+          done
+          if [ -n "$ADMOB_APP_ID" ]; then
+            export ORG_GRADLE_PROJECT_admobAppId="$ADMOB_APP_ID"
+          else
+            echo "::warning::ADMOB_APP_ID is not set; this bundle uses Google's test ads."
+          fi
+          flutter build appbundle --release --flavor play \
+            --build-number=${{ github.run_number }} "${args[@]}"
+          version=$(sed -n 's/^version: *\([^+]*\).*/\1/p' pubspec.yaml)
+          mkdir -p dist
+          cp build/app/outputs/bundle/playRelease/app-play-release.aab \
+            "dist/booruplus-play-${version}-${{ github.run_number }}.aab"
+
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: booruplus-play-bundle
+          path: dist/*.aab
           if-no-files-found: error
 
   publish:

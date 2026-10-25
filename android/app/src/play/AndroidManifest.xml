@@ -1,0 +1,46 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Links to the Play edition's websites only. -->
+        <activity android:name=".LinkActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="safebooru.org" />
+                <data android:host="danbooru.donmai.us" />
+                <data android:host="safebooru.donmai.us" />
+                <data android:host="konachan.net" />
+                <data android:host="yande.re" />
+                <data android:host="e926.net" />
+                <data android:host="gelbooru.com" />
+                <data android:host="chan.sankakucomplex.com" />
+                <data android:host="sankaku.app" />
+                <data android:host="www.sankaku.app" />
+                <data android:host="idol.sankakucomplex.com" />
+                <data android:host="idolcomplex.com" />
+                <data android:host="www.idolcomplex.com" />
+                <data android:host="sakugabooru.com" />
+                <data android:host="www.sakugabooru.com" />
+                <data android:host="mspabooru.com" />
+                <data android:host="e-shuushuu.net" />
+                <data android:host="derpibooru.org" />
+                <data android:host="trixiebooru.org" />
+            </intent-filter>
+            <!-- Hosts that also serve pages other than the booru: posts only. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="www.sankakucomplex.com" />
+                <data android:host="sankakucomplex.com" />
+                <data android:pathPrefix="/posts/" />
+                <!-- Sankaku links often start with a language, as in /en/posts/. -->
+                <data android:pathPattern="/.*/posts/.*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

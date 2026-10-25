@@ -1,5 +1,8 @@
 import 'dart:convert';
 
+import 'content_policy.dart';
+import 'edition.dart';
+
 enum Board {
   safebooru,
   danbooru,
@@ -24,9 +27,12 @@ enum Board {
   derpibooru,
 }
 
-/// Websites the app offers, in enum order: every board except retired ones.
+/// Websites the app offers, in enum order: every board except retired ones
+/// and those this edition leaves out ([ContentPolicy.offers]).
 final List<Board> listedBoards = List.unmodifiable(
-  Board.values.where((board) => !board.isRetired),
+  Board.values.where(
+    (board) => !board.isRetired && ContentPolicy.current.offers(board),
+  ),
 );
 
 extension BoardInfo on Board {
@@ -57,7 +63,8 @@ extension BoardInfo on Board {
   String get host => switch (this) {
     Board.safebooru => 'safebooru.org',
     Board.danbooru => 'danbooru.donmai.us',
-    Board.konachan => 'konachan.com',
+    // The Play edition uses konachan.net, the site's safe-mode mirror, only.
+    Board.konachan => kPlayEdition ? 'konachan.net' : 'konachan.com',
     Board.yandere => 'yande.re',
     Board.e926 => 'e926.net',
     Board.e621 => 'e621.net',
@@ -1067,7 +1074,12 @@ class AppSettings {
 
   /// Websites shown in the drawer, in the user's order.
   List<Board> get visibleBoards => boardOrder
-      .where((board) => !board.isRetired && !hiddenBoards.contains(board))
+      .where(
+        (board) =>
+            !board.isRetired &&
+            ContentPolicy.current.offers(board) &&
+            !hiddenBoards.contains(board),
+      )
       .toList();
 
   /// Blocked tags that apply to one website only; [blacklist] applies to
@@ -1776,7 +1788,11 @@ class AppSettings {
   // appended in their default position order; retired boards are dropped.
   static List<Board> _normalizedBoardOrder(Iterable<Board> values) {
     final result = <Board>{...values, ...listedBoards};
-    return List.unmodifiable(result.where((board) => !board.isRetired));
+    return List.unmodifiable(
+      result.where(
+        (board) => !board.isRetired && ContentPolicy.current.offers(board),
+      ),
+    );
   }
 
   static List<Board> _normalizedHiddenBoards(Iterable<Board> values) {

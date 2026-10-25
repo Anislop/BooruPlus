@@ -55,13 +55,15 @@ jobs:
 
       - run: flutter pub get
 
-      # Compiles the Kotlin bridge and the vendored Java library; Flutter
-      # also generates the ignored Gradle wrapper scripts here.
-      - run: flutter build apk --debug
+      # Compiles the Kotlin bridge and the vendored Java library for both
+      # editions; Flutter also generates the ignored Gradle wrapper scripts
+      # here.
+      - run: flutter build apk --debug --flavor full
+      - run: flutter build apk --debug --flavor play
 
       - name: Native unit tests
         working-directory: android
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:testFullDebugUnitTest :app:testPlayDebugUnitTest
 
       - name: Upload native test reports
         if: failure()

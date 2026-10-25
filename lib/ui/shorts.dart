@@ -8,8 +8,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../core/app_state.dart';
+import '../core/edition.dart';
 import '../core/models.dart';
 import '../core/services.dart';
+import 'ads.dart';
 import 'media_image.dart';
 import 'media_viewer.dart';
 import 'shorts_library.dart';
@@ -39,7 +41,16 @@ class _ShortsScreenState extends State<ShortsScreen>
   final Set<String> _revealed = {};
   List<Board> _available = const [];
   bool _ready = false;
+  // The current post. Without Premium the Play edition places an ad page
+  // between posts, so pages and posts differ: [_page] is the page showing,
+  // [_layout] maps between them, and on an ad page [_index] is the post
+  // after it, which waits paused.
   int _index = 0;
+  int _page = 0;
+  bool _onAd = false;
+  late AdLayout _layout = _adLayout;
+  AdLayout get _adLayout =>
+      showsAds(widget.state) ? const AdLayout(Ads.shortsEvery) : AdLayout.none;
   late bool _muted = widget.state.settings.shortsMuted;
   bool _userPaused = false;
   AppLifecycleState _lifecycle =
@@ -80,6 +91,7 @@ class _ShortsScreenState extends State<ShortsScreen>
     WidgetsBinding.instance.addObserver(this);
     if (_resumed) _screenAwake.setEnabled(true);
     _device.pictureInPicture.addListener(_pipChanged);
+    widget.state.premium.addListener(_premiumChanged);
     _feed.addListener(_syncClips);
     if (_settings.dataSaver == DataSaverMode.mobileData) {
       _device.isMeteredNetwork().then((metered) {
@@ -103,6 +115,20 @@ class _ShortsScreenState extends State<ShortsScreen>
     _applyPlayback();
   }
 
+  /// Premium bought here: the ad pages go, and the post showing stays.
+  void _premiumChanged() {
+    if (!mounted || _adLayout.every == _layout.every) return;
+    setState(() {
+      _layout = _adLayout;
+      _onAd = false;
+      _page = _layout.slotOf(_index);
+    });
+    _syncClips();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _pages.hasClients) _pages.jumpToPage(_page);
+    });
+  }
+
   void _pipChanged() {
     if (!mounted) return;
     setState(() => _pip = _device.pictureInPicture.value);
@@ -114,6 +140,7 @@ class _ShortsScreenState extends State<ShortsScreen>
     _reportWatch();
     WidgetsBinding.instance.removeObserver(this);
     _device.pictureInPicture.removeListener(_pipChanged);
+    widget.state.premium.removeListener(_premiumChanged);
     if (_pipSent != null) _device.setPictureInPicture(auto: false);
     _screenAwake.setEnabled(false);
     _watched?.removeListener(_onTick);
@@ -133,6 +160,8 @@ class _ShortsScreenState extends State<ShortsScreen>
     _reportWatch();
     _disposeClips();
     _index = 0;
+    _page = 0;
+    _onAd = false;
     _userPaused = false;
     if (_pages.hasClients) _pages.jumpToPage(0);
     final filter = _tagFilter;
@@ -178,7 +207,7 @@ class _ShortsScreenState extends State<ShortsScreen>
   /// Starts timing the current video when it changed.
   void _trackCurrent() {
     final posts = _feed.posts;
-    final saved = _index < posts.length ? posts[_index] : null;
+    final saved = !_onAd && _index < posts.length ? posts[_index] : null;
     if (_watch?.saved.identity == saved?.identity) return;
     _reportWatch();
     if (saved != null) _watch = _Watch(saved);
@@ -209,7 +238,7 @@ class _ShortsScreenState extends State<ShortsScreen>
 
   String? get _currentKey {
     final posts = _feed.posts;
-    return _index < posts.length ? posts[_index].identity : null;
+    return !_onAd && _index < posts.length ? posts[_index].identity : null;
   }
 
   /// Keeps players for the previous, current, and next videos only.
@@ -395,10 +424,10 @@ class _ShortsScreenState extends State<ShortsScreen>
       _advancing = false;
       return;
     }
-    final from = _index;
+    final from = _page;
     if (_settings.reduceMotion) {
       // The page after the last post is the loader, as with nextPage.
-      if (from + 1 <= _feed.posts.length) {
+      if (from + 1 <= _layout.slots(_feed.posts.length)) {
         _pages.jumpToPage(from + 1);
       } else {
         _advancing = false;
@@ -412,22 +441,24 @@ class _ShortsScreenState extends State<ShortsScreen>
         )
         .whenComplete(() {
           // Nowhere to go: let the next ending try again.
-          if (mounted && _index == from) _advancing = false;
+          if (mounted && _page == from) _advancing = false;
         });
   }
 
-  void _handlePageChanged(int index) {
+  void _handlePageChanged(int page) {
     // Before the seek below, which would read as a replay.
     _reportWatch();
     final previous = _clips[_currentKey];
     previous?.controller?.pause();
     previous?.controller?.seekTo(Duration.zero);
-    _index = index;
+    _page = page;
+    _onAd = _layout.isAd(page);
+    final index = _index = _layout.postIndex(page);
     _userPaused = false;
     _advancing = false;
     final posts = _feed.posts;
     if (index >= posts.length - 3) _feed.loadMore();
-    if (index < posts.length) {
+    if (!_onAd && index < posts.length) {
       widget.state.recordBrowsedTags(posts[index].post.tags);
     }
     _syncClips();
@@ -507,11 +538,13 @@ class _ShortsScreenState extends State<ShortsScreen>
       _beforeFilter = null;
       _onlyBoard = before.only;
       _index = before.index;
+      _page = _layout.slotOf(_index);
+      _onAd = false;
     });
     _feed.restore(before.feed);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _pages.hasClients && _pages.page?.round() != _index) {
-        _pages.jumpToPage(_index);
+      if (mounted && _pages.hasClients && _pages.page?.round() != _page) {
+        _pages.jumpToPage(_page);
       }
     });
   }
@@ -1022,10 +1055,20 @@ class _ShortsScreenState extends State<ShortsScreen>
       controller: _pages,
       scrollDirection: Axis.vertical,
       physics: _pip ? const NeverScrollableScrollPhysics() : null,
-      itemCount: posts.length + 1,
+      itemCount: _layout.slots(posts.length) + 1,
       onPageChanged: _handlePageChanged,
-      itemBuilder: (context, index) {
-        if (index >= posts.length) return _endPage();
+      itemBuilder: (context, page) {
+        if (page >= _layout.slots(posts.length)) return _endPage();
+        if (_layout.isAd(page)) {
+          final ad = _layout.adIndex(page);
+          return ShortsAdPage(
+            key: ValueKey('ad:$ad'),
+            state: widget.state,
+            active: page == _page,
+            onSkip: _autoScroll ? _next : null,
+          );
+        }
+        final index = _layout.postIndex(page);
         final saved = widget.state.displayReady(posts[index]);
         final clip = _clips[posts[index].identity];
         return _ShortsPage(
@@ -1033,7 +1076,7 @@ class _ShortsScreenState extends State<ShortsScreen>
           saved: saved,
           controller: clip?.controller,
           failed: clip?.failed ?? false,
-          active: index == _index,
+          active: page == _page,
           blurred: _hiddenBehindBlur(saved),
           favorite: widget.state.isFavorite(saved.post, board: saved.board),
           liked: _liked.contains(saved.identity),
@@ -2550,25 +2593,28 @@ class _ShortsTagsSheetState extends State<_ShortsTagsSheet> {
           searchStyle: false,
           hint: 'Add a tag, then press space',
         ),
-        const SizedBox(height: 16),
-        Text('Content', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        SizedBox(
-          width: double.infinity,
-          child: SegmentedButton<ShortsContent>(
-            key: const ValueKey('shorts_content'),
-            showSelectedIcon: false,
-            segments: [
-              for (final value in ShortsContent.values)
-                ButtonSegment(value: value, label: Text(value.label)),
-            ],
-            selected: {_content},
-            onSelectionChanged: (choice) {
-              setState(() => _content = choice.single);
-              widget.onContentChanged(_content);
-            },
+        // The Play edition keeps booruShorts to safe videos.
+        if (!kPlayEdition) ...[
+          const SizedBox(height: 16),
+          Text('Content', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<ShortsContent>(
+              key: const ValueKey('shorts_content'),
+              showSelectedIcon: false,
+              segments: [
+                for (final value in ShortsContent.values)
+                  ButtonSegment(value: value, label: Text(value.label)),
+              ],
+              selected: {_content},
+              onSelectionChanged: (choice) {
+                setState(() => _content = choice.single);
+                widget.onContentChanged(_content);
+              },
+            ),
           ),
-        ),
+        ],
         const SizedBox(height: 10),
         Row(
           children: [
