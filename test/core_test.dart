@@ -382,16 +382,19 @@ void main() {
     expect(state.posts, isEmpty);
   });
 
-  test('AIBooru is retired from website lists and the startup board', () async {
+  test('AIBooru is listed again and restores as the startup board', () async {
+    // Settings saved while AIBooru was retired left it out of the order.
     final legacy = AppSettings.fromMap({
-      'boardOrder': ['aibooru', 'danbooru'],
-      'hiddenBoards': ['aibooru'],
+      'boardOrder': ['danbooru', 'safebooru'],
     });
-    expect(legacy.boardOrder, isNot(contains(Board.aibooru)));
     expect(legacy.boardOrder.first, Board.danbooru);
-    // Websites added later are appended.
-    expect(legacy.boardOrder, containsAll([Board.sakugabooru, Board.nanbooru]));
-    expect(legacy.hiddenBoards, isEmpty);
+    // Websites missing from a saved order are appended.
+    expect(
+      legacy.boardOrder,
+      containsAll([Board.aibooru, Board.sakugabooru, Board.nanbooru]),
+    );
+    expect(legacy.visibleBoards, contains(Board.aibooru));
+    expect(listedBoards, contains(Board.aibooru));
     // The constant default must list every offered website.
     expect(const AppSettings().boardOrder, listedBoards);
 
@@ -402,8 +405,8 @@ void main() {
         ..selected = Board.aibooru,
     );
     await state.initialize();
-    expect(state.board, Board.danbooru);
-    expect(await state.searchableBoards(), isNot(contains(Board.aibooru)));
+    expect(state.board, Board.aibooru);
+    expect(await state.searchableBoards(), contains(Board.aibooru));
   });
 
   test('rating filters skip Nozomi and stay local on TBIB', () async {
@@ -2176,8 +2179,10 @@ void main() {
       expect(read('https://danbooru.donmai.us/posts/random'), isNull);
       // Media files on a website's host are not posts.
       expect(read('https://realbooru.com/images/12/ab/cd.jpg'), isNull);
-      // Retired websites are not opened.
-      expect(read('https://aibooru.online/posts/1'), isNull);
+      expect(
+        read('https://aibooru.online/posts/1'),
+        (Board.aibooru, '1', const <String>[]),
+      );
       expect(read('https://danbooru.donmai.us/posts?tags=%E0%A4%A'), isNull);
     });
 

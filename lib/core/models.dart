@@ -163,7 +163,8 @@ extension BoardInfo on Board {
 
   /// Boards the app no longer offers. Their code and saved data stay, but
   /// they are left out of the website lists, searches, and booruShorts.
-  bool get isRetired => this == Board.aibooru;
+  /// None are retired at the moment.
+  bool get isRetired => false;
 
   /// Boards served by Sankaku's API (Sankaku Complex and Idol Complex): the
   /// same search syntax, tag limits, keyset paging, and signed media URLs.
@@ -908,6 +909,7 @@ const _defaultBoardOrder = [
   Board.sankaku,
   Board.idolcomplex,
   Board.tbib,
+  Board.aibooru,
   Board.nozomi,
   Board.sakugabooru,
   Board.xbooru,
@@ -2141,6 +2143,7 @@ class PostLink {
       'emmytherobot.art' => Board.nanbooru,
       'realbooru.com' => Board.realbooru,
       'derpibooru.org' || 'trixiebooru.org' => Board.derpibooru,
+      'aibooru.online' => Board.aibooru,
       _ => null,
     };
   }
@@ -2166,6 +2169,7 @@ class PostLink {
       _ when gelbooruPages =>
         query['page'] == 'post' && query['s'] == 'view' ? query['id'] : null,
       Board.danbooru ||
+      Board.aibooru ||
       Board.e621 ||
       Board.e926 ||
       Board.mikubooru => after(['posts']),
@@ -2196,6 +2200,7 @@ class PostLink {
       _ when gelbooruPages =>
         query['page'] == 'post' && query['s'] == 'list' ? query['tags'] : null,
       Board.danbooru ||
+      Board.aibooru ||
       Board.e621 ||
       Board.e926 ||
       Board.sankaku ||

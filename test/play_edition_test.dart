@@ -49,6 +49,8 @@ void main() {
     test('offers the Play websites only, some behind Premium', () {
       expect(policy.offers(Board.safebooru), isTrue);
       expect(policy.offers(Board.sankaku), isTrue);
+      expect(policy.offers(Board.aibooru), isTrue);
+      expect(policy.needsPremium(Board.aibooru), isFalse);
       expect(policy.needsPremium(Board.safebooru), isFalse);
       expect(policy.needsPremium(Board.derpibooru), isTrue);
       expect(policy.needsPremium(Board.yandere), isTrue);

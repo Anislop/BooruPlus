@@ -34,6 +34,7 @@ class ContentPolicy {
       Board.sankaku,
       Board.idolcomplex,
       Board.sakugabooru,
+      Board.aibooru,
     },
     premiumBoards: {
       Board.yandere,
