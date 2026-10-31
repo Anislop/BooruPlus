@@ -66,11 +66,14 @@ jobs:
           cp build/app/outputs/flutter-apk/app-full-debug.apk \
             "dist/booruplus-${version}-${{ github.run_number }}-uncensored-debug.apk"
 
+      # APKs also go to GitHub Releases; short retention keeps artifact
+      # storage under the account quota.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: booruplus-debug-apk
           path: dist/*.apk
           if-no-files-found: error
+          retention-days: 7
 
   release:
     name: Release APK
@@ -135,6 +138,7 @@ jobs:
           name: booruplus-release-apk
           path: dist/*.apk
           if-no-files-found: error
+          retention-days: 7
 
   # The Play edition (com.booruplus.play) as an app bundle, signed with the
   # Play upload key. Skipped without the PLAY_KEYSTORE_* secrets: Gradle
@@ -224,6 +228,7 @@ jobs:
           name: booruplus-play-bundle
           path: dist/*.aab
           if-no-files-found: error
+          retention-days: 30
 
   publish:
     name: Publish to GitHub Releases
