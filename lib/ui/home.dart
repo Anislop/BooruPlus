@@ -367,6 +367,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
+  void _startSelection(MediaPost post, Board board) {
+    HapticFeedback.selectionClick();
+    final saved = SavedPost(board: board, post: post);
+    setState(() {
+      _selecting = true;
+      _selected[saved.identity] = saved;
+    });
+  }
+
   void _toggleSelected(MediaPost post, Board board) {
     final saved = SavedPost(board: board, post: post);
     setState(() {
@@ -395,6 +404,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               : 'Added ${_postCount(added)} to favorites.',
         ),
       ),
+    );
+  }
+
+  /// Hides the selected posts, removing them from the feed.
+  Future<void> _hideSelected() async {
+    final posts = _selected.values.toList();
+    if (posts.isEmpty) return;
+    await widget.state.hidePosts(posts);
+    if (!mounted) return;
+    _endSelection();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Hid ${_postCount(posts.length)}.')),
     );
   }
 
@@ -446,6 +467,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         tooltip: 'Favorite selected',
         icon: const Icon(Icons.favorite_border_rounded),
         onPressed: _selected.isEmpty ? null : _favoriteSelected,
+      ),
+      IconButton(
+        tooltip: 'Hide selected',
+        icon: const Icon(Icons.visibility_off_outlined),
+        onPressed: _selected.isEmpty ? null : _hideSelected,
       ),
       IconButton(
         tooltip: 'Download selected',
@@ -1189,8 +1215,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ? _selected.containsKey(SavedPost(board: board, post: post).identity)
           : null,
       blur: _shouldBlur(state, post),
-      onLongPress: null,
-      onLongPressOrigin: _selecting
+      // Holding a post starts multi-select with it chosen; the older
+      // drag-to-choose quick actions are a setting.
+      onLongPress: _selecting || state.settings.holdQuickActions
+          ? null
+          : () => _startSelection(post, board),
+      onLongPressOrigin: _selecting || !state.settings.holdQuickActions
           ? null
           : (origin, controller) => showQuickPostActions(
               context,

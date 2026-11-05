@@ -52,18 +52,19 @@ A full-screen vertical video feed built from every website that hosts video, doo
 <tr>
 <td width="50%">
 
-### Hold to preview
+### Hold to select
 
-Hold any post to see it large without leaving the grid, then slide onto an action and let go.
+Hold any post to start selecting, then tap more posts and act on them all at once.
 
-- **Favorite** saves it to your collection
-- **Hide** removes it from every feed
-- **Uploader** hides everything from that uploader
-- Let go anywhere else to close the preview
+- **Hide** removes them from every feed
+- **Favorite** saves them to your collection
+- **Download** queues them in the Download Manager
+
+Prefer the hold preview? Turn on **Hold for quick actions** in Settings: hold a post to see it large, then slide onto Favorite, Hide, or Uploader and let go.
 
 </td>
 <td width="50%" align="center">
-<img src="docs/media/post-hold.gif" alt="Hold a post to preview, favorite, or hide it" width="300">
+<img src="docs/media/post-hold.gif" alt="Hold for quick actions: preview, favorite, or hide a post" width="300">
 </td>
 </tr>
 <tr>

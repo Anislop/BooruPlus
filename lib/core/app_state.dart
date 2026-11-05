@@ -474,6 +474,30 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Hides several posts with one write and drops the current board's
+  /// from the feed.
+  Future<void> hidePosts(Iterable<SavedPost> posts) async {
+    final added = <SavedPost>[];
+    final dropped = <String>{};
+    for (final saved in posts) {
+      if (!_savedIn(_hiddenIds, saved.post, saved.board) &&
+          !added.any((value) => value.identity == saved.identity)) {
+        added.add(_saved(saved.post, saved.board));
+      }
+      if (saved.board == _board) dropped.add(_postKey(saved.post));
+    }
+    if (added.isNotEmpty) {
+      _setHidden([..._hiddenPosts, ...added]);
+      await _postStore.saveHidden(_hiddenPosts);
+    }
+    if (dropped.isNotEmpty) {
+      _posts = _posts
+          .where((value) => !dropped.contains(_postKey(value)))
+          .toList();
+    }
+    notifyListeners();
+  }
+
   Future<void> unhidePost(MediaPost post, {Board? board}) async {
     final same = _same(post, board);
     _setHidden(

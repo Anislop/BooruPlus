@@ -1042,6 +1042,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Material(
+                          color: panel,
+                          borderRadius: BorderRadius.circular(16),
+                          clipBehavior: Clip.antiAlias,
+                          child: SwitchListTile.adaptive(
+                            value: _settings.holdQuickActions,
+                            onChanged: _busy
+                                ? null
+                                : (value) => setState(
+                                    () => _settings = _settings.copyWith(
+                                      holdQuickActions: value,
+                                    ),
+                                  ),
+                            secondary: const Icon(Icons.touch_app_outlined),
+                            title: const Text('Hold for quick actions'),
+                            subtitle: const Text(
+                              'Holding a post previews it; drag to favorite or hide. Off: holding a post selects posts to hide, favorite, or download together.',
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                            ),
+                          ),
+                        ),
+                      ),
                       const SectionLabel('Discovery'),
                       _slider(
                         'Posts per batch',

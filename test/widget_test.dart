@@ -1028,6 +1028,52 @@ void main() {
     state.dispose();
   });
 
+  testWidgets('holding a feed post selects it for batch hide', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo([
+        <Map<String, dynamic>>[
+          for (final id in [31, 32, 33])
+            {
+              ...post(id),
+              'url': 'https://example.com/select-$id.jpg',
+              'previewUrl': 'https://example.com/select-$id-preview.jpg',
+            },
+        ],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: HomeScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byType(MediaTile).first);
+    await tester.pumpAndSettle();
+    expect(find.text('Favorite'), findsNothing);
+    expect(find.text('1 selected'), findsOneWidget);
+
+    await tester.tap(find.byType(MediaTile).at(1));
+    await tester.pump();
+    expect(find.text('2 selected'), findsOneWidget);
+    expect(find.byTooltip('Favorite selected'), findsOneWidget);
+    expect(find.byTooltip('Download selected'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Hide selected'));
+    await tester.pumpAndSettle();
+    expect(state.hiddenPosts, hasLength(2));
+    expect(state.posts.map((value) => value.id), [33]);
+    expect(find.text('2 selected'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox());
+    state.dispose();
+  });
+
   testWidgets('quick actions survive a feed rebuild during a long press', (
     tester,
   ) async {
@@ -1040,7 +1086,9 @@ void main() {
       repository: FakeRepo([
         <Map<String, dynamic>>[feedMap],
       ]),
-      store: MemoryStore()..selected = Board.danbooru,
+      store: MemoryStore()
+        ..selected = Board.danbooru
+        ..settings = const AppSettings(holdQuickActions: true),
     );
     await state.initialize();
     await tester.pumpWidget(

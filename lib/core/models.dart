@@ -1013,6 +1013,7 @@ class AppSettings {
     this.dataSaver = DataSaverMode.off,
     this.slideshowSeconds = 5,
     this.doubleTapFavorite = false,
+    this.holdQuickActions = false,
     this.volumeKeyPaging = false,
     this.oneHanded = true,
     this.handedness = Handedness.right,
@@ -1118,6 +1119,10 @@ class AppSettings {
 
   /// Double-tapping an image in the viewer favorites it instead of zooming.
   final bool doubleTapFavorite;
+
+  /// Holding a feed post opens the drag-to-choose quick actions (preview,
+  /// favorite, hide) instead of starting multi-select.
+  final bool holdQuickActions;
 
   /// The volume keys move between posts in the viewer.
   final bool volumeKeyPaging;
@@ -1297,6 +1302,7 @@ class AppSettings {
     dataSaver: dataSaver,
     slideshowSeconds: slideshowSeconds.clamp(2, 60),
     doubleTapFavorite: doubleTapFavorite,
+    holdQuickActions: holdQuickActions,
     volumeKeyPaging: volumeKeyPaging,
     oneHanded: oneHanded,
     handedness: handedness,
@@ -1382,6 +1388,7 @@ class AppSettings {
     DataSaverMode? dataSaver,
     int? slideshowSeconds,
     bool? doubleTapFavorite,
+    bool? holdQuickActions,
     bool? volumeKeyPaging,
     bool? oneHanded,
     Handedness? handedness,
@@ -1450,6 +1457,7 @@ class AppSettings {
     dataSaver: dataSaver ?? this.dataSaver,
     slideshowSeconds: slideshowSeconds ?? this.slideshowSeconds,
     doubleTapFavorite: doubleTapFavorite ?? this.doubleTapFavorite,
+    holdQuickActions: holdQuickActions ?? this.holdQuickActions,
     volumeKeyPaging: volumeKeyPaging ?? this.volumeKeyPaging,
     oneHanded: oneHanded ?? this.oneHanded,
     handedness: handedness ?? this.handedness,
@@ -1529,6 +1537,7 @@ class AppSettings {
     'dataSaver': dataSaver.name,
     'slideshowSeconds': slideshowSeconds,
     'doubleTapFavorite': doubleTapFavorite,
+    'holdQuickActions': holdQuickActions,
     'volumeKeyPaging': volumeKeyPaging,
     'oneHanded': oneHanded,
     'handedness': handedness.name,
@@ -1617,6 +1626,7 @@ class AppSettings {
         DataSaverMode.off,
     slideshowSeconds: _asInt(map['slideshowSeconds'], 5),
     doubleTapFavorite: _asBool(map['doubleTapFavorite'], false),
+    holdQuickActions: _asBool(map['holdQuickActions'], false),
     volumeKeyPaging: _asBool(map['volumeKeyPaging'], false),
     oneHanded: _asBool(map['oneHanded'], false),
     handedness:
@@ -1863,6 +1873,7 @@ class AppSettings {
         other.dataSaver != dataSaver ||
         other.slideshowSeconds != slideshowSeconds ||
         other.doubleTapFavorite != doubleTapFavorite ||
+        other.holdQuickActions != holdQuickActions ||
         other.volumeKeyPaging != volumeKeyPaging ||
         other.oneHanded != oneHanded ||
         other.handedness != handedness ||
@@ -1986,6 +1997,7 @@ class AppSettings {
     dataSaver,
     slideshowSeconds,
     doubleTapFavorite,
+    holdQuickActions,
     volumeKeyPaging,
     oneHanded,
     handedness,

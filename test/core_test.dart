@@ -296,6 +296,38 @@ void main() {
     },
   );
 
+  test('hold quick actions default off, persist, and change equality', () {
+    expect(AppSettings.fromMap({'columns': 3}).holdQuickActions, isFalse);
+    const settings = AppSettings(holdQuickActions: true);
+    expect(AppSettings.decode(settings.encode()).holdQuickActions, isTrue);
+    expect(settings, isNot(const AppSettings()));
+    expect(settings.hashCode, isNot(const AppSettings().hashCode));
+    expect(settings.copyWith(holdQuickActions: false), const AppSettings());
+  });
+
+  test('hidePosts hides several posts with one write', () async {
+    final store = MemoryStore()..selected = Board.danbooru;
+    final state = AppState(
+      repository: FakeRepo([
+        [post(1), post(2), post(3)],
+      ]),
+      store: store,
+    );
+    await state.initialize();
+    final first = state.posts[0], second = state.posts[1];
+    await state.hidePosts([
+      SavedPost(board: Board.danbooru, post: first),
+      SavedPost(board: Board.danbooru, post: second),
+      SavedPost(board: Board.danbooru, post: first),
+    ]);
+    expect(state.posts.map((value) => value.id), [3]);
+    expect(state.hiddenPosts, hasLength(2));
+    expect(state.isHidden(first, board: Board.danbooru), isTrue);
+    await state.hidePosts([SavedPost(board: Board.danbooru, post: first)]);
+    expect(state.hiddenPosts, hasLength(2));
+    state.dispose();
+  });
+
   test('no share defaults off, persists, and changes equality', () {
     expect(AppSettings.fromMap({'columns': 3}).noShare, isFalse);
     const settings = AppSettings(noShare: true);
