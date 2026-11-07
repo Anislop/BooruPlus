@@ -245,6 +245,7 @@ class MainActivity : FlutterActivity() {
             "exportFile" -> exportFile(call, result)
             "importFile" -> importFile(call, result)
             "pools" -> pools(call, result)
+            "tagWiki" -> tagWiki(call, result)
             "isMeteredNetwork" -> result.success(
                 getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
             )
@@ -681,6 +682,15 @@ class MainActivity : FlutterActivity() {
                 parsePools(response.body?.string() ?: "[]")
             }
         }
+    }
+
+    /** A Sankaku-family tag's details and wiki article; null for an unknown tag. */
+    private fun tagWiki(call: MethodCall, result: MethodChannel.Result) {
+        val api = sankakuFamily(call.argument<String>("board"))
+        if (api == null) { result.error("INVALID_BOARD", "Tag articles are not supported for this imageboard", null); return }
+        val tag = call.argument<String>("tag")?.trim()
+        if (tag.isNullOrEmpty() || tag.length > 256) { result.error("INVALID_REQUEST", "A tag is required", null); return }
+        background(result) { api.tagWiki(tag) }
     }
 
     /** Replaces the launcher icon's shortcuts (favorites and saved searches). */

@@ -948,6 +948,18 @@ class DeviceService {
         .toList(growable: false);
   }
 
+  /// The details and wiki article of [tag] on a Sankaku-family [board]
+  /// ([Board.isSankakuFamily]); null when the website has no such tag.
+  Future<TagWiki?> tagWiki({required Board board, required String tag}) async {
+    final response = await channel.invokeMethod<Map<dynamic, dynamic>>(
+      'tagWiki',
+      {'board': board.name, 'tag': tag},
+    );
+    if (response == null) return null;
+    final wiki = TagWiki.fromMap(response);
+    return wiki.name.isEmpty ? null : wiki;
+  }
+
   /// Replaces the launcher icon's shortcuts.
   Future<void> setShortcuts(List<AppShortcut> shortcuts) async {
     try {
@@ -1048,6 +1060,61 @@ class PostPool {
     name: '${map['name'] ?? ''}',
     postCount: map['postCount'] is num ? (map['postCount'] as num).toInt() : 0,
   );
+}
+
+/// A tag's details and wiki article, from [DeviceService.tagWiki].
+class TagWiki {
+  const TagWiki({
+    required this.name,
+    this.displayName = '',
+    this.japaneseName = '',
+    this.category = TagCategory.general,
+    this.postCount = 0,
+    this.poolCount = 0,
+    this.body = '',
+    this.updatedAt,
+    this.alias,
+    this.aliasOf,
+  });
+
+  /// The tag as searched, such as `long_hair`.
+  final String name;
+
+  /// The website's English and Japanese names; empty when unknown.
+  final String displayName, japaneseName;
+  final TagCategory category;
+  final int postCount, poolCount;
+
+  /// The article in the website's DText markup; empty without one.
+  final String body;
+  final DateTime? updatedAt;
+
+  /// The requested tag when it is an alias of [name].
+  final String? alias;
+
+  /// The canonical tag of an alias whose own lookup failed.
+  final String? aliasOf;
+
+  factory TagWiki.fromMap(Map<dynamic, dynamic> map) {
+    String text(String key) => map[key] is String ? map[key] as String : '';
+    int count(String key) => map[key] is num ? (map[key] as num).toInt() : 0;
+    String? optional(String key) => text(key).isEmpty ? null : text(key);
+    final updated = map['updatedAt'];
+    return TagWiki(
+      name: text('name'),
+      displayName: text('displayName'),
+      japaneseName: text('japaneseName'),
+      category: TagCategoryInfo.parse(text('category')),
+      postCount: count('postCount'),
+      poolCount: count('poolCount'),
+      body: text('body'),
+      updatedAt: updated is num
+          ? DateTime.fromMillisecondsSinceEpoch(updated.toInt())
+          : null,
+      alias: optional('alias'),
+      aliasOf: optional('aliasOf'),
+    );
+  }
 }
 
 /// A launcher icon shortcut: open favorites, or run a saved search. Also

@@ -81,6 +81,7 @@ Swipe up in the viewer for everything about a post.
 - Uploader, original source, and **Open in browser**
 - **Find on other sites** looks up the same file elsewhere
 - Tap a tag to search it. **Hold** a tag to search it on all sites, add it to or exclude it from your search, block it, or copy it
+- On Sankaku Complex and Idol Complex, **About tag** shows the tag's description and wiki article
 
 </td>
 </tr>
@@ -170,7 +171,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Video | Streams video, with a lower-resolution option on e621 and e926. |
 | Data saver | Shows the website's smaller sample image, with **Load original** for full size. |
 | Tags & details | Rating, size, uploader, source, typed tags, and the original file size. |
-| Tag menu | Hold a tag: search it, search on all sites, add or exclude it, block it on one or all websites, or copy it. |
+| Tag menu | Hold a tag: search it, search on all sites, add or exclude it, block it on one or all websites, or copy it. On Sankaku Complex and Idol Complex, **About tag** shows its description and wiki article. |
 | Related posts | Parent and child posts, pools (Danbooru, e621, e926), and related posts that share artists or characters. |
 | Find on other sites | Finds the same file on other websites. |
 | Download and share | Download posts locally on your device. |

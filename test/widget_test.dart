@@ -1788,6 +1788,8 @@ void main() {
     await tester.pump();
     await tester.longPress(chip);
     await tester.pumpAndSettle();
+    // Tag articles are Sankaku's.
+    expect(find.byKey(const ValueKey('tag_about')), findsNothing);
     await tester.tap(find.text('Search on all sites'));
     await tester.pumpAndSettle();
     expect(
@@ -1796,6 +1798,57 @@ void main() {
           .initialTags,
       ['blue_sky'],
     );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('holding a Sankaku tag offers its article', (tester) async {
+    const channel = MethodChannel('booruplus/platform');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final asked = <Object?>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method != 'tagWiki') return null;
+      asked.add(call.arguments);
+      return {
+        'name': 'blue_sky',
+        'displayName': 'Blue sky',
+        'category': 'general',
+        'postCount': 7,
+        'body': 'A sky that is blue.',
+      };
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.sankaku,
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap(post(1, tags: ['blue_sky']));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.sankaku, state: state),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Tags & details'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final chip = find.widgetWithText(ActionChip, 'blue_sky');
+    await tester.ensureVisible(chip);
+    await tester.pump();
+    await tester.longPress(chip);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('tag_about')));
+    await tester.pumpAndSettle();
+    expect(asked, [
+      {'board': 'sankaku', 'tag': 'blue_sky'},
+    ]);
+    expect(find.text('Blue sky'), findsOneWidget);
+    expect(find.text('A sky that is blue.'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 5));

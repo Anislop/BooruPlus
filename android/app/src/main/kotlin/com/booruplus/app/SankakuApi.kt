@@ -43,6 +43,9 @@ internal class SankakuTagLimitException(val limit: Int?) : IOException("Sankaku 
  *   password is HTTP 403; a bad or expired bearer token is HTTP 401.
  * - Tag-limit refusals are HTTP 429 with a code ending in `tags-limit` and the
  *   allowed count in `param`.
+ * - `/tag-and-wiki/name/{tag}` returns `{wiki, tag}` anonymously: `wiki` is
+ *   null for tags without an article, an alias's `tag.alias_of` holds its
+ *   canonical tag, and an unknown tag is HTTP 404.
  */
 internal class SankakuApi(
     private val client: OkHttpClient,
@@ -120,6 +123,30 @@ internal class SankakuApi(
         return parseSankakuSuggestions(body as? JSONArray ?: JSONArray(), limit)
     }
 
+    /**
+     * The tag's details and wiki article (see [parseSankakuTagWiki]), or null
+     * when Sankaku has no such tag. An alias shows its canonical tag, with
+     * the requested name as `alias`. Always anonymous: articles need no session.
+     */
+    fun tagWiki(name: String): Map<String, Any?>? {
+        val requested = tagAndWiki(name)?.let(::parseSankakuTagWiki) ?: return null
+        val canonical = requested["aliasOf"] as? String ?: return requested
+        if (canonical.equals(requested["name"] as String, ignoreCase = true)) return requested
+        val target = tagAndWiki(canonical)?.let(::parseSankakuTagWiki) ?: return requested
+        return target + mapOf("alias" to requested["name"], "aliasOf" to null)
+    }
+
+    private fun tagAndWiki(name: String): JSONObject? {
+        val value = name.trim()
+        if (value.isEmpty()) return null
+        val url = endpoint("tag-and-wiki/name")
+        // OkHttp resolves "." and ".." segments away; the site escapes their
+        // dots twice instead, as its web client does.
+        if (DOT_SEGMENT.matches(value)) url.addEncodedPathSegment(value.replace(".", "%252E"))
+        else url.addPathSegment(value)
+        return request(url.build(), null, missing = true) as? JSONObject
+    }
+
     /** Exchanges a password for a session map; the password is not kept. */
     fun signIn(login: String, password: String): Map<String, Any?> {
         val body = JSONObject().put("login", login).put("password", password)
@@ -165,7 +192,8 @@ internal class SankakuApi(
         .scheme("https").host(apiHost).addPathSegments(path)
         .addQueryParameter("lang", "en")
 
-    private fun request(url: HttpUrl, accessToken: String?, deadline: Long? = null): Any {
+    /** With [missing], HTTP 404 returns null instead of failing. */
+    private fun request(url: HttpUrl, accessToken: String?, deadline: Long? = null, missing: Boolean = false): Any? {
         val builder = Request.Builder().url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json")
@@ -179,6 +207,7 @@ internal class SankakuApi(
         call.execute().use { response ->
             // Error bodies carry codes such as tag limits; the caller reports
             // a generic message and never the request URL or token.
+            if (missing && response.code == 404) return null
             if (!response.isSuccessful) throw requestError(response, !accessToken.isNullOrBlank())
             val text = response.body?.string()?.trim() ?: throw IOException("Empty response")
             val parsed = if (text.startsWith("[")) JSONArray(text) else JSONObject(text)
@@ -216,6 +245,7 @@ internal class SankakuApi(
         private const val PAGE_SIZE = 100
         private const val MAX_REQUESTS = 8
         private const val MAX_CURSORS = 256
+        private val DOT_SEGMENT = Regex("^\\.{1,2}$")
     }
 }
 
@@ -344,6 +374,32 @@ internal fun parseSankakuPost(
         "hasChildren" to post.optBoolean("has_children"),
         // The full sample, for the viewer's data saver; the preview may be it already.
         "sampleUrl" to (sankakuMediaUrl(jsonString(post, "sample_url"))?.takeIf { extension(it) in IMAGE_EXTENSIONS && it != url } ?: ""),
+    )
+}
+
+private const val MAX_WIKI_CHARS = 20_000
+
+/**
+ * The channel's tag wiki map from a `/tag-and-wiki` response, or null without
+ * a tag: `name`, `displayName` and `japaneseName` (empty when unknown),
+ * `category`, `postCount`, `poolCount`, `body` (the article's DText, empty
+ * without one), nullable `updatedAt` (epoch ms), and nullable `aliasOf`.
+ */
+internal fun parseSankakuTagWiki(body: JSONObject): Map<String, Any?>? {
+    val tag = body.optJSONObject("tag") ?: return null
+    val name = jsonString(tag, "tagName") ?: jsonString(tag, "name") ?: return null
+    val wiki = body.optJSONObject("wiki")
+    val category = sankakuTagCategory(tag.opt("type"))
+    return mapOf(
+        "name" to name,
+        "displayName" to (jsonString(tag, "name_en") ?: ""),
+        "japaneseName" to (jsonString(tag, "name_ja") ?: ""),
+        "category" to if (category == "unknown") "general" else category,
+        "postCount" to tag.optInt("post_count", tag.optInt("count")),
+        "poolCount" to tag.optInt("pool_count"),
+        "body" to (jsonString(wiki, "body") ?: "").take(MAX_WIKI_CHARS),
+        "updatedAt" to wiki?.optJSONObject("updated_at")?.optLong("s", 0L)?.takeIf { it > 0 }?.times(1000),
+        "aliasOf" to jsonString(tag.optJSONObject("alias_of"), "tagName")?.takeUnless { it == name },
     )
 }
 

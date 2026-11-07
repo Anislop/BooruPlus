@@ -16,6 +16,7 @@ import 'media_image.dart';
 import 'multi_search.dart';
 import 'premium_page.dart';
 import 'site_catalog.dart';
+import 'tag_wiki.dart';
 import 'theme.dart';
 
 /// How a tag chosen in the viewer changes the search.
@@ -1086,6 +1087,14 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
                 ),
                 subtitle: Text(board.label),
               ),
+              // Sankaku's tag articles, as in its own app.
+              if (board.isSankakuFamily)
+                ListTile(
+                  key: const ValueKey('tag_about'),
+                  leading: const Icon(Icons.info_outline_rounded),
+                  title: const Text('About tag'),
+                  onTap: () => Navigator.pop(context, 'about'),
+                ),
               ListTile(
                 leading: const Icon(Icons.search_rounded),
                 title: const Text('Search this tag'),
@@ -1131,6 +1140,15 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
     );
     if (!mounted || action == null) return;
     switch (action) {
+      case 'about':
+        await showTagWiki(
+          context,
+          board: board,
+          tag: tag,
+          onSearch: (name) {
+            if (mounted) _browseTag(name);
+          },
+        );
       case 'search':
         _browseTag(tag);
       case 'search_all':
