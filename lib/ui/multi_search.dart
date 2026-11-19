@@ -22,9 +22,25 @@ class MultiSearchScreen extends StatefulWidget {
   State<MultiSearchScreen> createState() => _MultiSearchScreenState();
 }
 
+/// A search to return to with back, like the feed's search history.
+class _HistoryEntry {
+  _HistoryEntry(this.tags, {this.search, this.offset = 0, this.viewer});
+  final List<String> tags;
+
+  /// The loaded results, so back restores them instead of searching again.
+  /// Only the newest entries keep one.
+  MultiSiteSearchSnapshot? search;
+  final double offset;
+
+  /// The viewer a tag was chosen in, reopened at that post on back.
+  final ({List<SavedPost> posts, int index})? viewer;
+}
+
 class _MultiSearchScreenState extends State<MultiSearchScreen> {
+  static const _restorableEntries = 5;
   late final MultiSiteSearch _search = widget.state.multiSiteSearch();
   final _scroll = ScrollController();
+  final _history = <_HistoryEntry>[];
   late List<String> _tags = List.of(widget.initialTags);
   // Websites that can search now, and those chosen for this search.
   List<Board> _available = const [];
@@ -58,11 +74,140 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     super.dispose();
   }
 
-  void _run() {
+  /// Searches [_tags]. The search shown before it is kept, so back
+  /// returns to it; [viewer] is the viewer a tag was chosen in.
+  void _run({({List<SavedPost> posts, int index})? viewer}) {
     if (_tags.isEmpty || _chosen.isEmpty) return;
+    final current = _search.tags;
+    if (current.isNotEmpty && !_sameQuery(current, _tags)) {
+      setState(() {
+        _history.add(
+          _HistoryEntry(
+            current,
+            search: _search.snapshot(),
+            offset: _scroll.hasClients ? _scroll.offset : 0,
+            viewer: viewer,
+          ),
+        );
+        // Older entries search again rather than holding their results.
+        final stale = _history.length - _restorableEntries;
+        for (var i = 0; i < stale; i++) {
+          _history[i].search = null;
+        }
+      });
+    }
     if (_scroll.hasClients) _scroll.jumpTo(0);
+    widget.state.recordMultiSearch(_tags);
     _search.search(_tags, _available.where(_chosen.contains));
   }
+
+  bool _sameQuery(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Returns to the previous search, at the scroll position it was left,
+  /// and reopens the viewer it was left from.
+  void _back() {
+    if (_history.isEmpty) return;
+    final previous = _history.removeLast();
+    setState(() => _tags = List.of(previous.tags));
+    final boards = _available.where(_chosen.contains);
+    final snapshot = previous.search;
+    if (snapshot != null) {
+      _search.restore(snapshot, boards);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scroll.hasClients) return;
+        _scroll.jumpTo(
+          previous.offset.clamp(0.0, _scroll.position.maxScrollExtent),
+        );
+      });
+    } else {
+      if (_scroll.hasClients) _scroll.jumpTo(0);
+      _search.search(previous.tags, boards);
+    }
+    final viewer = previous.viewer;
+    if (viewer != null) _openViewer(viewer.posts, viewer.index);
+  }
+
+  /// Recent searches on all sites; one can be searched again or swiped
+  /// away.
+  Future<void> _showHistory() async {
+    final state = widget.state;
+    final query = await showModalBottomSheet<List<String>>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => ListenableBuilder(
+        listenable: state,
+        builder: (context, _) {
+          final history = state.multiSearchHistory;
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * .75,
+              ),
+              child: history.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Text(
+                        state.settings.incognito
+                            ? 'Incognito is on, so searches are not recorded.'
+                            : 'No recent searches yet. Searches on all sites appear here.',
+                      ),
+                    )
+                  : ListView(
+                      key: const ValueKey('multi_search_history'),
+                      shrinkWrap: true,
+                      children: [
+                        ListTile(
+                          title: const Text('Recent searches'),
+                          subtitle: const Text(
+                            'Swipe a search away to delete it',
+                          ),
+                          leading: const Icon(Icons.history_rounded),
+                          trailing: TextButton(
+                            key: const ValueKey('multi_search_history_clear'),
+                            onPressed: state.clearMultiSearchHistory,
+                            child: const Text('Clear'),
+                          ),
+                        ),
+                        for (final query in history)
+                          Dismissible(
+                            key: ValueKey('multi_history:${query.join(' ')}'),
+                            background: _dismissBackground(
+                              AlignmentDirectional.centerStart,
+                            ),
+                            secondaryBackground: _dismissBackground(
+                              AlignmentDirectional.centerEnd,
+                            ),
+                            onDismissed: (_) => state.removeMultiSearch(query),
+                            child: ListTile(
+                              leading: const Icon(Icons.history_rounded),
+                              title: Text(query.join(' ')),
+                              onTap: () => Navigator.pop(context, query),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+          );
+        },
+      ),
+    );
+    if (query == null || !mounted) return;
+    setState(() => _tags = List.of(query));
+    _run();
+  }
+
+  Widget _dismissBackground(AlignmentGeometry alignment) => Container(
+    color: accent.withValues(alpha: .18),
+    alignment: alignment,
+    padding: const EdgeInsets.symmetric(horizontal: 24),
+    child: Icon(Icons.delete_outline, color: ink(.70)),
+  );
 
   /// Switching a website applies to the current results at once: its
   /// posts are hidden or shown, and loading more asks only the websites
@@ -106,10 +251,11 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
   }
 
   /// Opens the viewer; a tag chosen there is searched here.
-  Future<void> _open(List<SavedPost> results, int index) async {
-    final displayed = [
-      for (final saved in results) widget.state.displayReady(saved),
-    ];
+  Future<void> _open(List<SavedPost> results, int index) => _openViewer([
+    for (final saved in results) widget.state.displayReady(saved),
+  ], index);
+
+  Future<void> _openViewer(List<SavedPost> displayed, int index) async {
     final result = await Navigator.push<ViewerTagBrowse>(
       context,
       MaterialPageRoute(
@@ -125,12 +271,31 @@ class _MultiSearchScreenState extends State<MultiSearchScreen> {
     );
     if (result == null || !mounted) return;
     setState(() => _tags = [result.tag]);
-    _run();
+    _run(viewer: (posts: displayed, index: result.index));
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Search all sites')),
+  Widget build(BuildContext context) => PopScope<void>(
+    // Back returns to the previous search first, like the feed.
+    canPop: _history.isEmpty,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop) _back();
+    },
+    child: _scaffold(context),
+  );
+
+  Widget _scaffold(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Search all sites'),
+      actions: [
+        IconButton(
+          key: const ValueKey('multi_search_history_button'),
+          tooltip: 'Recent searches',
+          icon: const Icon(Icons.history_rounded),
+          onPressed: _showHistory,
+        ),
+      ],
+    ),
     body: SafeArea(
       top: false,
       child: Column(

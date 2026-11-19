@@ -16,6 +16,7 @@ import 'downloads.dart';
 import 'media_viewer.dart';
 import 'media_image.dart';
 import 'multi_search.dart';
+import 'recently_viewed.dart';
 import 'premium_page.dart';
 import 'search_guide.dart';
 import 'settings.dart';
@@ -1439,6 +1440,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 state.setSafeMode(!state.settings.safeMode),
                           ),
                         IconButton(
+                          key: const ValueKey('drawer_recently_viewed'),
+                          tooltip: 'Recently viewed',
+                          visualDensity: VisualDensity.compact,
+                          color: ink(.70),
+                          icon: const Icon(Icons.history_rounded),
+                          onPressed: () => _openFromDrawer(
+                            (_) => RecentlyViewedScreen(state: state),
+                          ),
+                        ),
+                        IconButton(
                           tooltip: 'Learn to search',
                           visualDensity: VisualDensity.compact,
                           color: ink(.70),
@@ -1691,6 +1702,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ),
                       );
                     },
+                  ),
+                  ListTile(
+                    key: const ValueKey('drawer_recently_viewed'),
+                    leading: const Icon(Icons.history_rounded),
+                    title: const Text('Recently viewed'),
+                    onTap: () => _openFromDrawer(
+                      (_) => RecentlyViewedScreen(state: state),
+                    ),
                   ),
                   ListTile(
                     leading: const Icon(Icons.travel_explore_rounded),

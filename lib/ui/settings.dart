@@ -1869,7 +1869,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         icon: Icons.visibility_off_outlined,
                         title: 'Incognito',
-                        subtitle: "Don't record recent searches or searched and browsed tags. Also in the menu.",
+                        subtitle: "Don't record recent searches, recently viewed posts, or searched and browsed tags. Also in the menu.",
                       ),
                       _switchCard(
                         value: _settings.resumeFeed,
@@ -1880,6 +1880,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.restore_rounded,
                         title: 'Resume where you left off',
                         subtitle: 'Reopen each website at the posts and scroll position you left. Not saved in incognito.',
+                      ),
+                      const SizedBox(height: 16),
+                      KeyedSubtree(
+                        key: const ValueKey('settings_recently_viewed_limit'),
+                        child: _slider(
+                          'Recently viewed',
+                          'How many opened posts Recently viewed keeps. Not recorded in incognito.',
+                          _settings.recentlyViewedLimit,
+                          AppSettings.minRecentlyViewedLimit,
+                          AppSettings.maxRecentlyViewedLimit,
+                          (AppSettings.maxRecentlyViewedLimit -
+                                  AppSettings.minRecentlyViewedLimit) ~/
+                              10,
+                          (v) => setState(
+                            () => _settings = _settings.copyWith(
+                              recentlyViewedLimit: v,
+                            ),
+                          ),
+                        ),
                       ),
                       _switchCard(
                         value: _settings.noShare,

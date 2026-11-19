@@ -1049,6 +1049,8 @@ class AppSettings {
     this.safeModeBlurQuestionable = false,
     this.pinnedSearches = const [],
     this.resumeFeed = true,
+    this.multiSearchHistory = const [],
+    this.recentlyViewedLimit = defaultRecentlyViewedLimit,
   });
   final int columns, rows, batchSize;
 
@@ -1246,6 +1248,17 @@ class AppSettings {
   /// position) after the app restarts.
   final bool resumeFeed;
 
+  /// Recent searches made in Search all sites, newest first; kept apart
+  /// from [recentSearches], which belong to the feed.
+  final List<List<String>> multiSearchHistory;
+
+  /// How many opened posts Recently viewed keeps, between
+  /// [minRecentlyViewedLimit] and [maxRecentlyViewedLimit].
+  final int recentlyViewedLimit;
+  static const defaultRecentlyViewedLimit = 100;
+  static const minRecentlyViewedLimit = 30;
+  static const maxRecentlyViewedLimit = 400;
+
   /// The [savedSearchMarks] key for [query] on [board].
   static String savedSearchKey(Board board, List<String> query) =>
       '${board.name}|${_normalizedTags(query).join(' ')}';
@@ -1355,6 +1368,11 @@ class AppSettings {
     safeModeBlurQuestionable: safeMode && safeModeBlurQuestionable,
     pinnedSearches: _normalizedQueries(pinnedSearches, limit: 20),
     resumeFeed: resumeFeed,
+    multiSearchHistory: _normalizedQueries(multiSearchHistory, limit: 30),
+    recentlyViewedLimit: recentlyViewedLimit.clamp(
+      minRecentlyViewedLimit,
+      maxRecentlyViewedLimit,
+    ),
   );
 
   AppSettings copyWith({
@@ -1424,6 +1442,8 @@ class AppSettings {
     bool? safeModeBlurQuestionable,
     List<List<String>>? pinnedSearches,
     bool? resumeFeed,
+    List<List<String>>? multiSearchHistory,
+    int? recentlyViewedLimit,
   }) => AppSettings(
     columns: columns ?? this.columns,
     rows: rows ?? this.rows,
@@ -1497,6 +1517,8 @@ class AppSettings {
         safeModeBlurQuestionable ?? this.safeModeBlurQuestionable,
     pinnedSearches: pinnedSearches ?? this.pinnedSearches,
     resumeFeed: resumeFeed ?? this.resumeFeed,
+    multiSearchHistory: multiSearchHistory ?? this.multiSearchHistory,
+    recentlyViewedLimit: recentlyViewedLimit ?? this.recentlyViewedLimit,
   ).normalized();
   static const _unset = Object();
 
@@ -1576,6 +1598,8 @@ class AppSettings {
     'safeModeBlurQuestionable': safeModeBlurQuestionable,
     'pinnedSearches': pinnedSearches,
     'resumeFeed': resumeFeed,
+    'multiSearchHistory': multiSearchHistory,
+    'recentlyViewedLimit': recentlyViewedLimit,
   };
   factory AppSettings.fromMap(Map<dynamic, dynamic> map) => AppSettings(
     columns: _asInt(map['columns'], 3),
@@ -1685,6 +1709,11 @@ class AppSettings {
     safeModeBlurQuestionable: _asBool(map['safeModeBlurQuestionable'], false),
     pinnedSearches: _queriesFromMap(map['pinnedSearches']),
     resumeFeed: _asBool(map['resumeFeed'], true),
+    multiSearchHistory: _queriesFromMap(map['multiSearchHistory']),
+    recentlyViewedLimit: _asInt(
+      map['recentlyViewedLimit'],
+      defaultRecentlyViewedLimit,
+    ),
   ).normalized();
   String encode() => jsonEncode(toMap());
   factory AppSettings.decode(String value) =>
@@ -1909,6 +1938,8 @@ class AppSettings {
         other.safeModeBlurQuestionable != safeModeBlurQuestionable ||
         !_sameQueries(other.pinnedSearches, pinnedSearches) ||
         other.resumeFeed != resumeFeed ||
+        !_sameQueries(other.multiSearchHistory, multiSearchHistory) ||
+        other.recentlyViewedLimit != recentlyViewedLimit ||
         !_sameBoardTags(other.boardBlacklists, boardBlacklists) ||
         !_sameBoardQueries(other.boardSavedQueries, boardSavedQueries) ||
         other.blacklist.length != blacklist.length ||
@@ -2032,6 +2063,8 @@ class AppSettings {
     safeModeBlurQuestionable,
     Object.hashAll(pinnedSearches.map(Object.hashAll)),
     resumeFeed,
+    Object.hashAll(multiSearchHistory.map(Object.hashAll)),
+    recentlyViewedLimit,
     Object.hashAll(
       boardHiddenUploaders.entries.map(
         (entry) => Object.hash(entry.key, Object.hashAll(entry.value)),

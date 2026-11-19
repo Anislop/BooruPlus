@@ -145,6 +145,13 @@ class _MediaViewerState extends State<MediaViewer> with WidgetsBindingObserver {
       _screenAwake.setEnabled(true);
     }
     widget.state.recordBrowsedTags(_post.tags);
+    // The opened post goes to Recently viewed once this frame is built,
+    // since recording notifies the app's listeners.
+    final opened = _post;
+    final openedBoard = _boardAt(_index);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.state.recordViewed(opened, board: openedBoard);
+    });
     HardwareKeyboard.instance.addHandler(_handleKey);
     if (widget.state.settings.dataSaver == DataSaverMode.mobileData) {
       _device.isMeteredNetwork().then((metered) {

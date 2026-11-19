@@ -95,6 +95,7 @@ One search across every website you use, in one merged grid.
 - Tag suggestions with post counts as you type
 - Switch individual websites off for the search
 - Every result is marked with its website's logo
+- Back returns to the previous search, and its own recent-search history
 - Also available by holding a tag in any post
 
 </td>
@@ -135,7 +136,8 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Date and Rating filters | Narrow results by upload date and by rating (general, sensitive, questionable, explicit) on websites that have ratings. |
 | Saved searches | Bookmark searches per website, or share one list across every website. New-post counts show what arrived since your last visit. |
 | Recent searches | Your search history, with suggestions ranked by how often you use each tag. |
-| Search all sites | Search on all websites at once, you could also hide some. |
+| Search all sites | Search on all websites at once, you could also hide some. Back returns to the previous search, and it keeps its own recent searches. |
+| Recently viewed | The posts you opened from any website, newest first. Keeps 100 by default (30 to 400 in Settings). |
 | Search guides | In-app syntax help for each website's search features. |
 | Back navigation | Going back restores the previous feed exactly where you left it. |
 | Rate-limit handling | Waits and retries when a website says it is busy, with a countdown when it keeps refusing. |
@@ -232,7 +234,7 @@ Switch websites from the side menu. Each website keeps its own feed, saved searc
 | Reduce motion | Skips the opening animation and the blur behind panels for slower phones. |
 | App lock | Fingerprint, face, or screen lock when opening the app or returning after 30 seconds away. |
 | Hide in recent apps | Blanks the app preview in recent apps and blocks screenshots. |
-| Incognito | Stops recording recent searches, tag usage, and booruShorts learning and history. |
+| Incognito | Stops recording recent searches, recently viewed posts, tag usage, and booruShorts learning and history. |
 | Backup and restore | Export settings, favorites, and hidden posts to a file and restore them later. Credentials are never included. |
 | Cache | See how much space the cache uses and clear it. |
 | Website connections | Add API keys or sign in where a website needs it. Credentials stay in Android's encrypted storage. |

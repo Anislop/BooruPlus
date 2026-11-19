@@ -131,6 +131,10 @@ abstract interface class PostStore {
   /// JSON-safe map of sanitized posts and paging state.
   Future<Map<String, dynamic>> loadFeeds();
   Future<void> saveFeeds(Map<String, dynamic> feeds);
+
+  /// Posts opened in the viewer (Recently viewed), newest first.
+  Future<List<SavedPost>> loadViewed();
+  Future<void> saveViewed(Iterable<SavedPost> posts);
 }
 
 class MemoryPostStore implements PostStore {
@@ -164,6 +168,12 @@ class MemoryPostStore implements PostStore {
   @override
   Future<void> saveFeeds(Map<String, dynamic> feeds) async =>
       _feeds = jsonDecode(jsonEncode(feeds)) as Map<String, dynamic>;
+  List<SavedPost> _viewed = const [];
+  @override
+  Future<List<SavedPost>> loadViewed() async => _viewed;
+  @override
+  Future<void> saveViewed(Iterable<SavedPost> posts) async =>
+      _viewed = List.unmodifiable(posts.map((saved) => saved.sanitized()));
 }
 
 /// Where the booruShorts interest profile ([ShortsProfile.toMap]) is kept.
@@ -237,6 +247,10 @@ class LocalPostStore implements PostStore {
       _save('favorites', posts);
   @override
   Future<void> saveHidden(Iterable<SavedPost> posts) => _save('hidden', posts);
+  @override
+  Future<List<SavedPost>> loadViewed() => _load('viewed');
+  @override
+  Future<void> saveViewed(Iterable<SavedPost> posts) => _save('viewed', posts);
   Future<void> _save(String name, Iterable<SavedPost> posts) async {
     final values = posts
         .map((saved) => jsonEncode(_sanitized(saved).toMap()))

@@ -2211,10 +2211,11 @@ void main() {
       expect(read('https://danbooru.donmai.us/posts/random'), isNull);
       // Media files on a website's host are not posts.
       expect(read('https://realbooru.com/images/12/ab/cd.jpg'), isNull);
-      expect(
-        read('https://aibooru.online/posts/1'),
-        (Board.aibooru, '1', const <String>[]),
-      );
+      expect(read('https://aibooru.online/posts/1'), (
+        Board.aibooru,
+        '1',
+        const <String>[],
+      ));
       expect(read('https://danbooru.donmai.us/posts?tags=%E0%A4%A'), isNull);
     });
 
@@ -2591,6 +2592,166 @@ void main() {
   });
 
   group('quality of life', () {
+    test('history settings default, clamp, and round-trip', () {
+      final legacy = AppSettings.fromMap({'columns': 3});
+      expect(legacy.multiSearchHistory, isEmpty);
+      expect(legacy.recentlyViewedLimit, 100);
+      expect(
+        AppSettings.fromMap({'recentlyViewedLimit': 5}).recentlyViewedLimit,
+        30,
+      );
+      expect(
+        AppSettings.fromMap({'recentlyViewedLimit': 5000}).recentlyViewedLimit,
+        400,
+      );
+      final settings = const AppSettings(
+        multiSearchHistory: [
+          ['cat'],
+          ['blue_sky', 'cloud'],
+        ],
+        recentlyViewedLimit: 250,
+      ).normalized();
+      final restored = AppSettings.decode(settings.encode());
+      expect(restored, settings);
+      expect(restored.multiSearchHistory, [
+        ['cat'],
+        ['blue_sky', 'cloud'],
+      ]);
+      expect(restored.recentlyViewedLimit, 250);
+    });
+
+    test('recently viewed keeps opened posts newest first, within the '
+        'limit, and not in incognito', () async {
+      final posts = MemoryPostStore();
+      final store = MemoryStore()
+        ..selected = Board.safebooru
+        ..settings = const AppSettings(recentlyViewedLimit: 30);
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: store,
+        postStore: posts,
+      );
+      await state.initialize();
+      for (var id = 1; id <= 35; id++) {
+        state.recordViewed(MediaPost.fromMap(post(id)));
+      }
+      // Opening one again moves it to the top rather than adding it twice.
+      state.recordViewed(MediaPost.fromMap(post(20)));
+      state.recordViewed(MediaPost.fromMap(post(20)), board: Board.danbooru);
+      final viewed = state.recentlyViewed;
+      expect(viewed, hasLength(30));
+      expect(viewed.take(3).map((saved) => (saved.board, saved.post.id)), [
+        (Board.danbooru, 20),
+        (Board.safebooru, 20),
+        (Board.safebooru, 35),
+      ]);
+      expect(viewed.where((saved) => saved.post.id == 20), hasLength(2));
+
+      await state.setIncognito(true);
+      state.recordViewed(MediaPost.fromMap(post(99)));
+      expect(state.recentlyViewed.first.post.id, 20);
+      await state.setIncognito(false);
+      // Waits for the pending write.
+      await state.recordViewed(
+        MediaPost.fromMap(post(20)),
+        board: Board.danbooru,
+      );
+
+      // Saved and reloaded on the next launch.
+      final reopened = AppState(
+        repository: FakeRepo(const [[]]),
+        store: store,
+        postStore: posts,
+      );
+      await reopened.initialize();
+      expect(
+        reopened.recentlyViewed.map((saved) => saved.identity),
+        state.recentlyViewed.map((saved) => saved.identity),
+      );
+
+      await reopened.removeRecentlyViewed([reopened.recentlyViewed.first]);
+      expect(reopened.recentlyViewed.first.post.id, 20);
+      expect(reopened.recentlyViewed.first.board, Board.safebooru);
+      await reopened.hidePost(MediaPost.fromMap(post(20)));
+      expect(reopened.recentlyViewed.first.post.id, 35);
+      await reopened.clearRecentlyViewed();
+      expect(reopened.recentlyViewed, isEmpty);
+      expect(await posts.loadViewed(), isEmpty);
+    });
+
+    test('search on all sites keeps its own history', () async {
+      final state = AppState(
+        repository: FakeRepo(const [[]]),
+        store: MemoryStore()..selected = Board.safebooru,
+      );
+      await state.initialize();
+      await state.recordMultiSearch(['Blue_Sky', 'cloud']);
+      await state.recordMultiSearch(['cat']);
+      await state.recordMultiSearch(['blue_sky', 'cloud']);
+      expect(state.multiSearchHistory, [
+        ['blue_sky', 'cloud'],
+        ['cat'],
+      ]);
+      // The feed's recent searches are separate.
+      expect(state.recentSearches, isEmpty);
+
+      // Saving other settings keeps it.
+      await state.updateSettings(state.settings.copyWith(columns: 4));
+      expect(state.multiSearchHistory, hasLength(2));
+
+      await state.setIncognito(true);
+      await state.recordMultiSearch(['secret']);
+      expect(state.multiSearchHistory, hasLength(2));
+      await state.setIncognito(false);
+
+      await state.removeMultiSearch(['cat']);
+      expect(state.multiSearchHistory, [
+        ['blue_sky', 'cloud'],
+      ]);
+      await state.clearMultiSearchHistory();
+      expect(state.multiSearchHistory, isEmpty);
+    });
+
+    test(
+      'a search on all sites restores a snapshot without fetching',
+      () async {
+        final repo = FakeRepo([
+          [post(1), post(2)],
+          [post(3)],
+        ]);
+        final state = AppState(
+          repository: repo,
+          store: MemoryStore()..selected = Board.safebooru,
+        );
+        await state.initialize();
+        await state.updateSettings(const AppSettings(excludeAi: false));
+        final search = state.multiSiteSearch();
+        addTearDown(search.dispose);
+        await search.search(['cat'], [Board.safebooru]);
+        await search.loadMore();
+        final snapshot = search.snapshot()!;
+        expect(search.results.map((saved) => saved.post.id), [1, 2, 3]);
+
+        await search.search(['dog'], [Board.safebooru]);
+        expect(search.tags, ['dog']);
+        await state.hidePost(
+          MediaPost.fromMap(post(2)),
+          board: Board.safebooru,
+        );
+        final calls = repo.calls;
+        await search.restore(snapshot, [Board.safebooru]);
+        expect(repo.calls, calls);
+        expect(search.tags, ['cat']);
+        // Posts hidden since the snapshot stay hidden.
+        expect(search.results.map((saved) => saved.post.id), [1, 3]);
+
+        // Loading more continues after the restored pages.
+        await search.loadMore();
+        expect(repo.queries.last, contains('cat'));
+        expect(repo.calls, calls + 1);
+      },
+    );
+
     test('safe mode shows safe posts blurred and restores the settings '
         'from before', () async {
       final store = MemoryStore()

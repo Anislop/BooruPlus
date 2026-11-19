@@ -10,6 +10,7 @@ import 'package:booruplus/ui/home.dart';
 import 'package:booruplus/ui/media_image.dart';
 import 'package:booruplus/ui/media_viewer.dart';
 import 'package:booruplus/ui/multi_search.dart';
+import 'package:booruplus/ui/recently_viewed.dart';
 import 'package:booruplus/ui/onboarding.dart';
 import 'package:booruplus/ui/search_guide.dart';
 import 'package:booruplus/ui/site_catalog.dart';
@@ -1028,9 +1029,7 @@ void main() {
     state.dispose();
   });
 
-  testWidgets('holding a feed post selects it for batch hide', (
-    tester,
-  ) async {
+  testWidgets('holding a feed post selects it for batch hide', (tester) async {
     final state = AppState(
       repository: FakeRepo([
         <Map<String, dynamic>>[
@@ -1893,9 +1892,110 @@ void main() {
     expect(find.byType(MediaViewer), findsNothing);
     expect(find.widgetWithText(InputChip, 'red_sky'), findsOneWidget);
     expect(find.widgetWithText(InputChip, 'blue_sky'), findsNothing);
+    expect(state.multiSearchHistory, [
+      ['red_sky'],
+      ['blue_sky'],
+    ]);
+
+    // Back returns to the earlier search and the post the tag came from.
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaViewer), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaViewer), findsNothing);
+    expect(find.byType(MultiSearchScreen), findsOneWidget);
+    expect(find.widgetWithText(InputChip, 'blue_sky'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, 'red_sky'), findsNothing);
+    expect(find.byType(MediaTile), findsWidgets);
 
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('search on all sites history searches a recent query again', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo([
+        [post(1)],
+      ]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    await state.recordMultiSearch(['cat']);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MultiSearchScreen(state: state, initialTags: const ['blue_sky']),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('multi_search_history_button')));
+    await tester.pumpAndSettle();
+    final history = find.byKey(const ValueKey('multi_search_history'));
+    expect(
+      find.descendant(of: history, matching: find.text('blue_sky')),
+      findsOneWidget,
+    );
+    await tester.tap(find.descendant(of: history, matching: find.text('cat')));
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(InputChip, 'cat'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, 'blue_sky'), findsNothing);
+    expect(state.multiSearchHistory.first, ['cat']);
+
+    // Back returns to the search before it.
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(InputChip, 'blue_sky'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 5));
+    state.dispose();
+  });
+
+  testWidgets('recently viewed lists opened posts and removes one held', (
+    tester,
+  ) async {
+    final state = AppState(
+      repository: FakeRepo(const [[]]),
+      store: MemoryStore()..selected = Board.danbooru,
+    );
+    await state.initialize();
+    final media = MediaPost.fromMap(post(7, tags: ['blue_sky']));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: MediaViewer(post: media, board: Board.danbooru, state: state),
+      ),
+    );
+    await tester.pump();
+    expect(state.recentlyViewed.single.post.id, 7);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: appTheme,
+        home: RecentlyViewedScreen(state: state),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaTile), findsOneWidget);
+
+    await tester.longPress(find.byType(MediaTile));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('recently_viewed_remove')));
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaTile), findsNothing);
+    expect(state.recentlyViewed, isEmpty);
+    expect(
+      find.text('Posts you open from any website appear here.'),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox());
     state.dispose();
   });
 

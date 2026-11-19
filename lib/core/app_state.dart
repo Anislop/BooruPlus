@@ -130,6 +130,8 @@ class AppState extends ChangeNotifier {
   int? _sankakuSignedInTagLimit;
   String? _notice;
   List<SavedPost> _favoritePosts = const [];
+  // Posts opened in the viewer, newest first (Recently viewed).
+  List<SavedPost> _viewed = const [];
   List<SavedPost> _hiddenPosts = const [];
   // Identity indexes keep favorite/hidden checks O(1) per tile and per
   // incoming post instead of scanning every saved post.
@@ -277,6 +279,10 @@ class AppState extends ChangeNotifier {
       List.unmodifiable(_settings.savedQueriesFor(_board));
   List<List<String>> get recentSearches =>
       List.unmodifiable(_settings.recentSearches);
+
+  /// Recent searches made in Search all sites, newest first.
+  List<List<String>> get multiSearchHistory =>
+      List.unmodifiable(_settings.multiSearchHistory);
   List<Rating> get selectedRatings =>
       List.unmodifiable(_settings.selectedRatings);
   Map<String, int> get searchedTagCounts =>
@@ -297,6 +303,79 @@ class AppState extends ChangeNotifier {
       _savedIn(_favoriteIds, post, board);
   bool isHidden(MediaPost post, {Board? board}) =>
       _savedIn(_hiddenIds, post, board);
+
+  /// Posts opened in the viewer, newest first, at most
+  /// [AppSettings.recentlyViewedLimit]. Hidden posts are left out.
+  List<SavedPost> get recentlyViewed => List.unmodifiable(
+    _viewed
+        .where(
+          (saved) =>
+              (!_policy.restricted || _policy.allowsSaved(saved)) &&
+              !isHidden(saved.post, board: saved.board),
+        )
+        .take(_settings.recentlyViewedLimit),
+  );
+
+  /// Puts [post] at the top of Recently viewed. Nothing is kept in
+  /// incognito. The returned future completes once the list is saved.
+  Future<void> recordViewed(MediaPost post, {Board? board}) {
+    board ??= _board;
+    if (board == null || _settings.incognito) return Future<void>.value();
+    final saved = SavedPost(board: board, post: post).sanitized();
+    if (_policy.restricted && !_policy.allowsSaved(saved)) {
+      return Future<void>.value();
+    }
+    final same = _same(post, board);
+    _viewed = List.unmodifiable(
+      [
+        saved,
+        ..._viewed.where((other) => !same(other)),
+      ].take(_settings.recentlyViewedLimit),
+    );
+    notifyListeners();
+    return _writeViewed();
+  }
+
+  Future<void> removeRecentlyViewed(Iterable<SavedPost> posts) {
+    final keys = {for (final saved in posts) saved.identity};
+    final next = _viewed.where((saved) => !keys.contains(saved.identity));
+    if (next.length == _viewed.length) return Future<void>.value();
+    _viewed = List.unmodifiable(next);
+    notifyListeners();
+    return _writeViewed();
+  }
+
+  Future<void> clearRecentlyViewed() {
+    if (_viewed.isEmpty) return Future<void>.value();
+    _viewed = const [];
+    notifyListeners();
+    return _writeViewed();
+  }
+
+  // Recently viewed is saved one write at a time; changes made during a
+  // write are saved together once it finishes.
+  Future<void>? _viewedSaving;
+  bool _viewedChanged = false;
+
+  Future<void> _writeViewed() {
+    _viewedChanged = true;
+    return _viewedSaving ??= _saveViewed();
+  }
+
+  Future<void> _saveViewed() async {
+    try {
+      while (_viewedChanged) {
+        _viewedChanged = false;
+        try {
+          await _postStore.saveViewed(_viewed);
+        } catch (_) {
+          // Recently viewed is a convenience; a failed write is not retried.
+        }
+      }
+    } finally {
+      _viewedSaving = null;
+    }
+  }
 
   /// Whether [post] is among [ids], including by its pre-ID identity.
   bool _savedIn(Set<String> ids, MediaPost post, Board? board) {
@@ -1710,6 +1789,15 @@ class AppState extends ChangeNotifier {
       } catch (_) {
         // History is optional; a damaged list starts empty.
       }
+      try {
+        _viewed = List.unmodifiable(
+          (await _postStore.loadViewed())
+              .map((saved) => saved.sanitized())
+              .take(AppSettings.maxRecentlyViewedLimit),
+        );
+      } catch (_) {
+        // Recently viewed is optional too.
+      }
       List<PendingDownload> queued = const [];
       try {
         queued = await _postStore.loadDownloadQueue();
@@ -2029,6 +2117,46 @@ class AppState extends ChangeNotifier {
           .map((entry) => entry.key)
           .toList(growable: false);
 
+  /// Adds [value] to the top of the Search all sites history. Nothing is
+  /// kept in incognito.
+  Future<void> recordMultiSearch(List<String> value) {
+    if (_settings.incognito) return Future<void>.value();
+    final query = value
+        .map(_normalize)
+        .where((tag) => tag.isNotEmpty)
+        .toSet()
+        .toList();
+    if (query.isEmpty) return Future<void>.value();
+    return _setMultiSearchHistory(
+      () => [query, ..._settings.multiSearchHistory],
+    );
+  }
+
+  Future<void> removeMultiSearch(List<String> value) {
+    final key = _queryKey(value);
+    return _setMultiSearchHistory(
+      () => _settings.multiSearchHistory
+          .where((query) => _queryKey(query) != key)
+          .toList(),
+    );
+  }
+
+  Future<void> clearMultiSearchHistory() =>
+      _setMultiSearchHistory(() => const []);
+
+  Future<void> _setMultiSearchHistory(List<List<String>> Function() next) =>
+      _enqueueSettingsUpdate(() async {
+        final normalized = _settings.copyWith(multiSearchHistory: next());
+        if (normalized == _settings) return;
+        try {
+          await _store.saveSettings(normalized);
+        } catch (_) {
+          return;
+        }
+        _settings = normalized;
+        notifyListeners();
+      });
+
   Future<void> removeRecentSearch(List<String> value) async {
     final key = value
         .map(_normalize)
@@ -2192,6 +2320,7 @@ class AppState extends ChangeNotifier {
             safeModeBlurExplicit: _settings.safeModeBlurExplicit,
             safeModeBlurQuestionable: _settings.safeModeBlurQuestionable,
             pinnedSearches: _settings.pinnedSearches,
+            multiSearchHistory: _settings.multiSearchHistory,
           )
           .normalized();
       await _store.saveSettings(normalized);
@@ -3133,6 +3262,51 @@ class MultiSiteSearch extends ChangeNotifier {
     }
   }
 
+  /// The search as it is now, so back can return to it without searching
+  /// again; null before the first search.
+  MultiSiteSearchSnapshot? snapshot() => _tags.isEmpty
+      ? null
+      : MultiSiteSearchSnapshot._(
+          tags: _tags,
+          boards: _boards,
+          results: _results,
+          pages: Map.unmodifiable(_pages),
+          exhausted: Set.unmodifiable(_exhausted),
+          errors: Map.unmodifiable(_errors),
+        );
+
+  /// Returns to [snapshot]: newer responses are discarded, the websites
+  /// switched on now ([boards]) apply, and the local filters run again,
+  /// since settings or hidden posts may have changed meanwhile.
+  Future<void> restore(
+    MultiSiteSearchSnapshot snapshot,
+    Iterable<Board> boards,
+  ) async {
+    _generation++;
+    _tags = snapshot.tags;
+    _boards = snapshot.boards;
+    _results = List.unmodifiable(
+      snapshot.results.where(
+        (saved) => _app._allowedOn(saved.post, saved.board, _tags),
+      ),
+    );
+    _visible = null;
+    _pages
+      ..clear()
+      ..addAll(snapshot.pages);
+    _exhausted
+      ..clear()
+      ..addAll(snapshot.exhausted);
+    _errors
+      ..clear()
+      ..addAll(snapshot.errors);
+    _seen
+      ..clear()
+      ..addAll(snapshot.results.map((saved) => saved.identity));
+    _loading = false;
+    await setEnabled(boards);
+  }
+
   void _notify() {
     if (!_disposed) notifyListeners();
   }
@@ -3143,6 +3317,24 @@ class MultiSiteSearch extends ChangeNotifier {
     _generation++;
     super.dispose();
   }
+}
+
+/// A [MultiSiteSearch] as it was, from [MultiSiteSearch.snapshot].
+class MultiSiteSearchSnapshot {
+  const MultiSiteSearchSnapshot._({
+    required this.tags,
+    required this.boards,
+    required this.results,
+    required this.pages,
+    required this.exhausted,
+    required this.errors,
+  });
+  final List<String> tags;
+  final List<Board> boards;
+  final List<SavedPost> results;
+  final Map<Board, int> pages;
+  final Set<Board> exhausted;
+  final Map<Board, String> errors;
 }
 
 /// Which booruShorts tab a [ShortsFeed] fills.
